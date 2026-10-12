@@ -1,12 +1,18 @@
-# syntax=docker/dockerfile:1
 # isoharness: the API, ea_irms and LibreOffice in one image.
 #
 #   docker build -t isoharness .
 #   docker run -p 8000:8000 isoharness        # then open http://localhost:8000
 #
-# Behind a proxy that inspects TLS, pass its CA for the build only (it is not
-# kept in the image):  docker build --secret id=build_ca,src=ca.pem .
+# The file uses no BuildKit features, because the docker step of a Cloud Build
+# trigger builds without BuildKit. Behind a proxy that inspects TLS, pass the
+# proxy's CA certificate as a build argument:
+#   docker build --build-arg BUILD_CA="$(cat proxy-ca.pem)" -t isoharness .
+# apt and pip then trust it alongside the system's certificates while they
+# download. The copy they read is deleted in the same step, but Docker keeps
+# build arguments in the image's history.
 FROM python:3.13-slim-trixie
+
+ARG BUILD_CA=""
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -15,22 +21,28 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 # LibreOffice Calc without its GUI computes the workbook's formulas
 # (ea_irms.workbook.bake_values). Liberation fonts have Arial's metrics.
-RUN --mount=type=secret,id=build_ca,required=false,mode=0444 \
-    set -eu; \
+RUN set -eu; \
     sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources; \
-    ca=""; if [ -s /run/secrets/build_ca ]; then ca="-o Acquire::https::CAInfo=/run/secrets/build_ca"; fi; \
+    ca=""; \
+    if [ -n "$BUILD_CA" ]; then \
+        { cat /etc/ssl/certs/ca-certificates.crt; printf '%s\n' "$BUILD_CA"; } > /tmp/build_ca.pem; \
+        ca="-o Acquire::https::CAInfo=/tmp/build_ca.pem"; \
+    fi; \
     apt-get $ca update; \
     apt-get $ca install -y --no-install-recommends libreoffice-calc-nogui fonts-liberation; \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* /tmp/build_ca.pem
 
 RUN useradd --create-home --uid 10001 app
 WORKDIR /srv/isoharness
 
 COPY requirements.txt .
-RUN --mount=type=secret,id=build_ca,required=false,mode=0444 \
-    set -eu; \
-    if [ -s /run/secrets/build_ca ]; then export PIP_CERT=/run/secrets/build_ca; fi; \
-    pip install -r requirements.txt
+RUN set -eu; \
+    if [ -n "$BUILD_CA" ]; then \
+        { cat /etc/ssl/certs/ca-certificates.crt; printf '%s\n' "$BUILD_CA"; } > /tmp/build_ca.pem; \
+        export PIP_CERT=/tmp/build_ca.pem; \
+    fi; \
+    pip install -r requirements.txt; \
+    rm -f /tmp/build_ca.pem
 
 COPY ea_irms ./ea_irms
 COPY isoharness ./isoharness
