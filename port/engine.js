@@ -5,10 +5,18 @@
 // port to it (scripts/port_cases.py, port/test_port.js).
 //
 // runModel(D, dec) takes the "port" block of POST /api/process and the user's
-// decisions. Settings outside dec (the significance level, k, the elemental
-// gate, the reference-pulse windows) are fixed here at the package defaults.
+// decisions. The configuration's settings that act inside these steps (the
+// significance level, the monitor outlier limit, the check-standard offset, the
+// blank multiple, k, the elemental gate and the first drift position) come with
+// the block as D.settings, and each position says whether the server set its CO2
+// peak aside as a reference pulse (rej);
+// a block without them gets the package defaults. Settings that act before the
+// block is built (the standards, the reference-pulse windows, the size limits,
+// settling and carryover) are applied by the server, so a change to them goes
+// back to the server.
 //
-// The methods below are the prototype's (logic.js lines 43 to 378), unchanged.
+// The methods below are the prototype's (logic.js lines 43 to 378), changed only
+// to read D.settings in place of the fixed defaults (settings()).
 class PortEngine {
   lgam(z) {
     const g = 7, c = [0.99999999999980993, 676.5203681218851, -1259.1392167224028,
@@ -112,8 +120,20 @@ class PortEngine {
     return e / (f.sd * Math.sqrt(1 + h));
   }
 
+  // The settings runModel reads, as the API names them in D.settings; missing
+  // keys keep the package defaults, and an explicit null blankMultiple turns that
+  // flag off, as None does in ea_irms.
+  settings(D) {
+    const S = { alpha: 0.05, outlierT: 4.0, checkOffset: 0.5, blankMultiple: 3.0, k: 2.0, elemGate: 5.0,
+      firstDrift: null };
+    const given = D && D.settings ? D.settings : {};
+    for (const key of Object.keys(S)) if (key in given) S[key] = given[key];
+    return S;
+  }
+
   runModel(D, dec) {
-    const alpha = 0.05, std = D.std;
+    const S = this.settings(D);
+    const alpha = S.alpha, std = D.std;
     const P = D.pos.map((q) => {
       const s = q.si == null ? null : std[q.si];
       return Object.assign({}, q, {
@@ -122,7 +142,7 @@ class PortEngine {
       });
     });
     const role = (r) => P.filter((q) => q.role === r);
-    const M = { dec, blank: {}, lin: {}, drift: {}, cal: {}, unc: {}, elem: {}, P };
+    const M = { dec, settings: S, blank: {}, lin: {}, drift: {}, cal: {}, unc: {}, elem: {}, P };
     const E = [['n', 'aN', 'dN'], ['c', 'aC', 'dC']];
     for (const [el, ak, dk] of E) {
       const b = role('B').filter((q) => q[ak] != null);
@@ -162,7 +182,11 @@ class PortEngine {
         q[el].lin = q[el].blank == null ? null : q[el].blank - L.applied * (q[ak] - L.pivot);
       }
     }
-    const mons = role('D');
+    // Monitors before the configuration's first drift position stay out of the
+    // drift fits altogether; the elemental correction still reads every monitor.
+    const allMons = role('D'), first = S.firstDrift || 0;
+    const mons = allMons.filter((q) => q.r >= first);
+    const before = allMons.filter((q) => q.r < first).map((q) => q.r);
     for (const [el] of E) {
       const excl = new Set(el === 'n' ? dec.exclN : dec.exclC);
       const used = mons.filter((q) => !excl.has(q.r));
@@ -179,7 +203,7 @@ class PortEngine {
       const Dr = {
         row: byRow, bgd: byBgd, model, fit: f,
         pivot: pr.length ? pr.reduce((s, v) => s + v, 0) / pr.length : 0,
-        n: pr.length, excluded: [...excl].sort((a, b) => a - b), t: {},
+        n: pr.length, excluded: [...excl].sort((a, b) => a - b), t: {}, before: before.slice(),
       };
       Dr.inForce = this.applies(dec.drift, f, pr.length, alpha);
       Dr.applied = Dr.inForce ? f.slope : 0;
@@ -194,7 +218,7 @@ class PortEngine {
         const x = model === 'Row' ? q.r : q.rbgd;
         Dr.t[q.r] = this.stud(f, x, q[el].lin, !excl.has(q.r));
       }
-      Dr.outliers = mons.filter((q) => Dr.t[q.r] != null && Math.abs(Dr.t[q.r]) > 4.0 && !excl.has(q.r))
+      Dr.outliers = mons.filter((q) => Dr.t[q.r] != null && Math.abs(Dr.t[q.r]) > S.outlierT && !excl.has(q.r))
         .map((q) => q.r).sort((a, b) => a - b);
     }
     const anchors = role('A');
@@ -254,7 +278,7 @@ class PortEngine {
           const x = q[el].drift;
           if (x == null || uS == null) { q[el].u = null; q[el].U = null; continue; }
           const r = B.at(x);
-          q[el].u = r.u; q[el].U = 2 * r.u; q[el].parts = r.parts;
+          q[el].u = r.u; q[el].U = S.k * r.u; q[el].parts = r.parts;
         }
       } else {
         for (const q of P) { q[el].u = null; q[el].U = null; }
@@ -269,7 +293,7 @@ class PortEngine {
     const exE = new Set(dec.exclE);
     for (const [el, pm, ck] of [['n', 'pctNm', 'certN'], ['c', 'pctCm', 'certC']]) {
       const ms = [];
-      for (const q of mons) {
+      for (const q of allMons) {
         q['bias' + el] = null;
         const meas = q[pm], cert = q[ck];
         if (meas == null || !cert) continue;
@@ -282,7 +306,7 @@ class PortEngine {
       let inForce;
       if (dec.elem === 'Off' || ms.length < 2) inForce = false;
       else if (dec.elem === 'On') inForce = true;
-      else inForce = this.above(maxBias * 100, 5.0);
+      else inForce = this.above(maxBias * 100, S.elemGate);
       const at = (row) => {
         if (!inForce) return 1;
         if (row <= ms[0][0]) return ms[0][1];
@@ -307,8 +331,10 @@ class PortEngine {
       if (q.aN == null) fl.push('no N peak');
       else if (L.min_n && q.aN < L.min_n) fl.push('N below linearity range');
       else if (L.max_n && q.aN > L.max_n) fl.push('N above linearity range');
-      if (q.aC == null) fl.push('no C peak');
-      else if (L.min_c && q.aC < L.min_c) fl.push('C below linearity range');
+      if (q.aC == null) {
+        fl.push('no C peak');
+        if (q.rej) fl.push('CO2 peak rejected as a reference pulse');
+      } else if (L.min_c && q.aC < L.min_c) fl.push('C below linearity range');
       else if (L.max_c && q.aC > L.max_c) fl.push('C above linearity range');
       for (const [v, f, name] of [[q.n.fin, M.cal.n, 'd15N'], [q.c.fin, M.cal.c, 'd13C']]) {
         if (v != null && (q.role === 'S' || q.role === 'K') && f.accMin != null && !(f.accMin <= v && v <= f.accMax)) {
@@ -317,7 +343,7 @@ class PortEngine {
       }
       if (q.role === 'K') {
         for (const [got, acc, name] of [[q.n.fin, q.acc15, 'd15N'], [q.c.fin, q.acc13, 'd13C']]) {
-          if (got != null && acc != null && Math.abs(got - acc) > 0.5) {
+          if (got != null && acc != null && Math.abs(got - acc) > S.checkOffset) {
             fl.push('check ' + name + ' off by ' + (got - acc >= 0 ? '+' : '') + (got - acc).toFixed(2));
           }
         }
@@ -329,9 +355,9 @@ class PortEngine {
         }
         if (exE.has(q.r)) fl.push('excluded from elemental correction');
       }
-      if (q.role !== 'B') {
+      if (q.role !== 'B' && S.blankMultiple) {
         for (const [a, ab, nm] of [[q.aN, M.blank.n.area, 'N'], [q.aC, M.blank.c.area, 'C']]) {
-          if (a != null && ab > 0 && a < ab * 3) fl.push(nm + ' peak only ' + (a / ab).toFixed(1) + 'x the blank');
+          if (a != null && ab > 0 && a < ab * S.blankMultiple) fl.push(nm + ' peak only ' + (a / ab).toFixed(1) + 'x the blank');
         }
       }
       if (q.r < settled) fl.push('ran before the background settled');

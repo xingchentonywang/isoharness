@@ -1,9 +1,12 @@
 # The service plus what the tests use: the API test client, Postgres for the
 # store and isolation tests, matplotlib for the control-chart tests, pandas for
-# the configuration round-trip test.
+# the configuration round-trip test, and Playwright for the page's end-to-end
+# check (scripts/e2e_web.py; its Chromium is installed separately with
+# "python -m playwright install chromium").
 -r requirements.txt
 pytest==9.1.1
 httpx==0.28.1
 psycopg[binary]==3.3.6
 matplotlib==3.11.2
 pandas==3.0.5
+playwright==1.56.0

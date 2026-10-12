@@ -5,6 +5,11 @@ ea_irms on it, and removes the folder before the response leaves. The engine is
 the only source of the numbers; the browser's preview port is checked against
 it in continuous integration.
 
+The site itself (``web/``) is served from the same address: the page at ``/``,
+the preview port at ``/engine.js`` (``port/engine.js``, the file CI checks).
+Uploads are limited per client address (``ISOHARNESS_UPLOADS_PER_HOUR``,
+default 60; 0 turns the limit off).
+
     uvicorn isoharness.app:app --host 0.0.0.0 --port 8000
 """
 from __future__ import annotations
@@ -18,11 +23,13 @@ import shutil
 import tempfile
 import threading
 import time
+from collections import deque
 from contextlib import contextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
 
 from ea_irms.parse import ExportFormatError, parse_export
 from ea_irms.pipeline import Config, config_from_dict, config_to_dict, process
@@ -40,9 +47,59 @@ CHUNK = 1 << 16
 # One LibreOffice at a time: concurrent conversions share a user profile and fail.
 _libreoffice = threading.Lock()
 
+ROOT = Path(__file__).resolve().parents[1]
+WEB = ROOT / "web"
+PORT_ENGINE = ROOT / "port" / "engine.js"
+LIMITED = ("/api/process", "/api/workbook", "/api/results.csv")
+WINDOW_S = 3600.0
+# The page's own scripts and styles, Google Fonts, and calls back to this address.
+CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' "
+       "https://fonts.googleapis.com; font-src https://fonts.gstatic.com; "
+       "img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; "
+       "base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+
 
 def max_upload_bytes() -> int:
     return int(float(os.environ.get("ISOHARNESS_MAX_UPLOAD_MB", "10")) * 1024 * 1024)
+
+
+def uploads_per_hour() -> int:
+    return int(os.environ.get("ISOHARNESS_UPLOADS_PER_HOUR", "60"))
+
+
+class UploadLimiter:
+    """At most N limited requests per client address in any hour, counted in memory.
+
+    The count lives in one process, so it holds per container; the cap on
+    instances set at deployment bounds the rest. The address is the one uvicorn
+    reports, which behind Cloud Run's front end comes from X-Forwarded-For.
+    """
+
+    def __init__(self):
+        self._hits: dict[str, deque] = {}
+        self._lock = threading.Lock()
+
+    def reset(self):
+        with self._lock:
+            self._hits.clear()
+
+    def wait_seconds(self, key: str, limit: int, now: float | None = None) -> int | None:
+        """Count one request; None if it may proceed, else the seconds until it could."""
+        now = time.monotonic() if now is None else now
+        with self._lock:
+            hits = self._hits.setdefault(key, deque())
+            while hits and now - hits[0] >= WINDOW_S:
+                hits.popleft()
+            if len(hits) >= limit:
+                return max(1, int(WINDOW_S - (now - hits[0])) + 1)
+            hits.append(now)
+            if len(self._hits) > 10000:          # forget addresses with nothing in the window
+                for k in [k for k, v in self._hits.items() if not v or now - v[-1] >= WINDOW_S]:
+                    del self._hits[k]
+            return None
+
+
+limiter = UploadLimiter()
 
 
 app = FastAPI(
@@ -54,6 +111,34 @@ app = FastAPI(
     redoc_url=None,
     openapi_url="/api/openapi.json",
 )
+
+
+@app.middleware("http")
+async def limit_uploads(request: Request, call_next):
+    """Refuse a client address its next upload once it has made the hour's allowance."""
+    limit = uploads_per_hour()
+    if limit > 0 and request.method == "POST" and request.url.path in LIMITED:
+        key = request.client.host if request.client else "unknown"
+        wait = limiter.wait_seconds(key, limit)
+        if wait is not None:
+            minutes = max(1, round(wait / 60))
+            return JSONResponse(
+                {"detail": f"this address has sent {limit} uploads in the last hour, the most this "
+                           f"service takes; try again in about {minutes} minute"
+                           f"{'' if minutes == 1 else 's'}"},
+                status_code=429, headers={"Retry-After": str(wait)})
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    if not request.url.path.startswith("/api/"):
+        # The API's own docs page loads its scripts from a CDN, so it keeps no policy.
+        response.headers.setdefault("Content-Security-Policy", CSP)
+    return response
 
 
 @app.middleware("http")
@@ -217,6 +302,25 @@ def results(file: UploadFile = File(...), config: str | None = Form(None)):
         "Content-Disposition": f'attachment; filename="{name}"'})
 
 
-@app.get("/")
-def root():
-    return {"service": "isoharness", "version": __version__, "docs": "/api/docs"}
+@app.get("/engine.js", include_in_schema=False)
+def preview_port():
+    """The preview port the page runs, the same file continuous integration checks."""
+    return FileResponse(PORT_ENGINE, media_type="text/javascript",
+                        headers={"Cache-Control": "no-cache"})
+
+
+class _Site(StaticFiles):
+    """The page's files, revalidated on each load so a new release shows at once."""
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers.setdefault("Cache-Control", "no-cache")
+        return response
+
+
+if (WEB / "index.html").is_file():
+    app.mount("/", _Site(directory=WEB, html=True), name="site")
+else:
+    @app.get("/")
+    def root():
+        return {"service": "isoharness", "version": __version__, "docs": "/api/docs"}

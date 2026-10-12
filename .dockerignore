@@ -2,6 +2,8 @@
 !requirements.txt
 !ea_irms/**
 !isoharness/**
+!web/**
+!port/engine.js
 !tests/data/20260915_raw.csv
 **/__pycache__
 **/*.pyc

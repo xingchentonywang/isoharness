@@ -1,5 +1,7 @@
 // Hold the preview port to the engine: every value, flag list and fit result on
-// every decision set in the cases file must agree within 1e-9 relative.
+// every decision set in the cases file must agree within 1e-9 relative. A case
+// with "settings" overrides the block's settings, as port_cases.py did for the
+// engine.
 //
 //   node port/test_port.js PORT_INPUT.json CASES.json [ENGINE.js]
 //
@@ -33,7 +35,8 @@ for (const [ci, C] of cases.entries()) {
   const c = C.case;
   const dec = { blank: c.blank, linN: c.linN, linC: c.linC, drift: c.drift, model: c.model,
     exclN: c.exclN, exclC: c.exclC, elem: c.elem, exclE: c.exclE, uN: c.uN, uC: c.uC };
-  const M = E.runModel.call(E, D, dec);
+  const DC = c.settings ? Object.assign({}, D, { settings: Object.assign({}, D.settings, c.settings) }) : D;
+  const M = E.runModel.call(E, DC, dec);
   const byRow = new Map(M.P.map((q) => [q.r, q]));
   for (const row of C.rows) {
     const q = byRow.get(row[0]);
@@ -60,6 +63,7 @@ for (const [ci, C] of cases.entries()) {
   for (const [el, k] of [['n', 'elemN'], ['c', 'elemC']]) { chk(M.elem[el].inForce, F[k][0], k); chk(M.elem[el].maxBias, F[k][1], k); chk(M.elem[el].n, F[k][2], k); }
 }
 
-console.log(`${D.file}: cases ${cases.length}, comparisons ${comps}, value mismatches ${mism}, ` +
+const nSet = cases.filter((C) => C.case.settings).length;
+console.log(`${D.file}: cases ${cases.length} (${nSet} with non-default settings), comparisons ${comps}, value mismatches ${mism}, ` +
   `flag-list mismatches ${flagMism}, fit mismatches ${fitMism}, worst relative difference ${worst.toExponential(2)}`);
 process.exit(mism || flagMism || fitMism ? 1 : 0);

@@ -2,7 +2,7 @@
 # isoharness: the API, ea_irms and LibreOffice in one image.
 #
 #   docker build -t isoharness .
-#   docker run -p 8000:8000 isoharness        # then open http://localhost:8000/api/docs
+#   docker run -p 8000:8000 isoharness        # then open http://localhost:8000
 #
 # Behind a proxy that inspects TLS, pass its CA for the build only (it is not
 # kept in the image):  docker build --secret id=build_ca,src=ca.pem .
@@ -34,6 +34,9 @@ RUN --mount=type=secret,id=build_ca,required=false,mode=0444 \
 
 COPY ea_irms ./ea_irms
 COPY isoharness ./isoharness
+# The site: the page's files and the preview port it runs (the file CI checks).
+COPY web ./web
+COPY port/engine.js ./port/engine.js
 COPY tests/data/20260915_raw.csv ./warmup/20260915_raw.csv
 
 USER app

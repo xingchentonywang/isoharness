@@ -1,9 +1,10 @@
 """Turn ea_irms results into JSON and CSV for the API.
 
 ``port_input`` builds the block the browser's preview port (``port/engine.js``)
-recomputes from: each position's inputs at full precision and the results that
-no user choice changes. It follows the prototype's extract script field for
-field, so the port sees the same numbers it was checked against.
+recomputes from: each position's inputs at full precision, the results that
+no user choice changes, and the configuration's settings that act inside the
+port's steps. It follows the prototype's extract script field for field, so the
+port sees the same numbers it was checked against.
 """
 from __future__ import annotations
 
@@ -71,6 +72,7 @@ def port_input(positions, fits, config: Config, file_name: str, size: int,
             "ugN": p.ug_n, "ugC": p.ug_c,
             "carry": bool(p.carry_flag), "rise": _r(p.carry_rise, 2), "over": bool(p.oversized),
             "set": _r(p.settling_fraction, 4),
+            "rej": bool(getattr(p, "c_rejected", False)),
         })
     F = fits
     data = {
@@ -96,6 +98,12 @@ def port_input(positions, fits, config: Config, file_name: str, size: int,
         "pulseCheck": {"active": F["ref_pulse_check"]["active"],
                        "filtered": F["ref_pulse_check"]["filtered"]},
         "atomic": {"c": ATOMIC_C, "n": ATOMIC_N},
+        # Read by port/engine.js (settings()); the names are the port's.
+        "settings": {"alpha": config.significance_level, "outlierT": config.monitor_outlier_t,
+                     "checkOffset": config.check_offset_permil,
+                     "blankMultiple": config.min_blank_multiple, "k": config.coverage_k,
+                     "elemGate": config.elemental_threshold_pct,
+                     "firstDrift": config.first_drift_position},
     }
     return clean(data)
 

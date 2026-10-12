@@ -182,3 +182,54 @@ def test_refuses_more_standards_than_the_workbook_holds():
     cfg["standards"] = cfg["standards"] + cfg["standards"][:1] * 5
     r = post("/api/workbook", config=json.dumps(cfg), values="false")
     assert r.status_code == 422 and "standards" in r.json()["detail"]
+
+
+def test_port_block_carries_the_settings_the_port_reads():
+    cfg = config_to_dict(Config(significance_level=0.1, monitor_outlier_t=3.0, check_offset_permil=0.2,
+                                min_blank_multiple=None, coverage_k=3.0, elemental_threshold_pct=2.0,
+                                first_drift_position=20))
+    r = post("/api/process", config=json.dumps(cfg))
+    assert r.status_code == 200, r.text
+    port = r.json()["port"]
+    assert port["settings"] == {"alpha": 0.1, "outlierT": 3.0, "checkOffset": 0.2, "blankMultiple": None,
+                                "k": 3.0, "elemGate": 2.0, "firstDrift": 20}
+    # A full export: the reference-pulse check sets no CO2 peak aside.
+    assert [q["rej"] for q in port["pos"]] == [False] * len(port["pos"])
+
+
+def test_preview_port_is_the_checked_file():
+    r = client.get("/engine.js")
+    assert r.status_code == 200
+    assert r.content == (Path(__file__).resolve().parents[1] / "port" / "engine.js").read_bytes()
+    assert r.headers["content-type"].startswith("text/javascript")
+    assert "script-src 'self'" in r.headers["content-security-policy"]
+    assert r.headers["x-content-type-options"] == "nosniff"
+    assert "content-security-policy" not in client.get("/api/health").headers
+
+
+def test_upload_limit_per_address(monkeypatch):
+    from isoharness.app import limiter
+    monkeypatch.setenv("ISOHARNESS_UPLOADS_PER_HOUR", "2")
+    limiter.reset()
+    try:
+        assert post("/api/results.csv").status_code == 200
+        assert post("/api/process").status_code == 200
+        r = post("/api/process")
+        assert r.status_code == 429
+        assert "2 uploads in the last hour" in r.json()["detail"]
+        assert int(r.headers["retry-after"]) > 0
+        assert client.get("/api/health").status_code == 200      # only uploads count
+        assert limiter.wait_seconds("another address", 2) is None
+    finally:
+        limiter.reset()
+
+
+def test_upload_limiter_window():
+    from isoharness.app import UploadLimiter
+    lim = UploadLimiter()
+    assert lim.wait_seconds("a", 2, now=0.0) is None
+    assert lim.wait_seconds("a", 2, now=10.0) is None
+    assert lim.wait_seconds("a", 2, now=20.0) == 3581      # the first hit leaves the hour at 3600
+    assert lim.wait_seconds("a", 2, now=3600.0) is None     # it has left
+    assert lim.wait_seconds("a", 2, now=3601.0) == 10       # the one at 10.0 leaves at 3610
+
