@@ -55,8 +55,34 @@ jobs:
         with:
           node-version: "22"
       - run: pip install -r requirements.txt
-      - run: python scripts/port_cases.py tests/data/20260915_raw.csv --out build/port
-      - run: node port/test_port.js build/port/port_input.json build/port/cases.json
+      - name: The 2026-09-15 test run
+        run: |
+          python scripts/port_cases.py tests/data/20260915_raw.csv --out build/port
+          node port/test_port.js build/port/port_input.json build/port/cases.json
+      - name: With a check standard
+        run: |
+          python scripts/port_cases.py tests/data/20260915_raw.csv --config tests/data/config_check_standard.json --out build/port_check
+          node port/test_port.js build/port_check/port_input.json build/port_check/cases.json
+      - name: As a filtered export
+        run: |
+          python scripts/port_cases.py tests/data/20260915_raw.csv --as-filtered --out build/port_filtered
+          node port/test_port.js build/port_filtered/port_input.json build/port_filtered/cases.json
+
+  page:
+    name: Page in a browser
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Install LibreOffice
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libreoffice-calc-nogui
+      - run: pip install -r requirements-dev.txt
+      - run: python -m playwright install --with-deps chromium
+      - run: python scripts/e2e_web.py
 
   image:
     name: Container image
@@ -70,5 +96,9 @@ jobs:
       - run: docker run -d --name isoharness -p 8000:8000 isoharness:ci
       - run: pip install openpyxl==3.1.5
       - run: python scripts/smoke.py http://localhost:8000 tests/data/20260915_raw.csv
+      - name: The page and the preview port are in the image
+        run: |
+          curl -fsS http://localhost:8000/ | grep -q "<title>isoharness</title>"
+          curl -fsS http://localhost:8000/engine.js | cmp - port/engine.js
       - if: failure()
         run: docker logs isoharness
