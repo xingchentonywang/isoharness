@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Engine and API tests
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: ea_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      EA_TEST_SUPER_DSN: postgresql://postgres@localhost:5432/ea_test
+      EA_TEST_APP_DSN: postgresql://ea_login@localhost:5432/ea_test
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Install LibreOffice and the Postgres client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libreoffice-calc-nogui postgresql-client
+      - run: pip install -r requirements-dev.txt
+      - name: Run the tests (none may be skipped)
+        run: |
+          set -o pipefail
+          python -m pytest -q -rs | tee pytest.log
+          ! grep -q " skipped" pytest.log
+
+  port:
+    name: Preview port against the engine
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - run: pip install -r requirements.txt
+      - run: python scripts/port_cases.py tests/data/20260915_raw.csv --out build/port
+      - run: node port/test_port.js build/port/port_input.json build/port/cases.json
+
+  image:
+    name: Container image
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - run: docker build -t isoharness:ci .
+      - run: docker run -d --name isoharness -p 8000:8000 isoharness:ci
+      - run: pip install openpyxl==3.1.5
+      - run: python scripts/smoke.py http://localhost:8000 tests/data/20260915_raw.csv
+      - if: failure()
+        run: docker logs isoharness
