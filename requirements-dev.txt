@@ -1,0 +1,7 @@
+# The service plus what the tests use: the API test client, Postgres for the
+# store and isolation tests, matplotlib for the control-chart tests.
+-r requirements.txt
+pytest==9.1.1
+httpx==0.28.1
+psycopg[binary]==3.3.6
+matplotlib==3.11.2

@@ -1,0 +1,7 @@
+**
+!requirements.txt
+!ea_irms/**
+!isoharness/**
+!tests/data/20260915_raw.csv
+**/__pycache__
+**/*.pyc

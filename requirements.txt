@@ -1,0 +1,7 @@
+# What the service needs to run. Exact versions, so a rebuilt image computes
+# with the same libraries as the one that was checked.
+fastapi==0.143.0
+uvicorn==0.52.4
+python-multipart==0.0.32
+openpyxl==3.1.5
+xlrd==2.0.2

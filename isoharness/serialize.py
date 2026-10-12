@@ -1,0 +1,126 @@
+"""Turn ea_irms results into JSON and CSV for the API.
+
+``port_input`` builds the block the browser's preview port (``port/engine.js``)
+recomputes from: each position's inputs at full precision and the results that
+no user choice changes. It follows the prototype's extract script field for
+field, so the port sees the same numbers it was checked against.
+"""
+from __future__ import annotations
+
+import csv
+import io
+import math
+from dataclasses import fields
+
+from ea_irms.parse import Position
+from ea_irms.pipeline import ATOMIC_C, ATOMIC_N, Config
+from ea_irms.workbook import VERSION
+
+ROLE_CODES = {"Sample": "S", "Anchor": "A", "Check": "K", "Drift": "D", "Linearity": "L",
+              "Blank": "B", "Exclude": "X"}
+
+
+def clean(value):
+    """A JSON-safe copy: NaN and infinities become null, tuples and sets lists."""
+    if value is None or isinstance(value, (bool, str, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {str(k): clean(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [clean(v) for v in value]
+    if isinstance(value, (set, frozenset)):
+        items = [clean(v) for v in value]
+        try:
+            return sorted(items)
+        except TypeError:
+            return items
+    return str(value)
+
+
+def _r(v, d=6):
+    return None if v is None else round(v, d)
+
+
+def _fit(f, keys=("slope", "intercept", "r2", "sd", "n", "se", "t", "p", "df", "mean_x", "sxx", "sse")):
+    if f is None:
+        return None
+    return {k: (_r(f[k], 10) if isinstance(f.get(k), float) else f.get(k)) for k in keys if k in f}
+
+
+def position_record(p: Position) -> dict:
+    """Every attribute the engine set on a position, inputs first."""
+    names = [f.name for f in fields(p)]
+    names += [k for k in vars(p) if k not in names]
+    return {k: clean(getattr(p, k)) for k in names}
+
+
+def port_input(positions, fits, config: Config, file_name: str, size: int,
+               run_date: str | None = None) -> dict:
+    """The block the browser port recomputes from (the prototype's ``demo_data`` form)."""
+    rows = []
+    for p in positions:
+        rows.append({
+            "r": p.row, "id": p.identifier, "role": ROLE_CODES[p.role], "si": p.std_index,
+            "amt": p.amount,
+            "aN": p.area_n, "dN": p.d15n, "aC": p.area_c, "dC": p.d13c,
+            "amplN": p.ampl_n, "amplC": p.ampl_c,
+            "bgd": p.bgd_n, "rbgd": p.ref_bgd_n,
+            "pN": p.ref_pulse_d15n, "pC": p.ref_pulse_d13c,
+            "ugN": p.ug_n, "ugC": p.ug_c,
+            "carry": bool(p.carry_flag), "rise": _r(p.carry_rise, 2), "over": bool(p.oversized),
+            "set": _r(p.settling_fraction, 4),
+        })
+    F = fits
+    data = {
+        "version": VERSION,
+        "file": file_name, "bytes": size, "runDate": run_date,
+        "std": [list(s) for s in config.standards],
+        "pos": rows,
+        "k": {"n": _fit(F["k_n"], ("slope", "intercept", "r2", "sd", "n")),
+              "c": _fit(F["k_c"], ("slope", "intercept", "r2", "sd", "n"))},
+        "limits": {k: _r(v, 4) for k, v in F["size_limits"].items()},
+        "carry": {"threshold": F["carryover"]["threshold"], "oversized": F["carryover"]["oversized"],
+                  "flagged": F["carryover"]["flagged"], "maxRise": _r(F["carryover"]["max_rise"], 2)},
+        "settle": {k: _r(F["settling"][k], 4)
+                   for k in ("floor", "excess", "settled_from", "level", "excess_level")},
+        "refgas": {el: {"n": F[f"ref_gas_{el}"]["n"], "mean": _r(F[f"ref_gas_{el}"]["mean"], 5),
+                        "sd": _r(F[f"ref_gas_{el}"]["sd"], 5), "range": _r(F[f"ref_gas_{el}"]["range"], 4),
+                        "fit": _fit(F[f"ref_gas_{el}"]["fit"], ("slope", "intercept", "p", "n")),
+                        "trend": F[f"ref_gas_{el}"]["trend"]} for el in ("n", "c")},
+        "monBgd": {"n": F["monitor_bgd"]["n"], "min": F["monitor_bgd"]["min"],
+                   "max": F["monitor_bgd"]["max"],
+                   "fit": _fit(F["monitor_bgd"]["fit"], ("slope", "intercept", "p", "n")),
+                   "trend": F["monitor_bgd"]["trend"]},
+        "pulseCheck": {"active": F["ref_pulse_check"]["active"],
+                       "filtered": F["ref_pulse_check"]["filtered"]},
+        "atomic": {"c": ATOMIC_C, "n": ATOMIC_N},
+    }
+    return clean(data)
+
+
+def results_csv(positions, config: Config) -> str:
+    """The workbook's Results sheet as CSV, at full precision, same columns and order."""
+    k = f"{config.coverage_k:.1f}"
+    header = ["Row", "Identifier", "Type", "Mass (mg)", "%C", "%N", "C:N molar", "C:N mass",
+              "d13C (permil)", "d15N (permil)", "Flags", "u(d13C)", f"U(d13C), k={k}",
+              "u(d15N)", f"U(d15N), k={k}", "Elemental drift factor N",
+              "Elemental drift factor C", "%C as measured", "%N as measured"]
+    attrs = ["row", "identifier", "role", "amount", "pct_c_reported", "pct_n_reported",
+             "cn_molar_reported", "cn_mass_reported", "d13c_final", "d15n_final", None,
+             "u_d13c", "U_d13c", "u_d15n", "U_d15n", "elem_factor_n", "elem_factor_c",
+             "pct_c_measured", "pct_n_measured"]
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\n")
+    w.writerow(header)
+    for p in positions:
+        row = []
+        for a in attrs:
+            if a is None:
+                row.append("; ".join(p.flags))
+                continue
+            v = clean(getattr(p, a, None))
+            row.append("" if v is None else (repr(v) if isinstance(v, float) else v))
+        w.writerow(row)
+    return buf.getvalue()

@@ -1,0 +1,4 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+# The test run exactly as the instrument exported it, line endings included
+tests/data/** -text
