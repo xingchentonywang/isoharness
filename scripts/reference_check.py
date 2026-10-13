@@ -21,7 +21,10 @@ read from the delivered workbook's Setup sheet, and checks three things:
 2. Engine. /api/process returns what ea_irms returns when called directly here,
    value for value (only when ea_irms imports).
 3. Delivered. The workbook equals the delivered one in every cell: formulas and
-   text exactly, computed numbers to 1e-9 relative.
+   text exactly, computed numbers to 1e-9 relative. A workbook delivered by an
+   earlier ea_irms version differs by design where that version changed the
+   layout (1.4.3 moved the Results columns and added the uncertainty of %N, %C
+   and C:N), so compare against workbooks built by the same version.
 
 Exits 1 on any mismatch.
 """
@@ -54,8 +57,12 @@ WORK_BY_HEADER = {"elem_bias_n": "elem bias N", "elem_bias_c": "elem bias C",
                   "pct_n_reported": "%N corrected", "pct_c_reported": "%C corrected",
                   "cn_molar_reported": "C:N molar corrected", "cn_mass_reported": "C:N mass corrected",
                   "pulse_ampl_c": "pulse ampl", "ampl_c": "Ampl 44"}
-RESULTS = {"pct_c_reported": 5, "pct_n_reported": 6, "cn_molar_reported": 7, "cn_mass_reported": 8,
-           "elem_factor_n": 16, "elem_factor_c": 17, "pct_c_measured": 18, "pct_n_measured": 19}
+# Results columns of ea_irms 1.4.3: each value followed by its U, Flags in Q, then the u columns.
+RESULTS = {"pct_c_reported": 5, "U_pct_c": 6, "pct_n_reported": 7, "U_pct_n": 8, "cn_molar_reported": 9,
+           "U_cn_molar": 10, "cn_mass_reported": 11, "U_cn_mass": 12, "u_pct_c": 18, "u_pct_n": 19,
+           "u_cn_molar": 20, "u_cn_mass": 21, "elem_factor_n": 24, "elem_factor_c": 25,
+           "pct_c_measured": 26, "pct_n_measured": 27}
+FLAGS_COL = "Q"
 FITS = {"B20": ("lin_n", "applied"), "B95": ("lin_n", "fit", "p"), "B96": ("lin_n", "in_force"),
         "B28": ("lin_c", "applied"), "B102": ("lin_c", "fit", "p"), "B103": ("lin_c", "in_force"),
         "B39": ("drift_n", "applied"), "B114": ("drift_n", "fit", "p"), "B115": ("drift_n", "in_force"),
@@ -139,7 +146,7 @@ def check_values(body, wb):
             n += 1
             if (mine is None) != (theirs is None) or (mine is not None and not near(mine, theirs)):
                 bad.append(("Results", attr, p["row"], mine, theirs))
-        text = rs[f"K{4 + p['row']}"].value or ""
+        text = rs[f"{FLAGS_COL}{4 + p['row']}"].value or ""
         n += 1
         if {t.strip() for t in text.split(";") if t.strip()} != set(p["flags"]):
             bad.append(("flags", p["row"], text, p["flags"]))

@@ -20,7 +20,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 from .parse import _read_rows
 from .pipeline import DEFAULT_STANDARDS, MAX_STANDARDS, MIN_OUTLIER_MONITORS, Config
 
-VERSION = "1.4.2"
+VERSION = "1.4.3"
 NSTD = MAX_STANDARDS      # rows in the Setup standards table (16 from 1.4.2, 13 before)
 
 
@@ -201,6 +201,18 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     r = rd(r, 'Elemental content comes from a regression of peak area on micrograms of C or N across every standard '
               'with both a known mass and a known composition. The intercept of that line is the area blank and is '
               'subtracted, so the k-factor is not forced through the origin.')
+    r = rd(r, 'From 1.4.3 Results also carries u and U for %N, %C and C:N, each from five terms combined in '
+              'quadrature (Fits row 300 onwards): the instrument\'s repeatability, from the drift monitors\' measured '
+              'over certified ratios by successive differences in position, less the part their own weighing '
+              'explains; the position\'s weighing, the balance\'s u in Setup B33 over its mass; the calibration, the '
+              'interpolated elemental drift factor when that correction is in force and the k-factor line at the '
+              'position\'s micrograms when it is not; the certificate uncertainty of the material that sets the scale, '
+              'from Setup columns J and K; and trueness, the anchors\' RMS deviation from their certified values with '
+              'their certificate uncertainty, as in the Nordtest TR 537 handbook. C:N takes the same terms without '
+              'the weighing, which cancels in a ratio. Empty inputs count as 0. Entering the certificates raises every '
+              'U; entering the balance raises U for positions lighter than the drift monitors and lowers it '
+              'slightly for heavier ones, because the monitors\' own weighing then comes out of the repeatability. '
+              'QC lists how many anchors and linearity standards fall within their U.')
     r += 1
     r = rd(r, 'Elemental drift (1.4.2)', F_H1)
     r = rd(r, 'That k-factor is one line for the whole run. When the sensitivity of the detector moves during the '
@@ -397,6 +409,11 @@ def build_workbook(export_path, out_path, config: Config | None = None,
         lab(st, 30 + i, k, F_SM); inp(st, 30 + i, 2, v); lab(st, 30 + i, note, F_NOTE, 7)
     st.cell(30, 2).number_format = '0.000'; st.cell(31, 2).number_format = '0.000'
     st.cell(32, 2).number_format = '0.0'
+    # 1.4.3: the balance, for the weighing term of %N and %C
+    lab(st, 33, 'Balance, standard uncertainty of one weighing (mg)', F_SM)
+    inp(st, 33, 2, '' if _CFG.balance_u_mg is None else _CFG.balance_u_mg, '0.0000')
+    lab(st, 33, 'From the balance\'s certificate (its repeatability, 1 SD). Leave empty to leave the weighing '
+                'term out of the uncertainty of %N and %C; Fits says so.', F_NOTE, 7)
 
     # 1.4.2: elemental drift from the drift monitors, and the reference-pulse
     # check for exports without reference peaks.
@@ -426,20 +443,21 @@ def build_workbook(export_path, out_path, config: Config | None = None,
 
     lab(st, 42, 'Standards', F_H1)
     st.cell(43, 1, 'Accepted values below are the published USGS values as of 2026-09-16, and u is the '
-                   '1-sigma uncertainty the producer lists. Check both against your certificates.').font = F_NOTE
+                   '1-sigma uncertainty the producer lists. Check both against your certificates. u(%C) and '
+                   'u(%N) (1.4.3) are left empty for your certificates; empty counts as 0.').font = F_NOTE
     SHDR = ['Match text in Identifier 1', 'Role', 'Accepted d13C', 'Accepted d15N', '%C', '%N', 'Material',
-            'u(d13C)', 'u(d15N)']
+            'u(d13C)', 'u(d15N)', 'u(%C)', 'u(%N)']
     for j, h in enumerate(SHDR, start=1):
         c = st.cell(44, j, h); c.font = F_HDR; c.fill = FILL_HDR
         c.alignment = Alignment(horizontal='center', wrap_text=True)
-    STD_ROWS = [tuple(r) + (None,) * (9 - len(r)) for r in _CFG.standards]
+    STD_ROWS = [tuple(r) + (None,) * (11 - len(r)) for r in _CFG.standards]
     SFIRST, SLAST = 45, 45 + NSTD - 1        # 16 slots from 1.4.2, the last three left empty for the student
     for i in range(NSTD):
-        for j in range(1, 10):
+        for j in range(1, 12):
             c = st.cell(SFIRST + i, j); c.font = F_IN; c.fill = FILL_IN; c.border = BOX
-            if j in (3, 4, 5, 6, 8, 9): c.number_format = '0.00'
+            if j in (3, 4, 5, 6, 8, 9, 10, 11): c.number_format = '0.00'
         if i < len(STD_ROWS):
-            for j, v in enumerate(STD_ROWS[i][:9], start=1):
+            for j, v in enumerate(STD_ROWS[i][:11], start=1):
                 st.cell(SFIRST + i, j, v if v != '' else None)
     dv_role = DataValidation(type='list', formula1='"Anchor,Check,Drift,Linearity,Blank,Exclude,Sample"',
                              allow_blank=True)
@@ -463,11 +481,14 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     S_USN, S_USC, S_K = 'Setup!$B$30', 'Setup!$B$31', 'Setup!$B$32'
     S_ELEM, S_ETHR, S_EXE = 'Setup!$B$35', 'Setup!$B$36', 'Setup!$B$37'      # 1.4.2
     S_RPA, S_RPD = 'Setup!$B$39', 'Setup!$B$40'                               # 1.4.2
+    S_BAL = 'Setup!$B$33'                                                       # 1.4.3
     SMATCH = f'Setup!$A${SFIRST}:$A${SLAST}'
     SROLE  = f'Setup!$B${SFIRST}:$B${SLAST}'
     SD13   = f'Setup!$C${SFIRST}:$C${SLAST}'
     SD15   = f'Setup!$D${SFIRST}:$D${SLAST}'
     SPC    = f'Setup!$E${SFIRST}:$E${SLAST}'
+    SUPC   = f'Setup!$J${SFIRST}:$J${SLAST}'      # 1.4.3
+    SUPN   = f'Setup!$K${SFIRST}:$K${SLAST}'
     SPN    = f'Setup!$F${SFIRST}:$F${SLAST}'
     SU13   = f'Setup!$H${SFIRST}:$H${SLAST}'
     SU15   = f'Setup!$I${SFIRST}:$I${SLAST}'
@@ -543,6 +564,19 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     EX = {name: gcl(first_elem_col + k) for k, name in enumerate(ELEM_NAMES)}
     COLS += [(name, EX[name], 10 if name.endswith('corrected') else 7,
               'o' if name.endswith('corrected') else 'h') for name in ELEM_NAMES]
+    # Uncertainty of %N, %C and C:N (1.4.3), after everything else so no earlier
+    # column moves.
+    UNC_NAMES = ['u%N cert', 'u%C cert', 'cert rel N', 'cert rel C',
+                 'd2 N', 'w2 N', 'd2 C', 'w2 C', 'cn x', 'cn f', 'cn d2',
+                 'mult N', 'mult C', 'mult CN', 'kfit N', 'kfit C', 'cal2 N', 'cal2 C', 'cal2 CN',
+                 'scale2 N', 'scale2 C', 'adev N', 'adev C', 'adev CN', 'acert2 N', 'acert2 C', 'acert2 CN',
+                 'urel N', 'urel C', 'urel CN',
+                 'u %N', 'U %N', 'u %C', 'U %C', 'u CN molar', 'U CN molar', 'u CN mass', 'U CN mass',
+                 'inU N', 'inU C', 'inU CN']
+    UOUT = ('u %N', 'U %N', 'u %C', 'U %C', 'u CN molar', 'U CN molar', 'u CN mass', 'U CN mass')
+    first_unc_col = first_elem_col + len(ELEM_NAMES)
+    UX = {name: gcl(first_unc_col + k) for k, name in enumerate(UNC_NAMES)}
+    COLS += [(name, UX[name], 9 if name in UOUT else 7, 'o' if name in UOUT else 'h') for name in UNC_NAMES]
     GROUPS = [('A','D','identification'),('E','G','mass'),('H','K','peak lookup'),('L','R','as measured'),
               ('S','V','from the standards table'),('W','AA','nitrogen corrections'),
               ('AB','AF','carbon corrections'),('AG','AL','elemental content'),
@@ -552,7 +586,10 @@ def build_workbook(export_path, out_path, config: Config | None = None,
               ('CP','DE','fit inputs and helpers, ignore'),(CH['ch pos'],CH['ch carry'],'chart feeds, ignore'),
               (HX['pos used'],HX['settle start'],'carryover and settling helpers, ignore'),
               (EX['desig x'],EX['elem factor C'],'reference-pulse and elemental drift helpers, ignore'),
-              (EX['%N corrected'],EX['C:N mass corrected'],'elemental content, drift-corrected')]
+              (EX['%N corrected'],EX['C:N mass corrected'],'elemental content, drift-corrected'),
+              (UX['u%N cert'],UX['urel CN'],'uncertainty of %N, %C and C:N: helpers, ignore'),
+              (UX['u %N'],UX['U CN mass'],'uncertainty of %N, %C and C:N, 1 SD and k x SD'),
+              (UX['inU N'],UX['inU CN'],'within U, for QC')]
     for a, b, t in GROUPS:
         wk.cell(4, wk[a + '1'].column, t).font = F_GRP
         wk.cell(4, wk[a + '1'].column).fill = FILL_GRP
@@ -578,6 +615,14 @@ def build_workbook(export_path, out_path, config: Config | None = None,
                  EX['elem f C']: '0.0000', EX['elem factor N']: '0.0000', EX['elem factor C']: '0.0000',
                  EX['%N corrected']: '0.00', EX['%C corrected']: '0.00',
                  EX['C:N molar corrected']: '0.00', EX['C:N mass corrected']: '0.00'})
+    NUMF.update({UX[n]: '0.00' for n in ('u%N cert', 'u%C cert')})
+    NUMF.update({UX[n]: '0.0000' for n in ('cert rel N', 'cert rel C', 'cn f', 'mult N', 'mult C', 'mult CN',
+                                           'kfit N', 'kfit C', 'adev N', 'adev C', 'adev CN',
+                                           'urel N', 'urel C', 'urel CN')})
+    NUMF.update({UX[n]: '0.000' for n in UOUT})
+    NUMF.update({UX[n]: '0.00000000' for n in ('d2 N', 'w2 N', 'd2 C', 'w2 C', 'cn d2', 'cal2 N', 'cal2 C',
+                                               'cal2 CN', 'scale2 N', 'scale2 C', 'acert2 N', 'acert2 C',
+                                               'acert2 CN')})
 
     W = lambda col: f"Work!${col}${R0}:${col}${R0+NSAMP-1}"      # noqa: E731
     RA, RB = 2, MAXRAW + 1
@@ -851,6 +896,80 @@ def build_workbook(export_path, out_path, config: Config | None = None,
         f[CH['ch bgd monitor']] = f'=IF(AND($D{i}="Drift",$N{i}<>""),$N{i},NA())'
         f[CH['mon bgd']] = f'=IF(AND($D{i}="Drift",$N{i}<>""),$N{i},"")'
         f[CH['mon bgd x']] = f'=IF(${CH["mon bgd"]}{i}="","",$A{i})'
+        # Uncertainty of %N, %C and C:N (1.4.3). Fits rows 301 to 335 hold the run's terms.
+        UXc = UX
+        f[UXc['u%N cert']] = stdpull(i, SUPN)
+        f[UXc['u%C cert']] = stdpull(i, SUPC)
+        for el, certc, ucol in (('N', 'U', 'u%N cert'), ('C', 'V', 'u%C cert')):
+            f[UXc[f'cert rel {el}']] = (f'=IF(OR($B{i}="",${certc}{i}="",${certc}{i}=0),"",'
+                                        f'IF(${UXc[ucol]}{i}="",0,${UXc[ucol]}{i}/${certc}{i}))')
+        for el in ('N', 'C'):
+            X_, F_ = EX[f'elem x {el}'], EX[f'elem f {el}']
+            XR, FR = W(X_), W(F_)
+            prev = f'COUNTIF({XR},"<"&$A{i})'
+            f[UXc[f'd2 {el}']] = (f'=IF(${X_}{i}="","",IF({prev}=0,"",'
+                                  f'(${F_}{i}-INDEX({FR},MATCH(SMALL({XR},{prev}),{XR},0)))^2))')
+            f[UXc[f'w2 {el}']] = f'=IF(${X_}{i}="","",IF(OR({S_BAL}="",$G{i}="",$G{i}=0),0,({S_BAL}/$G{i})^2))'
+        f[UXc['cn x']] = (f'=IF(AND($D{i}="Drift",ISNUMBER($AK{i}),ISNUMBER($U{i}),ISNUMBER($V{i}),'
+                          f'${EX["excl E"]}{i}<>1),IF(AND($U{i}>0,$V{i}>0),$A{i},""),"")')
+        f[UXc['cn f']] = f'=IF(${UXc["cn x"]}{i}="","",$AK{i}/(($V{i}/{AMC})/($U{i}/{AMN})))'
+        CNXR, CNFR = W(UXc['cn x']), W(UXc['cn f'])
+        prev = f'COUNTIF({CNXR},"<"&$A{i})'
+        f[UXc['cn d2']] = (f'=IF(${UXc["cn x"]}{i}="","",IF({prev}=0,"",'
+                           f'(${UXc["cn f"]}{i}-INDEX({CNFR},MATCH(SMALL({CNXR},{prev}),{CNXR},0)))^2))')
+        for name, XR in (('mult N', W(EX['elem x N'])), ('mult C', W(EX['elem x C'])), ('mult CN', CNXR)):
+            k = f'COUNTIF({XR},"<="&$A{i})'
+            w = f'(($A{i}-SMALL({XR},{k}))/(SMALL({XR},{k}+1)-SMALL({XR},{k})))'
+            f[UXc[name]] = (f'=IF($B{i}="","",IF(COUNT({XR})=0,1,IF(OR($A{i}<=MIN({XR}),$A{i}>=MAX({XR})),1,'
+                            f'(1-{w})^2+{w}^2)))')
+        for el, ug, nrow, brow, sdc, mxc, sxxc in (('N', 'AG', 69, 70, 312, 313, 314),
+                                                   ('C', 'AH', 75, 76, 325, 326, 327)):
+            f[UXc[f'kfit {el}']] = (f'=IF(OR(${ug}{i}="",Fits!$B${nrow}<3,Fits!$B${sdc}="",Fits!$B${sxxc}="",'
+                                    f'Fits!$B${sxxc}=0,Fits!$B${brow}=0),"",IF(${ug}{i}<=0,"",'
+                                    f'(Fits!$B${sdc}/ABS(Fits!$B${brow}))*SQRT(1/Fits!$B${nrow}'
+                                    f'+(${ug}{i}-Fits!$B${mxc})^2/Fits!$B${sxxc})/${ug}{i}))')
+        for el, inforce, rep in (('N', 246, 304), ('C', 249, 317)):
+            f[UXc[f'cal2 {el}']] = (f'=IF($B{i}="","",IF(Fits!$B${inforce}="Yes",'
+                                    f'IF(Fits!$B${rep}="","",${UXc[f"mult {el}"]}{i}*Fits!$B${rep}^2),'
+                                    f'IF(${UXc[f"kfit {el}"]}{i}="","",${UXc[f"kfit {el}"]}{i}^2)))')
+        f[UXc['cal2 CN']] = (f'=IF($B{i}="","",IF(AND(Fits!$B$246="Yes",Fits!$B$249="Yes"),'
+                             f'IF(Fits!$B$330="","",${UXc["mult CN"]}{i}*Fits!$B$330^2),'
+                             f'IF(OR(${UXc["cal2 N"]}{i}="",${UXc["cal2 C"]}{i}=""),"",'
+                             f'${UXc["cal2 N"]}{i}+${UXc["cal2 C"]}{i})))')
+        for el, inforce, X_, kcol in (('N', 246, EX['elem x N'], 'AY'), ('C', 249, EX['elem x C'], 'BA')):
+            cr = f'N(${UXc[f"cert rel {el}"]}{i})^2'
+            f[UXc[f'scale2 {el}']] = (f'=IF(Fits!$B${inforce}="Yes",IF(${X_}{i}="","",{cr}),'
+                                      f'IF(${kcol}{i}="","",{cr}))')
+        for el, val, certc in (('N', EX['%N corrected'], 'U'), ('C', EX['%C corrected'], 'V')):
+            f[UXc[f'adev {el}']] = (f'=IF(AND($D{i}="Anchor",ISNUMBER(${val}{i}),ISNUMBER(${certc}{i})),'
+                                    f'IF(${certc}{i}>0,${val}{i}/${certc}{i}-1,""),"")')
+            f[UXc[f'acert2 {el}']] = f'=IF(${UXc[f"adev {el}"]}{i}="","",N(${UXc[f"cert rel {el}"]}{i})^2)'
+        CNC = EX['C:N molar corrected']
+        CERTCN = f'(($V{i}/{AMC})/($U{i}/{AMN}))'
+        f[UXc['adev CN']] = (f'=IF(AND($D{i}="Anchor",ISNUMBER(${CNC}{i}),ISNUMBER($U{i}),ISNUMBER($V{i})),'
+                             f'IF(AND($U{i}>0,$V{i}>0),${CNC}{i}/{CERTCN}-1,""),"")')
+        f[UXc['acert2 CN']] = (f'=IF(${UXc["adev CN"]}{i}="","",N(${UXc["cert rel N"]}{i})^2'
+                               f'+N(${UXc["cert rel C"]}{i})^2)')
+        for el, val, inst, scale, true in (('N', EX['%N corrected'], 306, 307, 311),
+                                           ('C', EX['%C corrected'], 319, 320, 324)):
+            f[UXc[f'urel {el}']] = (f'=IF(OR(${val}{i}="",Fits!$B${inst}="",$G{i}="",$G{i}=0,'
+                                    f'${UXc[f"cal2 {el}"]}{i}=""),"",SQRT(Fits!$B${inst}^2'
+                                    f'+IF({S_BAL}="",0,({S_BAL}/$G{i})^2)+${UXc[f"cal2 {el}"]}{i}'
+                                    f'+Fits!$B${scale}^2+IF(Fits!$B${true}="",0,Fits!$B${true}^2)))')
+        f[UXc['urel CN']] = (f'=IF(OR(${CNC}{i}="",Fits!$B$330="",${UXc["cal2 CN"]}{i}=""),"",'
+                             f'SQRT(Fits!$B$330^2+${UXc["cal2 CN"]}{i}+Fits!$B$331^2'
+                             f'+IF(Fits!$B$335="",0,Fits!$B$335^2)))')
+        for out, val, rel in (('%N', EX['%N corrected'], 'urel N'), ('%C', EX['%C corrected'], 'urel C'),
+                              ('CN molar', EX['C:N molar corrected'], 'urel CN'),
+                              ('CN mass', EX['C:N mass corrected'], 'urel CN')):
+            f[UXc[f'u {out}']] = f'=IF(${UXc[rel]}{i}="","",${val}{i}*${UXc[rel]}{i})'
+            f[UXc[f'U {out}']] = f'=IF(${UXc[f"u {out}"]}{i}="","",{S_K}*${UXc[f"u {out}"]}{i})'
+        for el, val, certc, Ucol in (('N', EX['%N corrected'], 'U', 'U %N'), ('C', EX['%C corrected'], 'V', 'U %C')):
+            f[UXc[f'inU {el}']] = (f'=IF(AND(OR($D{i}="Anchor",$D{i}="Linearity"),ISNUMBER(${UXc[Ucol]}{i}),'
+                                   f'ISNUMBER(${certc}{i})),IF(ABS(${val}{i}-${certc}{i})<=${UXc[Ucol]}{i},1,0),"")')
+        f[UXc['inU CN']] = (f'=IF(AND(OR($D{i}="Anchor",$D{i}="Linearity"),ISNUMBER(${UXc["U CN molar"]}{i}),'
+                            f'ISNUMBER($U{i}),ISNUMBER($V{i})),IF(AND($U{i}>0,$V{i}>0),'
+                            f'IF(ABS(${CNC}{i}-{CERTCN})<=${UXc["U CN molar"]}{i},1,0),""),"")')
         for name, col, width, kind in COLS:
             c = wk.cell(i, wk[col + '1'].column, f.get(col))
             c.font = FONTS[kind]
@@ -1177,6 +1296,50 @@ def build_workbook(export_path, out_path, config: Config | None = None,
             'Off, fewer than two monitors, On, or Auto against Setup B36.' if el == 'N' else '')
     fit(250, 'positions left out', f'=IF({S_EXE}="","none",{S_EXE})', '@')
 
+    # 1.4.3: u of %N, %C and C:N. Fractions of the value, 1 SD.
+    sec(300, 'Uncertainty of %N, %C and C:N (1.4.3), as fractions of the value, 1 SD')
+    fit(301, 'balance, standard uncertainty of one weighing (mg)', f'=IF({S_BAL}="","",{S_BAL})', '0.0000',
+        'Setup B33. Empty: the weighing term is left out, here and in the monitors\' repeatability.')
+    for base, el, name, X_, ug, area in ((303, 'N', 'nitrogen', EX['elem x N'], 'AY', 'AZ'),
+                                         (316, 'C', 'carbon', EX['elem x C'], 'BA', 'BB')):
+        b = base
+        fit(b, f'drift monitors, {name}', f'=COUNT({W(X_)})', '0',
+            'The monitors of the elemental drift correction (Fits row 244 or 247).' if el == 'N' else '')
+        fit(b + 1, f'repeatability, {name}',
+            f'=IF($B${b}<3,"",SQRT(SUM({W(UX[f"d2 {el}"])})/(2*($B${b}-1))))', '0.00000',
+            'Measured over certified, by successive differences in position: sqrt(sum d^2 / (2 (n - 1))), '
+            'so a drift slow next to the monitors\' spacing is not counted as scatter.' if el == 'N' else '')
+        fit(b + 2, f'monitors\' own weighing, {name}', f'=IF($B${b}=0,0,SQRT(SUM({W(UX[f"w2 {el}"])})/$B${b}))',
+            '0.00000', 'RMS of the balance u over each monitor\'s mass.' if el == 'N' else '')
+        fit(b + 3, f'instrument repeatability, {name}',
+            f'=IF($B${b+1}="","",SQRT(MAX(0,$B${b+1}^2-$B${b+2}^2)))', '0.00000',
+            'The repeatability less the monitors\' own weighing, so a sample\'s weighing is not counted twice.'
+            if el == 'N' else '')
+        fit(b + 4, f'certificate, material setting the scale, {name}',
+            f'=IF(COUNT({W(UX[f"scale2 {el}"])})=0,0,SQRT(AVERAGE({W(UX[f"scale2 {el}"])})))', '0.00000',
+            'RMS of u(%N)/%N from Setup over the monitors when the correction is in force, otherwise over the '
+            'weighed standards of the k-factor.' if el == 'N' else '')
+        fit(b + 5, f'anchor analyses, {name}', f'=COUNT({W(UX[f"adev {el}"])})', '0')
+        fit(b + 6, f'anchors\' RMS deviation from certified, {name}',
+            f'=IF($B${b+5}<2,"",SQRT(SUMSQ({W(UX[f"adev {el}"])})/$B${b+5}))', '0.00000',
+            'Reported over certified, less one; needs two anchor analyses.' if el == 'N' else '')
+        fit(b + 7, f'anchors\' certificate, {name}',
+            f'=IF($B${b+5}=0,"",SQRT(AVERAGE({W(UX[f"acert2 {el}"])})))', '0.00000')
+        fit(b + 8, f'trueness, {name}', f'=IF($B${b+6}="","",SQRT($B${b+6}^2+N($B${b+7})^2))', '0.00000',
+            'The Nordtest TR 537 bias term: RMS deviation and certificate combined.' if el == 'N' else '')
+        fit(b + 9, f'k-factor residual SD, {name} (area)', f'=IFERROR(STEYX({W(area)},{W(ug)}),"")', '0.0000')
+        fit(b + 10, f'k-factor mean micrograms, {name}', f'=IFERROR(AVERAGE({W(ug)}),"")', '0.000')
+        fit(b + 11, f'k-factor Sxx, {name} (micrograms squared)', f'=IFERROR(DEVSQ({W(ug)}),"")', '0.000')
+    fit(329, 'drift monitors, C:N', f'=COUNT({W(UX["cn x"])})', '0')
+    fit(330, 'repeatability, C:N', f'=IF($B$329<3,"",SQRT(SUM({W(UX["cn d2"])})/(2*($B$329-1))))', '0.00000',
+        'The monitors\' measured over certified C:N; weighing cancels in a ratio.')
+    fit(331, 'certificate, materials setting the scale, C:N', '=SQRT($B$307^2+$B$320^2)', '0.00000')
+    fit(332, 'anchor analyses, C:N', f'=COUNT({W(UX["adev CN"])})', '0')
+    fit(333, 'anchors\' RMS deviation from certified, C:N',
+        f'=IF($B$332<2,"",SQRT(SUMSQ({W(UX["adev CN"])})/$B$332))', '0.00000')
+    fit(334, 'anchors\' certificate, C:N', f'=IF($B$332=0,"",SQRT(AVERAGE({W(UX["acert2 CN"])})))', '0.00000')
+    fit(335, 'trueness, C:N', '=IF($B$333="","",SQRT($B$333^2+N($B$334)^2))', '0.00000')
+
     fit(217, 'check standards with a calibrated value',
         f'=COUNTIFS({W("D")},"Check",{W("AA")},">-1E+30")+COUNTIFS({W("D")},"Check",{W("AF")},">-1E+30")'
         f'-COUNTIFS({W("D")},"Check",{W("AA")},">-1E+30",{W("AF")},">-1E+30")', '0',
@@ -1185,34 +1348,40 @@ def build_workbook(export_path, out_path, config: Config | None = None,
 
     # ================================================================ Results
     rs = wb.create_sheet('Results')
-    RHDR = [('Row', 6), ('Identifier', 18), ('Type', 10), ('Mass (mg)', 10), ('%C', 8), ('%N', 8),
-            ('C:N molar', 10), ('C:N mass', 10), ('d13C (permil)', 12), ('d15N (permil)', 12), ('Flags', 54),
-            ('u(d13C)', 9), ('U(d13C)', 9), ('u(d15N)', 9), ('U(d15N)', 9),
+    RHDR = [('Row', 6), ('Identifier', 18), ('Type', 10), ('Mass (mg)', 10),
+            ('%C', 8), ('U(%C)', 8), ('%N', 8), ('U(%N)', 8),
+            ('C:N molar', 10), ('U(C:N molar)', 10), ('C:N mass', 10), ('U(C:N mass)', 10),
+            ('d13C (permil)', 12), ('U(d13C)', 9), ('d15N (permil)', 12), ('U(d15N)', 9), ('Flags', 54),
+            ('u(%C)', 8), ('u(%N)', 8), ('u(C:N molar)', 10), ('u(C:N mass)', 10), ('u(d13C)', 9), ('u(d15N)', 9),
             ('Elemental drift factor N', 10), ('Elemental drift factor C', 10),
             ('%C as measured', 9), ('%N as measured', 9)]
     rs.cell(1, 1, 'Results').font = F_TITLE
     rs.cell(2, 1, 'Read QC before using these. Isotope values are on the scale set by the anchor standards '
                   'in Setup; %C, %N and C:N need a mass in Work column F or G, and from 1.4.2 they carry the '
                   'elemental drift correction when it is in force (Fits row 243 onwards), with the factors and '
-                  'the values as measured in the last four columns. u is the standard uncertainty '
-                  'from the scale calibration and the sample repeatability (Fits rows 132 onwards), and U is '
-                  'k times u with k from Setup B32; neither includes the blank, linearity or drift '
-                  'corrections or day-to-day reproducibility.').font = F_NOTE
+                  'the values as measured in the last four columns. Each value is followed by U = k x u, k from '
+                  'Setup B32, and the u columns follow Flags. For the isotope values u comes from the scale '
+                  'calibration and the sample repeatability (Fits rows 132 onwards) and leaves out the blank, '
+                  'linearity and drift corrections and day-to-day reproducibility; for %C, %N and C:N it has five '
+                  'terms (Fits rows 300 onwards), and stays incomplete until Setup B33 and Setup columns J and K '
+                  'are filled in.').font = F_NOTE
     for j, (h, w_) in enumerate(RHDR, start=1):
         c = rs.cell(4, j, h); c.font = F_HDR; c.fill = FILL_HDR
         c.alignment = Alignment(horizontal='center', wrap_text=True)
         rs.column_dimensions[gcl(j)].width = w_
-    rs.cell(4, 13, f'="U(d13C), k="&TEXT({S_K},"0.0")').font = F_HDR
-    rs.cell(4, 15, f'="U(d15N), k="&TEXT({S_K},"0.0")').font = F_HDR
+    for col_, lab_ in ((6, 'U(%C)'), (8, 'U(%N)'), (10, 'U(C:N molar)'), (12, 'U(C:N mass)'),
+                       (14, 'U(d13C)'), (16, 'U(d15N)')):
+        rs.cell(4, col_, f'="{lab_}, k="&TEXT({S_K},"0.0")').font = F_HDR
     for n in range(NSAMP):
         i, k = 5 + n, R0 + n
         PCc, PNc = EX['%C corrected'], EX['%N corrected']
         CNm, CNw = EX['C:N molar corrected'], EX['C:N mass corrected']
+        pull = lambda col: f'=IF(Work!${col}{k}="","",Work!${col}{k})'      # noqa: E731
         vals = [f'=IF(Work!$B{k}="","",Work!$A{k})', f'=IF(Work!$B{k}="","",Work!$B{k})',
                 f'=IF(Work!$B{k}="","",Work!$D{k})', f'=IF(Work!$G{k}="","",Work!$G{k})',
-                f'=IF(Work!${PCc}{k}="","",Work!${PCc}{k})', f'=IF(Work!${PNc}{k}="","",Work!${PNc}{k})',
-                f'=IF(Work!${CNm}{k}="","",Work!${CNm}{k})', f'=IF(Work!${CNw}{k}="","",Work!${CNw}{k})',
-                f'=IF(Work!$AF{k}="","",Work!$AF{k})', f'=IF(Work!$AA{k}="","",Work!$AA{k})',
+                pull(PCc), pull(UX['U %C']), pull(PNc), pull(UX['U %N']),
+                pull(CNm), pull(UX['U CN molar']), pull(CNw), pull(UX['U CN mass']),
+                f'=IF(Work!$AF{k}="","",Work!$AF{k})', pull('CO'), f'=IF(Work!$AA{k}="","",Work!$AA{k})', pull('CM'),
                 (f'=IF(Work!$B{k}="","",'
                  f'IF(Work!$L{k}="","no N peak; ","")'
                  f'&IF(Work!$P{k}="","no C peak; ","")'
@@ -1246,19 +1415,18 @@ def build_workbook(export_path, out_path, config: Config | None = None,
                  f'&IF(AND(Work!$D{k}="Drift",Work!${EX["excl E"]}{k}=1),"excluded from elemental correction; ","")'
                  f'&IF(Work!$A{k}>=Fits!$B$86,"","ran before the background settled; ")'
                  f'&IF(Work!${HX["carry flag"]}{k}=1,"possible carryover from an oversized sample; ",""))'),
-                f'=IF(Work!$CN{k}="","",Work!$CN{k})', f'=IF(Work!$CO{k}="","",Work!$CO{k})',
-                f'=IF(Work!$CL{k}="","",Work!$CL{k})', f'=IF(Work!$CM{k}="","",Work!$CM{k})',
+                pull(UX['u %C']), pull(UX['u %N']), pull(UX['u CN molar']), pull(UX['u CN mass']),
+                pull('CN'), pull('CL'),
                 f'=IF(Work!$B{k}="","",Work!${EX["elem factor N"]}{k})',
                 f'=IF(Work!$B{k}="","",Work!${EX["elem factor C"]}{k})',
                 f'=IF(Work!$AJ{k}="","",Work!$AJ{k})', f'=IF(Work!$AI{k}="","",Work!$AI{k})']
         for j, v in enumerate(vals, start=1):
             c = rs.cell(i, j, v); c.font = F_SM
-            if j in (5, 6, 7, 8, 18, 19): c.number_format = '0.00'
-            if j in (9, 10): c.number_format = '0.00'
+            if j in (5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 26, 27): c.number_format = '0.00'
             if j == 4: c.number_format = '0.000'
-            if j in (12, 13, 14, 15): c.number_format = '0.000'
-            if j in (16, 17): c.number_format = '0.0000'
-            if j in (5, 6, 7, 8, 9, 10, 12, 13, 14, 15): c.fill = FILL_OUT
+            if j in (14, 16, 18, 19, 20, 21, 22, 23): c.number_format = '0.000'
+            if j in (24, 25): c.number_format = '0.0000'
+            if 5 <= j <= 16 or 18 <= j <= 23: c.fill = FILL_OUT
     rs.freeze_panes = 'A5'
 
     # ================================================================ QC
@@ -1315,11 +1483,11 @@ def build_workbook(export_path, out_path, config: Config | None = None,
           '=IF(Fits!$B$217<1,"CHECK: nothing independent of the anchors tests this calibration; run a '
           'check standard (USGS66, or an in-house material with an assigned value) in every sequence","ok")')
     qline(27, 'Samples outside the anchor d15N range',
-          f'=COUNTIF(Results!$K$5:$K${5+NSAMP-1},"*d15N outside anchor range*")', '0',
+          f'=COUNTIF(Results!$Q$5:$Q${5+NSAMP-1},"*d15N outside anchor range*")', '0',
           '=IF($B$27=0,"ok","CHECK: these values are extrapolated beyond the anchors; add an anchor that '
           'brackets them")')
     qline(28, 'Samples outside the anchor d13C range',
-          f'=COUNTIF(Results!$K$5:$K${5+NSAMP-1},"*d13C outside anchor range*")', '0',
+          f'=COUNTIF(Results!$Q$5:$Q${5+NSAMP-1},"*d13C outside anchor range*")', '0',
           '=IF($B$28=0,"ok","CHECK: these values are extrapolated beyond the anchors; add an anchor that '
           'brackets them")')
 
@@ -1422,13 +1590,13 @@ def build_workbook(export_path, out_path, config: Config | None = None,
                       'correction was fitted to. The check standard offsets above are the honest test.').font = F_NOTE
 
     qsec(Q + 11, 'Flags')
-    qline(Q + 12, 'Rows carrying a flag on Results', f'=COUNTIF(Results!$K$5:$K${5+NSAMP-1},"?*")', '0')
+    qline(Q + 12, 'Rows carrying a flag on Results', f'=COUNTIF(Results!$Q$5:$Q${5+NSAMP-1},"?*")', '0')
     qline(Q + 13, 'Minimum trusted Area 28', '=Fits!$B$81')
     qline(Q + 14, 'Maximum trusted Area 28', '=Fits!$B$97')
     qline(Q + 15, 'Minimum trusted Area 44', '=Fits!$B$82')
     qline(Q + 16, 'Maximum trusted Area 44', '=Fits!$B$104')
     qline(Q + 17, 'Samples outside the linearity range',
-          f'=COUNTIF(Results!$K$5:$K${5+NSAMP-1},"*linearity range*")', '0',
+          f'=COUNTIF(Results!$Q$5:$Q${5+NSAMP-1},"*linearity range*")', '0',
           f'=IF($B${Q + 17}=0,"ok","CHECK: weigh samples to land inside the standards, or extend the size series")')
 
     qsec(96, 'Instrument settling')
@@ -1527,6 +1695,35 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     qline(148, 'CO2 peaks rejected as reference pulses', '=Fits!$B$241', '0',
           '=IF(Fits!$B$240<>"Yes","",IF(Fits!$B$241=0,"ok","those positions made no sample CO2; Results shows '
           'no C peak and says why in Flags"))')
+    # 1.4.3
+    qsec(150, 'Uncertainty of %N, %C and C:N')
+    qc.cell(151, 1, 'U on Results has five terms (Fits row 300 onwards). Empty inputs count as 0, so U is incomplete '
+                    'until the balance (Setup B33) and the certificates (Setup columns J and K) are filled in. '
+                    'The anchors and the linearity standards have known values, so how many fall within their U '
+                    'is a check on the budget.').font = F_NOTE
+    qline(152, 'Balance, u of one weighing (mg)', '=Fits!$B$301', '0.0000',
+          '=IF(Fits!$B$301="","not given in Setup B33: the weighing term is left out, so U is too small for '
+          'light samples","ok")')
+    for r_, el, name, nrow, rep, true, inu in ((153, 'N', '%N', 303, 304, 311, 'inU N'),
+                                                (157, 'C', '%C', 316, 317, 324, 'inU C')):
+        qline(r_, f'Repeatability of {name} (percent, 1 SD)', f'=IF(Fits!$B${rep}="","",Fits!$B${rep}*100)', '0.00',
+              f'=IF(Fits!$B${nrow}<3,"fewer than three drift monitors: no u for {name}","ok")')
+        qline(r_ + 1, f'Trueness of {name} from the anchors (percent)', f'=IF(Fits!$B${true}="","",Fits!$B${true}*100)',
+              '0.00', f'=IF(Fits!$B${true}="","fewer than two anchor analyses: no trueness term","ok")')
+        for k_, rl, word in ((2, 'Anchor', 'Anchors'), (3, 'Linearity', 'Linearity standards')):
+            within = f'COUNTIFS({WD_},"{rl}",{W(UX[inu])},1)'
+            total = f'COUNTIFS({WD_},"{rl}",{W(UX[inu])},">=0")'
+            qline(r_ + k_, f'{word} within U, {name}', f'={within}&" of "&{total}', '@',
+                  f'=IF({total}=0,"",IF({within}<{total},"CHECK: "&TEXT({total}-{within},"0")&" outside U","ok"))')
+    qline(161, 'Repeatability of C:N (percent, 1 SD)', '=IF(Fits!$B$330="","",Fits!$B$330*100)', '0.00',
+          '=IF(Fits!$B$329<3,"fewer than three drift monitors: no u for C:N","ok")')
+    qline(162, 'Trueness of C:N from the anchors (percent)', '=IF(Fits!$B$335="","",Fits!$B$335*100)', '0.00',
+          '=IF(Fits!$B$335="","fewer than two anchor analyses: no trueness term","ok")')
+    for r_, rl, word in ((163, 'Anchor', 'Anchors'), (164, 'Linearity', 'Linearity standards')):
+        within = f'COUNTIFS({WD_},"{rl}",{W(UX["inU CN"])},1)'
+        total = f'COUNTIFS({WD_},"{rl}",{W(UX["inU CN"])},">=0")'
+        qline(r_, f'{word} within U, C:N', f'={within}&" of "&{total}', '@',
+              f'=IF({total}=0,"",IF({within}<{total},"CHECK: "&TEXT({total}-{within},"0")&" outside U","ok"))')
 
     from openpyxl.chart import ScatterChart, Reference, Series
     from openpyxl.chart.marker import Marker

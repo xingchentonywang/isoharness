@@ -20,8 +20,12 @@ from pathlib import Path
 
 import openpyxl
 
-RESULTS = {9: "d13c_final", 10: "d15n_final", 12: "u_d13c", 13: "U_d13c", 14: "u_d15n",
-           15: "U_d15n", 5: "pct_c_reported", 6: "pct_n_reported", 7: "cn_molar_reported"}
+# Results columns of ea_irms 1.4.3: each value followed by its U, the u columns after Flags.
+RESULTS = {5: "pct_c_reported", 6: "U_pct_c", 7: "pct_n_reported", 8: "U_pct_n", 9: "cn_molar_reported",
+           10: "U_cn_molar", 11: "cn_mass_reported", 12: "U_cn_mass", 13: "d13c_final", 14: "U_d13c",
+           15: "d15n_final", 16: "U_d15n", 18: "u_pct_c", 19: "u_pct_n", 20: "u_cn_molar", 21: "u_cn_mass",
+           22: "u_d13c", 23: "u_d15n"}
+FLAGS = 17
 
 
 def post(url, path: Path, fields=None, timeout=300):
@@ -82,7 +86,7 @@ def main(base, export):
                 compared += 1
                 if abs(mine - theirs) > 1e-9 * max(1.0, abs(mine)):
                     problems.append((p["row"], key, mine, theirs))
-        flags = {t.strip() for t in (rs.cell(4 + p["row"], 11).value or "").split(";") if t.strip()}
+        flags = {t.strip() for t in (rs.cell(4 + p["row"], FLAGS).value or "").split(";") if t.strip()}
         if flags != set(p["flags"]):
             problems.append((p["row"], "flags", sorted(flags ^ set(p["flags"]))))
     print(f"workbook against /api/process: {compared} values and {len(positions)} flag lists compared, "

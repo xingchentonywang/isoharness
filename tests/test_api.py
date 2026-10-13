@@ -121,7 +121,9 @@ def test_results_csv_matches_the_engine(engine):
     for row, p in zip(rows, positions):
         assert int(row["Row"]) == p.row and row["Identifier"] == p.identifier
         for col, attr in (("d15N (permil)", "d15n_final"), ("d13C (permil)", "d13c_final"),
-                          ("U(d15N), k=2.0", "U_d15n"), ("%N", "pct_n_reported")):
+                          ("U(d15N), k=2.0", "U_d15n"), ("%N", "pct_n_reported"),
+                          ("U(%N), k=2.0", "U_pct_n"), ("U(%C), k=2.0", "U_pct_c"),
+                          ("U(C:N molar), k=2.0", "U_cn_molar"), ("u(C:N mass)", "u_cn_mass")):
             v = getattr(p, attr)
             assert (row[col] == "") == (v is None)
             if v is not None:
@@ -138,17 +140,20 @@ def test_workbook_values_equal_the_engine(engine):
     assert r.headers["x-isoharness-values"] == "computed"
     assert f'filename="20260915_raw_ea_irms_v{VERSION}.xlsx"' in r.headers["content-disposition"]
     rs = openpyxl.load_workbook(io.BytesIO(r.content), data_only=True)["Results"]
+    head = {str(rs.cell(4, c).value): c for c in range(1, rs.max_column + 1)}
     compared = 0
     for p in positions:
-        for col, attr in ((9, "d13c_final"), (10, "d15n_final"), (13, "U_d13c"), (15, "U_d15n"),
-                          (5, "pct_c_reported"), (6, "pct_n_reported")):
+        for col, attr in ((head["d13C (permil)"], "d13c_final"), (head["d15N (permil)"], "d15n_final"),
+                          (head["U(d13C), k=2.0"], "U_d13c"), (head["U(d15N), k=2.0"], "U_d15n"),
+                          (head["%C"], "pct_c_reported"), (head["%N"], "pct_n_reported"),
+                          (head["U(%N), k=2.0"], "U_pct_n"), (head["U(C:N molar), k=2.0"], "U_cn_molar")):
             mine, theirs = getattr(p, attr), rs.cell(4 + p.row, col).value
             theirs = theirs if isinstance(theirs, (int, float)) else None
             assert (mine is None) == (theirs is None), (p.row, attr, mine, theirs)
             if mine is not None:
                 assert abs(mine - theirs) <= 1e-9 * max(1.0, abs(mine)), (p.row, attr, mine, theirs)
                 compared += 1
-        flags = {t.strip() for t in (rs.cell(4 + p.row, 11).value or "").split(";") if t.strip()}
+        flags = {t.strip() for t in (rs.cell(4 + p.row, head["Flags"]).value or "").split(";") if t.strip()}
         assert flags == set(p.flags), p.row
     assert compared > 3 * len(positions)
 

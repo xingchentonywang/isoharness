@@ -112,14 +112,16 @@ def port_input(positions, fits, config: Config, file_name: str, size: int,
 def results_csv(positions, config: Config) -> str:
     """The workbook's Results sheet as CSV, at full precision, same columns and order."""
     k = f"{config.coverage_k:.1f}"
-    header = ["Row", "Identifier", "Type", "Mass (mg)", "%C", "%N", "C:N molar", "C:N mass",
-              "d13C (permil)", "d15N (permil)", "Flags", "u(d13C)", f"U(d13C), k={k}",
-              "u(d15N)", f"U(d15N), k={k}", "Elemental drift factor N",
-              "Elemental drift factor C", "%C as measured", "%N as measured"]
-    attrs = ["row", "identifier", "role", "amount", "pct_c_reported", "pct_n_reported",
-             "cn_molar_reported", "cn_mass_reported", "d13c_final", "d15n_final", None,
-             "u_d13c", "U_d13c", "u_d15n", "U_d15n", "elem_factor_n", "elem_factor_c",
-             "pct_c_measured", "pct_n_measured"]
+    header = ["Row", "Identifier", "Type", "Mass (mg)", "%C", f"U(%C), k={k}", "%N", f"U(%N), k={k}",
+              "C:N molar", f"U(C:N molar), k={k}", "C:N mass", f"U(C:N mass), k={k}",
+              "d13C (permil)", f"U(d13C), k={k}", "d15N (permil)", f"U(d15N), k={k}", "Flags",
+              "u(%C)", "u(%N)", "u(C:N molar)", "u(C:N mass)", "u(d13C)", "u(d15N)",
+              "Elemental drift factor N", "Elemental drift factor C", "%C as measured", "%N as measured"]
+    attrs = ["row", "identifier", "role", "amount", "pct_c_reported", "U_pct_c", "pct_n_reported", "U_pct_n",
+             "cn_molar_reported", "U_cn_molar", "cn_mass_reported", "U_cn_mass",
+             "d13c_final", "U_d13c", "d15n_final", "U_d15n", None,
+             "u_pct_c", "u_pct_n", "u_cn_molar", "u_cn_mass", "u_d13c", "u_d15n",
+             "elem_factor_n", "elem_factor_c", "pct_c_measured", "pct_n_measured"]
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\n")
     w.writerow(header)

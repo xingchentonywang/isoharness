@@ -24,12 +24,12 @@ def test_json_roundtrip_is_lossless():
 
 def test_dataframe_roundtrip_keeps_every_field():
     """The app edits the standards in a grid, which is where columns get lost."""
-    columns = ["match", "role", "d13c", "d15n", "pct_c", "pct_n", "material", "u13", "u15"]
+    columns = ["match", "role", "d13c", "d15n", "pct_c", "pct_n", "material", "u13", "u15", "upc", "upn"]
     frame = pd.DataFrame([list(r) for r in DEFAULT_STANDARDS], columns=columns)
     back = standards_from_rows(frame.values.tolist())
     assert len(back) == len(DEFAULT_STANDARDS)
     for a, b in zip(back, DEFAULT_STANDARDS):
-        assert len(a) == 9
+        assert len(a) == 11
         for x, y in zip(a, b):
             assert (x == y) or (x is None and y is None)
 
@@ -37,7 +37,7 @@ def test_dataframe_roundtrip_keeps_every_field():
 def test_blank_accepted_values_do_not_become_nan():
     """A float column with no value comes back as NaN, which would poison every
     corrected number silently."""
-    columns = ["match", "role", "d13c", "d15n", "pct_c", "pct_n", "material", "u13", "u15"]
+    columns = ["match", "role", "d13c", "d15n", "pct_c", "pct_n", "material", "u13", "u15", "upc", "upn"]
     frame = pd.DataFrame([list(r) for r in DEFAULT_STANDARDS], columns=columns)
     for row in standards_from_rows(frame.values.tolist()):
         for cell in row:
@@ -50,7 +50,7 @@ def test_rows_without_match_text_are_dropped():
 
 def test_short_rows_are_padded():
     cfg = config_from_dict({"standards": [["My Std", "Anchor", -20.0, 5.0]]})
-    assert cfg.standards[0] == ("My Std", "Anchor", -20.0, 5.0, None, None, None, None, None)
+    assert cfg.standards[0] == ("My Std", "Anchor", -20.0, 5.0, None, None, None, None, None, None, None)
 
 
 def test_roles_match_case_insensitively_and_most_specific_wins():

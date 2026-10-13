@@ -146,6 +146,6 @@ def test_old_boolean_switches_still_load():
                           "standards": [["USGS 64", "Anchor", -40.81, 1.76, 32, 18.66, "glycine"]],
                           "exclude_drift_c": "59, 61"})
     assert c.linearity_correction == "On" and c.drift_correction == "Off"
-    assert len(c.standards[0]) == 9 and c.standards[0][7] is None
+    assert len(c.standards[0]) == 11 and c.standards[0][7] is None and c.standards[0][10] is None
     assert c.exclude_drift_c == [59, 61]
     assert config_to_dict(c)["exclude_drift_c"] == [59, 61]

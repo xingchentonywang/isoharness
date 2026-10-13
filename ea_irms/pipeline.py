@@ -53,27 +53,29 @@ def _above(a, b):
     return a - b > _SLACK * max(1.0, abs(b))
 
 DEFAULT_STANDARDS = [
-    # match text, role, accepted d13C, accepted d15N, %C, %N, material, u(d13C), u(d15N)
+    # match text, role, accepted d13C, accepted d15N, %C, %N, material, u(d13C), u(d15N),
+    # and from 1.4.3 u(%C), u(%N), the 1-sigma certificate uncertainties of the elemental
+    # content, left empty for the lab to fill from its certificates (empty counts as 0).
     # Uncertainties are the 1-sigma values listed by the producer (Indiana
     # University reference-material list, Schimmelmann group); USGS40 and USGS41a
     # are left for the lab to fill from its certificates.
-    ("USGS 64", "Anchor", -40.81, 1.76, 32.00, 18.66, "glycine", 0.04, 0.06),
-    ("USGS 65", "Anchor", -20.29, 20.68, 32.00, 18.66, "glycine", 0.04, 0.06),
-    ("USGS 66", "Check", -0.67, 40.83, 32.00, 18.66, "glycine", 0.04, 0.06),
-    ("USGS 40", "Check", -26.39, -4.52, 40.82, 9.52, "L-glutamic acid", None, None),
-    ("USGS 41a", "Check", 36.55, 47.55, 40.82, 9.52, "L-glutamic acid", None, None),
-    ("Ace Lin", "Linearity", None, None, 71.09, 10.36, "acetanilide, size series", None, None),
-    ("Ace Drift", "Drift", None, None, 71.09, 10.36, "acetanilide, drift monitor", None, None),
-    ("Ace Bypass", "Exclude", None, None, 71.09, 10.36, "bypass test", None, None),
-    ("Blank Capsule", "Blank", None, None, None, None, "tin capsule, nothing in it", None, None),
-    ("Blank Hole", "Exclude", None, None, None, None, "empty carousel position", None, None),
+    ("USGS 64", "Anchor", -40.81, 1.76, 32.00, 18.66, "glycine", 0.04, 0.06, None, None),
+    ("USGS 65", "Anchor", -20.29, 20.68, 32.00, 18.66, "glycine", 0.04, 0.06, None, None),
+    ("USGS 66", "Check", -0.67, 40.83, 32.00, 18.66, "glycine", 0.04, 0.06, None, None),
+    ("USGS 40", "Check", -26.39, -4.52, 40.82, 9.52, "L-glutamic acid", None, None, None, None),
+    ("USGS 41a", "Check", 36.55, 47.55, 40.82, 9.52, "L-glutamic acid", None, None, None, None),
+    ("Ace Lin", "Linearity", None, None, 71.09, 10.36, "acetanilide, size series", None, None, None, None),
+    ("Ace Drift", "Drift", None, None, 71.09, 10.36, "acetanilide, drift monitor", None, None, None, None),
+    ("Ace Bypass", "Exclude", None, None, 71.09, 10.36, "bypass test", None, None, None, None),
+    ("Blank Capsule", "Blank", None, None, None, None, "tin capsule, nothing in it", None, None, None, None),
+    ("Blank Hole", "Exclude", None, None, None, None, "empty carousel position", None, None, None, None),
     # 1.4.2: sequences that spell the acetanilide out in full (the Bocas runs of
     # 2025 and 2026) match without a Setup edit.
-    ("Acetanilide Lin", "Linearity", None, None, 71.09, 10.36, "acetanilide, size series", None, None),
-    ("Acetanilide Drift", "Drift", None, None, 71.09, 10.36, "acetanilide, drift monitor", None, None),
-    ("Acetanilide Bypass", "Exclude", None, None, 71.09, 10.36, "bypass test", None, None),
+    ("Acetanilide Lin", "Linearity", None, None, 71.09, 10.36, "acetanilide, size series", None, None, None, None),
+    ("Acetanilide Drift", "Drift", None, None, 71.09, 10.36, "acetanilide, drift monitor", None, None, None, None),
+    ("Acetanilide Bypass", "Exclude", None, None, 71.09, 10.36, "bypass test", None, None, None, None),
 ]
-STANDARD_FIELDS = 9
+STANDARD_FIELDS = 11
 # The workbook's standards table has this many rows (1.4.2: 16, from 13); a
 # configuration with more cannot be written as a workbook, and build_workbook
 # refuses it instead of dropping the extra rows silently.
@@ -104,6 +106,8 @@ class Config:
     u_sample_n: float | None = None     # single-analysis repeatability, 1 SD; None = pooled anchors
     u_sample_c: float | None = None
     coverage_k: float = 2.0
+    # 1.4.3: standard uncertainty of one weighing, mg; None = not given, counted as 0
+    balance_u_mg: float | None = None
     # 1.4.2: %N and %C drift, read from the drift monitors' own elemental content
     elemental_correction: str = "Auto"  # On | Off | Auto
     elemental_threshold_pct: float = 5.0   # Auto applies it when a monitor's relative bias exceeds this
@@ -240,11 +244,13 @@ def assign_roles(positions, config):
         if hit is None:
             p.role, p.acc13, p.acc15, p.pct_c, p.pct_n = "Sample", None, None, None, None
             p.u_acc13 = p.u_acc15 = None
+            p.u_pct_c_cert = p.u_pct_n_cert = None
             p.std_index = None
         else:
             entry = tuple(hit) + (None,) * (STANDARD_FIELDS - len(hit))
             p.role, p.acc13, p.acc15, p.pct_c, p.pct_n = entry[1], entry[2], entry[3], entry[4], entry[5]
             p.u_acc13, p.u_acc15 = entry[7], entry[8]
+            p.u_pct_c_cert, p.u_pct_n_cert = entry[9], entry[10]
             p.std_index = config.standards.index(hit)
     return positions
 
@@ -274,6 +280,154 @@ def _studentized(fit, x, y, included):
     if fit["sd"] is None or fit["sd"] <= 0:
         return None
     return e / (fit["sd"] * math.sqrt(1.0 + h))
+
+
+def _mssd(values):
+    """Single-analysis scatter from successive differences, sqrt(sum d^2 / (2 (n - 1))).
+
+    Differences between neighbours in position leave out a drift slow next to the
+    spacing of the monitors, which an SD about the mean would count as scatter.
+    None below three values.
+    """
+    if len(values) < 3:
+        return None
+    return math.sqrt(sum((b - a) ** 2 for a, b in zip(values, values[1:])) / (2 * (len(values) - 1)))
+
+
+def _interp_multiplier(row, rows):
+    """Variance multiplier of a factor interpolated in position between two monitors.
+
+    (1 - w)^2 + w^2 with w the fraction of the way from the monitor before to the one
+    after; 1 at a monitor and beyond the first and last, where one monitor sets it.
+    """
+    if not rows or row <= rows[0] or row >= rows[-1]:
+        return 1.0
+    for x0, x1 in zip(rows, rows[1:]):
+        if x0 <= row <= x1:
+            w = (row - x0) / (x1 - x0)
+            return (1 - w) ** 2 + w ** 2
+    return 1.0
+
+
+def _kfit_rel(fit, ug):
+    """Relative standard uncertainty of micrograms read off the k-factor line at ``ug``.
+
+    The calibration part of an inverse prediction, (s / |b|) sqrt(1/n + (x0 - mean x)^2 / Sxx),
+    over x0; the single analysis's own scatter is the repeatability term.
+    """
+    if fit is None or fit.get("sd") is None or not fit.get("sxx") or not fit.get("slope") or not ug or ug <= 0:
+        return None
+    u = (fit["sd"] / abs(fit["slope"])) * math.sqrt(1.0 / fit["n"] + (ug - fit["mean_x"]) ** 2 / fit["sxx"])
+    return u / ug
+
+
+def _rms(values):
+    vals = [v for v in values if v is not None]
+    return math.sqrt(sum(v * v for v in vals) / len(vals)) if vals else None
+
+
+def _elemental_uncertainty(positions, F, config, excl_e):
+    """u and U of every %N, %C and C:N, from five terms combined in quadrature.
+
+    For %N and %C, as fractions of the value: the instrument's repeatability, the
+    drift monitors' measured over certified ratios by successive differences in
+    position, less the part their own weighing explains; this position's weighing,
+    the balance's u over its mass; the calibration, the interpolated elemental
+    drift factor when that correction is in force and the k-factor line at this
+    position's micrograms when it is not; the certificate uncertainty of the
+    material that sets the scale, the monitors' when the correction is in force and
+    the weighed standards' otherwise; and trueness, the anchors' RMS deviation from
+    their certified values with their certificate uncertainty (the Nordtest TR 537
+    approach). C:N takes the same terms without the weighing, which cancels in a
+    ratio, its repeatability from the monitors' own C:N. U = k x u.
+    """
+    u_m = config.balance_u_mg or 0.0
+    k_cov = config.coverage_k
+    cert_rel = {}
+    for el in ("n", "c"):
+        def rel(p, el=el):
+            u, v = getattr(p, f"u_pct_{el}_cert", None), getattr(p, f"pct_{el}")
+            return (u / v) if (u is not None and v) else 0.0
+        cert_rel[el] = rel
+    out = {"balance_u_mg": config.balance_u_mg, "k": k_cov}
+    for el in ("n", "c"):
+        meas, cert = f"pct_{el}_measured", f"pct_{el}"
+        mons = sorted((p for p in positions if p.role == "Drift" and p.row not in excl_e
+                       and getattr(p, meas) is not None and getattr(p, cert)), key=lambda p: p.row)
+        ratios = [getattr(p, meas) / getattr(p, cert) for p in mons]
+        s_rep = _mssd(ratios)
+        w_mon = (sum((u_m / p.amount) ** 2 for p in mons) / len(mons)) if mons else 0.0
+        s_inst = None if s_rep is None else math.sqrt(max(0.0, s_rep ** 2 - w_mon))
+        in_force = F[f"elem_{el}"]["in_force"]
+        if in_force:
+            scale = _rms([cert_rel[el](p) for p in mons]) or 0.0
+        else:
+            kstd = [p for p in positions if p.role not in ("Blank", "Exclude", "Sample") and p.amount
+                    and getattr(p, cert) is not None and getattr(p, f"area_{el}") is not None]
+            scale = _rms([cert_rel[el](p) for p in kstd]) or 0.0
+        anchors = [p for p in positions if p.role == "Anchor" and getattr(p, f"pct_{el}_reported") is not None
+                   and getattr(p, cert)]
+        devs = [getattr(p, f"pct_{el}_reported") / getattr(p, cert) - 1.0 for p in anchors]
+        rms_dev = _rms(devs) if len(devs) >= 2 else None
+        cref = _rms([cert_rel[el](p) for p in anchors]) if anchors else None
+        trueness = None if rms_dev is None else math.sqrt(rms_dev ** 2 + (cref or 0.0) ** 2)
+        out[el] = {"n_monitors": len(mons), "monitor_rows": [p.row for p in mons], "s_rep": s_rep,
+                   "weighing_monitors": math.sqrt(w_mon), "s_inst": s_inst, "in_force": in_force,
+                   "cert_scale": scale, "n_anchors": len(anchors), "anchor_rms": rms_dev,
+                   "anchor_cert": cref, "trueness": trueness}
+
+    # C:N, from the monitors' own measured C:N over the certified one
+    def cn_cert(p):
+        return (p.pct_c / ATOMIC_C) / (p.pct_n / ATOMIC_N)
+    cn_mons = sorted((p for p in positions if p.role == "Drift" and p.row not in excl_e
+                      and p.cn_molar is not None and p.pct_c and p.pct_n), key=lambda p: p.row)
+    cn_rep = _mssd([p.cn_molar / cn_cert(p) for p in cn_mons])
+    cn_anchors = [p for p in positions if p.role == "Anchor" and p.cn_molar_reported is not None
+                  and p.pct_c and p.pct_n]
+    cn_devs = [p.cn_molar_reported / cn_cert(p) - 1.0 for p in cn_anchors]
+    cn_rms = _rms(cn_devs) if len(cn_devs) >= 2 else None
+    cn_cref = (_rms([math.sqrt(cert_rel["n"](p) ** 2 + cert_rel["c"](p) ** 2) for p in cn_anchors])
+               if cn_anchors else None)
+    out["cn"] = {"n_monitors": len(cn_mons), "monitor_rows": [p.row for p in cn_mons], "s_rep": cn_rep,
+                 "cert_scale": math.sqrt(out["n"]["cert_scale"] ** 2 + out["c"]["cert_scale"] ** 2),
+                 "n_anchors": len(cn_anchors), "anchor_rms": cn_rms, "anchor_cert": cn_cref,
+                 "trueness": None if cn_rms is None else math.sqrt(cn_rms ** 2 + (cn_cref or 0.0) ** 2)}
+    F["unc_elem"] = out
+
+    def cal2(p, el):
+        """Squared relative calibration term of element el at p, or None."""
+        if out[el]["in_force"]:
+            if out[el]["s_rep"] is None:
+                return None
+            return _interp_multiplier(p.row, out[el]["monitor_rows"]) * out[el]["s_rep"] ** 2
+        r = _kfit_rel(F[f"k_{el}"], getattr(p, f"ug_{el}"))
+        return None if r is None else r * r
+
+    for p in positions:
+        for el in ("n", "c"):
+            val, o = getattr(p, f"pct_{el}_reported"), out[el]
+            u = None
+            if val is not None and o["s_inst"] is not None and p.amount:
+                c2 = cal2(p, el)
+                if c2 is not None:
+                    rel2 = (o["s_inst"] ** 2 + (u_m / p.amount) ** 2 + c2 + o["cert_scale"] ** 2
+                            + (o["trueness"] or 0.0) ** 2)
+                    u = val * math.sqrt(rel2)
+            setattr(p, f"u_pct_{el}", u)
+            setattr(p, f"U_pct_{el}", None if u is None else k_cov * u)
+        rel = None
+        if p.cn_molar_reported is not None and cn_rep is not None:
+            if out["n"]["in_force"] and out["c"]["in_force"]:
+                c2 = _interp_multiplier(p.row, out["cn"]["monitor_rows"]) * cn_rep ** 2
+            else:
+                parts = [cal2(p, el) for el in ("n", "c")]
+                c2 = None if None in parts else sum(parts)
+            if c2 is not None:
+                rel = math.sqrt(cn_rep ** 2 + c2 + out["cn"]["cert_scale"] ** 2 + (out["cn"]["trueness"] or 0.0) ** 2)
+        p.u_cn_molar = None if rel is None else p.cn_molar_reported * rel
+        p.U_cn_molar = None if rel is None else k_cov * p.u_cn_molar
+        p.u_cn_mass = None if rel is None else p.cn_mass_reported * rel
+        p.U_cn_mass = None if rel is None else k_cov * p.u_cn_mass
 
 
 def process(positions, config=None):
@@ -616,6 +770,9 @@ def process(positions, config=None):
             p.cn_molar_reported = p.cn_molar * p.elem_factor_n / p.elem_factor_c
             p.cn_mass_reported = p.cn_mass * p.elem_factor_n / p.elem_factor_c
 
+    # ---- uncertainty of %N, %C and C:N (1.4.3) -------------------------------
+    _elemental_uncertainty(positions, F, config, excl_e)
+
     # ---- size limits -----------------------------------------------------
     min_n = config.min_area_n if config.min_area_n is not None else (F["lin_n"]["min"] or 0)
     min_c = config.min_area_c if config.min_area_c is not None else (F["lin_c"]["min"] or 0)
@@ -845,6 +1002,7 @@ def config_to_dict(config: Config) -> dict:
         "u_sample_n": config.u_sample_n,
         "u_sample_c": config.u_sample_c,
         "coverage_k": config.coverage_k,
+        "balance_u_mg": config.balance_u_mg,
         "elemental_correction": config.elemental_correction,
         "elemental_threshold_pct": config.elemental_threshold_pct,
         "exclude_elemental": list(config.exclude_elemental),

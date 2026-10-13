@@ -213,6 +213,7 @@ def test_workbook_agrees_with_engine_on_the_new_columns(tmp_path):
     wb = openpyxl.load_workbook(tmp_path / "calc" / "ramped.xlsx", data_only=True)
     wk, ft, rs = wb["Work"], wb["Fits"], wb["Results"]
     head = {str(wk.cell(5, c).value): c for c in range(1, wk.max_column + 1)}
+    rhead = {str(rs.cell(4, c).value): c for c in range(1, rs.max_column + 1)}
     positions, fits = process(parse_export(seq), cfg)
     for attr, name in (("elem_factor_n", "elem factor N"), ("elem_factor_c", "elem factor C"),
                        ("pct_n_reported", "%N corrected"), ("pct_c_reported", "%C corrected"),
@@ -227,9 +228,11 @@ def test_workbook_agrees_with_engine_on_the_new_columns(tmp_path):
     assert ft["B246"].value == "Yes" and ft["B249"].value == "Yes" and ft["B244"].value == 5
     assert abs(ft["B245"].value - fits["elem_n"]["max_bias"] * 100) < 1e-9
     for p in positions:
-        for col, attr in ((6, "pct_n_reported"), (5, "pct_c_reported"), (16, "elem_factor_n"), (19, "pct_n_measured")):
+        for col, attr in ((rhead["%N"], "pct_n_reported"), (rhead["%C"], "pct_c_reported"),
+                          (rhead["Elemental drift factor N"], "elem_factor_n"), (rhead["%N as measured"], "pct_n_measured"),
+                          (rhead["U(%N), k=2.0"], "U_pct_n"), (rhead["U(C:N molar), k=2.0"], "U_cn_molar")):
             mine, theirs = getattr(p, attr), rs.cell(4 + p.row, col).value
             theirs = theirs if isinstance(theirs, (int, float)) else None
             assert (mine is None) == (theirs is None) and (mine is None or abs(mine - theirs) < 1e-9 * max(1.0, abs(mine)))
-        text = rs[f"K{4 + p.row}"].value or ""
+        text = rs.cell(4 + p.row, rhead["Flags"]).value or ""
         assert set(p.flags) == {t.strip() for t in text.split(";") if t.strip()}, p.row

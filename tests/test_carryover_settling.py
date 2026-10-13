@@ -150,6 +150,7 @@ def test_workbook_agrees_with_engine(exports, tmp_path):
         wb = openpyxl.load_workbook(tmp_path / "calc" / f"{name}.xlsx", data_only=True)
         wk, ft, rs = wb["Work"], wb["Fits"], wb["Results"]
         header = {wk.cell(5, c).value: c for c in range(1, wk.max_column + 1)}
+        flags_col = [c for c in range(1, rs.max_column + 1) if rs.cell(4, c).value == "Flags"][0]
         feeds = {c for h, c in header.items() if str(h or "").startswith("ch ")}
         errors = [(s.title, c.coordinate) for s in wb for row in s.iter_rows() for c in row
                   if isinstance(c.value, str) and c.value.startswith("#") and c.value[1:4].isupper()
@@ -171,5 +172,5 @@ def test_workbook_agrees_with_engine(exports, tmp_path):
                 assert (mine is None) == (theirs is None), (name, p.row, attr, mine, theirs)
                 if mine is not None:
                     assert abs(mine - theirs) < 1e-9 * max(1.0, abs(mine)), (name, p.row, attr)
-            text = rs[f"K{4 + p.row}"].value or ""
+            text = rs.cell(4 + p.row, flags_col).value or ""
             assert set(p.flags) == {t.strip() for t in text.split(";") if t.strip()}, (name, p.row)
