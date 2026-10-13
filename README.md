@@ -1,6 +1,6 @@
 # isoharness
 
-isoharness is a website for stable isotope data reduction, one instrument at a time. EA-IRMS comes first: it corrects Thermo EA-IRMS carbon and nitrogen runs, with numbers from ea_irms, the Python engine behind the lab's EA-IRMS correction workbook, which this repository carries at version 1.4.3. GasBench N₂O (nitrate by the denitrifier method, and organic nitrogen after persulfate oxidation) and GasBench carbonate are planned.
+isoharness is a website for stable isotope data reduction, one instrument at a time. EA-IRMS comes first: it corrects Thermo EA-IRMS carbon and nitrogen runs, with numbers from ea_irms, the Python engine behind the lab's EA-IRMS correction workbook, which this repository carries at version 1.4.4. GasBench N₂O (nitrate by the denitrifier method, and organic nitrogen after persulfate oxidation) and GasBench carbonate are planned.
 
 ## Where it stands
 
@@ -10,7 +10,7 @@ Phase one put the engine behind a web API, LibreOffice in the container image to
 
 | Path | What it is |
 | --- | --- |
-| `ea_irms/` | The engine, 1.4.3 (parsing, the corrections, the workbook, and the Postgres store that phase three will use); 1.4.3 adds the uncertainty of %N, %C and C:N and puts each value's U beside it on the Results sheet |
+| `ea_irms/` | The engine, 1.4.4 (parsing, the corrections, the workbook, and the Postgres store that phase three will use); 1.4.3 adds the uncertainty of %N, %C, and C:N and puts each value's U beside it on the Results sheet, and 1.4.4 marks the samples to measure again |
 | `isoharness/` | The web API (FastAPI) |
 | `web/` | The pages the API serves: `index.html`, the home page at `/`, which lists the instruments; `ea-irms.html`, the EA-IRMS page at `/ea-irms` (the approved prototype's markup, as a template); `dc.js` (draws the template), `logic.js` (the views), and Preact 10.29.8 in `vendor/preact/` with its MIT license |
 | `port/` | The preview port (the steps that depend on a user's choices, in JavaScript) and its test |
@@ -43,15 +43,21 @@ These endpoints serve the EA-IRMS page. An instrument added later gets endpoints
 | `GET /api/example` | The 2026-09-15 test run, which the page offers as an example |
 | `POST /api/process` | Every position's values and flags, the fitted steps, and the block the preview port recomputes from |
 | `POST /api/workbook` | The correction workbook (.xlsx), with its formulas computed by LibreOffice unless `values=false` |
-| `POST /api/results.csv` | The workbook's Results sheet as CSV, at full precision: each value followed by its U, then Flags and the u columns |
+| `POST /api/results.csv` | The workbook's Results sheet as CSV, at full precision: each value followed by its U, then Flags, the rerun mark with its reason and a suggested mass, and the u columns |
 
 Each POST takes a multipart form with `file`, an export as .xls, .xlsx, .xlsm, .csv, .txt, or .tsv of at most 10 MB (`ISOHARNESS_MAX_UPLOAD_MB` changes the limit), and optionally `config`, a lab configuration as JSON in the form `/api/defaults` returns. `/api/workbook` also takes `run_name` and `run_date` for its Setup sheet. A file ea_irms cannot read is refused with a message that names the problem, such as the columns it lacks.
 
 The service converts one workbook at a time, because LibreOffice conversions that run together share a profile; in a test on 2026-10-11, one of three conversions started together failed, so the image runs a single service process. Three requests sent together came back in 5.1, 6.8, and 8.5 s, one after another. The image starts LibreOffice once while it is built, which in a test on 2026-10-11 brought the first workbook from a fresh container down from 3.42 s to 2.47 s (one trial each).
 
-## Uncertainty of %N, %C and C:N (ea_irms 1.4.3)
+## Uncertainty of %N, %C, and C:N (ea_irms 1.4.3)
 
-Each %N, %C and C:N carries u and U = k·u, with the k of the isotope values. For %N and %C, u combines five terms, each a fraction of the value: the instrument's repeatability, from the drift monitors' measured over certified ratios by successive differences in position, less the part their own weighing explains; the position's weighing, the balance's standard uncertainty (`balance_u_mg`, Setup B33) over its mass; the calibration, the interpolated elemental drift factor when that correction is in force and the k-factor line at the position's micrograms when it is not; the certificate uncertainty of the material that sets the scale (standards table columns u(%C) and u(%N)); and trueness, the anchors' RMS deviation from their certified values combined with their certificate uncertainty, as in the Nordtest TR 537 handbook. C:N takes the same terms without the weighing, which cancels in a ratio. Empty inputs count as 0. The workbook computes every term as a formula (Fits rows 300 to 335), and QC counts the anchors and linearity standards that fall within their U. The page does not show these yet.
+Each %N, %C, and C:N carries u and U = k·u, with the k of the isotope values. For %N and %C, u combines five terms, each a fraction of the value: the instrument's repeatability, from the drift monitors' measured over certified ratios by successive differences in position, less the part their own weighing explains; the position's weighing, the balance's standard uncertainty (`balance_u_mg`, Setup B33) over its mass; the calibration, the interpolated elemental drift factor when that correction is in force and the k-factor line at the position's micrograms when it is not; the certificate uncertainty of the material that sets the scale (standards table columns u(%C) and u(%N)); and trueness, the anchors' RMS deviation from their certified values combined with their certificate uncertainty, as in the Nordtest TR 537 handbook. C:N takes the same terms without the weighing, which cancels in a ratio. Empty inputs count as 0. The workbook computes every term as a formula (Fits rows 300 to 335), and QC counts the anchors and linearity standards that fall within their U. The page does not show these yet.
+
+## Rerun marks (ea_irms 1.4.4)
+
+A sample is marked only for what measuring it again can fix: the amount, the peak, or the state of the instrument at its position, never its value. It is marked for a rerun of N, C, or both when its peak lies outside the range of the linearity standards or under the blank multiple (`min_blank_multiple`, 3 by default), when it follows an oversized sample and its background rose by more than `carryover_mv` (2.0 mV by default), or when the undesignated N2 or CO2 reference pulse at its position lies more than `ref_pulse_off_sd` robust SDs (4 by default) from the median of the run's pulses. It is marked for a check when it ran before the background settled or carries the peak of only one element. A δ value outside the anchors' range stays a flag and is not marked, because a rerun would extrapolate the same way.
+
+For a rerun the workbook suggests a mass range that puts each peak inside the linearity range and above the blank multiple, from that analysis's own peak area per mg; when no one mass suits both N and C, it gives both ranges for two capsules. Problems of the whole run are listed once, at the top of a new Rerun sheet: a check standard further than `check_offset_permil` from its accepted value, anchors outside their U for %N, %C, or C:N, and a reference-gas SD at or above `ref_gas_sd_limit` (0.1 permil by default, the zero-enrichment limit of the FIRMS Good Practice Guide, 2nd ed., section 4.3.2). Results carries the mark, its reason, and the suggested mass after Flags, with rows shaded orange (rerun) or pale orange (check), and the Rerun sheet lists the marked samples in the order they ran. Replicates are not compared yet; that needs a sample sheet saying which positions hold the same sample. The page does not show the marks yet.
 
 ## The preview port
 

@@ -9,11 +9,13 @@
 // significance level, the monitor outlier limit, the check-standard offset, the
 // blank multiple, k, the elemental gate and the first drift position) come with
 // the block as D.settings, and each position says whether the server set its CO2
-// peak aside as a reference pulse (rej);
+// peak aside as a reference pulse (rej) and, from ea_irms 1.4.4, how far its
+// undesignated N2 and CO2 reference pulses lie from the run's median when that
+// flags them (poN, poC; null otherwise);
 // a block without them gets the package defaults. Settings that act before the
-// block is built (the standards, the reference-pulse windows, the size limits,
-// settling and carryover) are applied by the server, so a change to them goes
-// back to the server.
+// block is built (the standards, the reference-pulse windows and limit, the size
+// limits, settling and carryover) are applied by the server, so a change to them
+// goes back to the server.
 //
 // The methods below are the prototype's (logic.js lines 43 to 378), changed only
 // to read D.settings in place of the fixed defaults (settings()).
@@ -362,6 +364,9 @@ class PortEngine {
       }
       if (q.r < settled) fl.push('ran before the background settled');
       if (q.carry) fl.push('possible carryover from an oversized sample');
+      for (const [dev, nm] of [[q.poN, 'N2'], [q.poC, 'CO2']]) {
+        if (dev != null) fl.push(nm + ' reference pulse off by ' + (dev >= 0 ? '+' : '') + dev.toFixed(2));
+      }
       q.flags = fl;
     }
     return M;

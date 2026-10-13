@@ -15,12 +15,13 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter as gcl, column_index_from_string
 from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.formatting.rule import FormulaRule
 
 
 from .parse import _read_rows
 from .pipeline import DEFAULT_STANDARDS, MAX_STANDARDS, MIN_OUTLIER_MONITORS, Config
 
-VERSION = "1.4.3"
+VERSION = "1.4.4"
 NSTD = MAX_STANDARDS      # rows in the Setup standards table (16 from 1.4.2, 13 before)
 
 
@@ -93,6 +94,8 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     FILL_IN   = PatternFill('solid', fgColor='FFF2CC')       # yellow = type here
     FILL_HELP = PatternFill('solid', fgColor='F2F2F2')       # grey = machinery
     FILL_OUT  = PatternFill('solid', fgColor='E2EFDA')       # green = reported value
+    FILL_RERUN = PatternFill('solid', fgColor='F8CBAD')      # orange = rerun (1.4.4)
+    FILL_CHECK = PatternFill('solid', fgColor='FCE4D6')      # pale orange = check (1.4.4)
     THIN = Side(style='thin', color='BFBFBF')
     BOX = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 
@@ -132,11 +135,14 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     r = rd(r, '5.  Take the numbers from Results, with their uncertainties. Work is the audit trail behind them '
               'and Fits holds every fitted coefficient with its r-squared, residual scatter and, for the '
               'corrections, the test that decided whether it was applied.')
+    r = rd(r, '6.  Open Rerun. It lists the samples to measure again, with the reason and a mass to weigh, and '
+              'the samples to check first. Its top line says whether the run as a whole has a problem.')
     r += 1
     r = rd(r, 'Colour', F_H1)
     r = rd(r, 'Yellow cells with blue text are yours to fill in. Grey columns are machinery and can be ignored. '
               'Green columns are the reported values. Everything else is a formula, and overtyping one breaks that '
-              'row silently, so work on a copy.')
+              'row silently, so work on a copy. Orange rows on Results and Rerun are samples to measure again; '
+              'pale orange rows are samples to check first.')
     r += 1
     r = rd(r, 'What the sheets do', F_H1)
     for a, b in [
@@ -146,6 +152,7 @@ def build_workbook(export_path, out_path, config: Config | None = None,
                     'drift and calibration corrections, then elemental content.'),
         ('Fits',    'Every coefficient fitted from this run, each with n, r-squared and residual scatter.'),
         ('Results', 'The clean table to copy out or plot from.'),
+        ('Rerun',   'The samples to measure again or to check, with the reason and a suggested mass.'),
         ('QC',      'Checks and flags. Read this first.'),
     ]:
         c = ws.cell(r, 2); c.value = f'{a}.  {b}'; c.font = F_SM
@@ -201,7 +208,7 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     r = rd(r, 'Elemental content comes from a regression of peak area on micrograms of C or N across every standard '
               'with both a known mass and a known composition. The intercept of that line is the area blank and is '
               'subtracted, so the k-factor is not forced through the origin.')
-    r = rd(r, 'From 1.4.3 Results also carries u and U for %N, %C and C:N, each from five terms combined in '
+    r = rd(r, 'From 1.4.3 Results also carries u and U for %N, %C, and C:N, each from five terms combined in '
               'quadrature (Fits row 300 onwards): the instrument\'s repeatability, from the drift monitors\' measured '
               'over certified ratios by successive differences in position, less the part their own weighing '
               'explains; the position\'s weighing, the balance\'s u in Setup B33 over its mass; the calibration, the '
@@ -234,6 +241,23 @@ def build_workbook(export_path, out_path, config: Config | None = None,
               'the working-gas value in d13C, within Setup B40, which no sample does. The template rejects it, '
               'reports the position without a carbon value, and says so in Flags. Leave B39 empty to switch the '
               'check off.')
+    r += 1
+    r = rd(r, 'Rerun marks (1.4.4)', F_H1)
+    r = rd(r, 'A sample is marked only for what measuring it again can fix: the amount, the peak, or the state of '
+              'the instrument at its position, never its value. It is marked for a rerun of N, C, or both when its '
+              'peak lies outside the range of the linearity standards (Fits rows 81 to 104) or under the blank '
+              'multiple in Setup B25; when it follows an oversized sample and its background rose (Setup B28); or '
+              'when the reference pulse at its position is off, further than Setup B67 robust SDs from the median '
+              'of the run\'s pulses. It is marked for a check when it ran before the background settled or has the '
+              'peak of only one element. A value outside the anchors\' range is not marked, because a rerun would '
+              'extrapolate the same way; the fix is an anchor that brackets it.')
+    r = rd(r, 'The suggested mass puts each peak inside the linearity range and above the blank multiple, read from '
+              'this analysis\'s own peak area per mg. When no one mass does that for both N and C, the two '
+              'elements need two capsules and both ranges are given. Problems of the whole run, a check standard '
+              'off, anchors outside U, or a reference-gas SD at or above Setup B68 (the FIRMS guide\'s '
+              'zero-enrichment limit, section 4.3.2), are listed once at the top of Rerun and not on every sample. '
+              'Replicates are not compared yet: that needs a sample sheet saying which positions hold the same '
+              'sample.')
     r += 1
     r = rd(r, 'Known limits', F_H1)
     r = rd(r, 'The outlier test on the drift monitors needs five of them in the fit; with four it has one degree of '
@@ -471,6 +495,20 @@ def build_workbook(export_path, out_path, config: Config | None = None,
         lab(st, SLAST + 3 + i, note, F_NOTE, 7)
     AMC, AMN = f'Setup!$B${SLAST+3}', f'Setup!$B${SLAST+4}'
 
+    # 1.4.4: the rerun marks' two settings, below the constants so nothing above moves
+    lab(st, SLAST + 6, 'Rerun marks (1.4.4)', F_H1)
+    lab(st, SLAST + 7, 'Reference pulse off at a position, robust SDs from the run\'s median', F_SM)
+    inp(st, SLAST + 7, 2, '' if _CFG.ref_pulse_off_sd is None else _CFG.ref_pulse_off_sd, '0.0')
+    lab(st, SLAST + 7, 'A sample whose undesignated N2 or CO2 reference pulse lies further than this from the '
+                       'median of the run\'s pulses is marked for a rerun of that element. Leave empty to switch '
+                       'the check off.', F_NOTE, 7)
+    lab(st, SLAST + 8, 'Reference-gas SD that is a problem for the whole run (permil)', F_SM)
+    inp(st, SLAST + 8, 2, '' if _CFG.ref_gas_sd_limit is None else _CFG.ref_gas_sd_limit, '0.00')
+    lab(st, SLAST + 8, 'The FIRMS guide gives 0.1 permil as the usual limit for the SD of N2 and CO2 working-gas '
+                       'pulses in its zero-enrichment test (section 4.3.2). At or above this the Rerun sheet says '
+                       'so once. Leave empty to switch it off.', F_NOTE, 7)
+    S_POFF, S_RGSD = f'Setup!$B${SLAST+7}', f'Setup!$B${SLAST+8}'
+
     S_BLANK, S_LIN, S_DRIFT, S_DM = 'Setup!$B$10', 'Setup!$B$11', 'Setup!$B$12', 'Setup!$B$13'
     S_LINC = 'IF(Setup!$B$18<>"",Setup!$B$18,Setup!$B$11)'   # carbon switch, empty = follow B11 (1.4.1)
     S_FIRST, S_ALPHA, S_EXN, S_EXC = 'Setup!$B$14', 'Setup!$B$15', 'Setup!$B$16', 'Setup!$B$17'
@@ -564,7 +602,7 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     EX = {name: gcl(first_elem_col + k) for k, name in enumerate(ELEM_NAMES)}
     COLS += [(name, EX[name], 10 if name.endswith('corrected') else 7,
               'o' if name.endswith('corrected') else 'h') for name in ELEM_NAMES]
-    # Uncertainty of %N, %C and C:N (1.4.3), after everything else so no earlier
+    # Uncertainty of %N, %C, and C:N (1.4.3), after everything else so no earlier
     # column moves.
     UNC_NAMES = ['u%N cert', 'u%C cert', 'cert rel N', 'cert rel C',
                  'd2 N', 'w2 N', 'd2 C', 'w2 C', 'cn x', 'cn f', 'cn d2',
@@ -577,6 +615,19 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     first_unc_col = first_elem_col + len(ELEM_NAMES)
     UX = {name: gcl(first_unc_col + k) for k, name in enumerate(UNC_NAMES)}
     COLS += [(name, UX[name], 9 if name in UOUT else 7, 'o' if name in UOUT else 'h') for name in UNC_NAMES]
+    # Rerun marks (1.4.4), after everything else so no earlier column moves. The
+    # flag pieces are the Flags text of Results, one piece per cell, so that the
+    # marks read exactly what Flags says.
+    RERUN_NAMES = ['pdev N', 'apdev N', 'poff N', 'pdev C', 'apdev C', 'poff C',
+                   'fl noN', 'fl noC', 'fl rejC', 'fl sizeN', 'fl sizeC', 'fl checkN', 'fl checkC',
+                   'fl blankN', 'fl blankC', 'fl settle', 'fl carry', 'fl pulseN', 'fl pulseC',
+                   'chk off', 'chk list',
+                   'per mg N', 'lo N', 'hi N', 'per mg C', 'lo C', 'hi C', 'mass lo', 'mass hi',
+                   'rr N', 'rr C', 'rr both', 'rr check', 'rerun', 'why raw', 'why', 'suggested mass', 'rerun rank']
+    ROUT = ('rerun', 'why', 'suggested mass')
+    first_rerun_col = first_unc_col + len(UNC_NAMES)
+    RX = {name: gcl(first_rerun_col + k) for k, name in enumerate(RERUN_NAMES)}
+    COLS += [(name, RX[name], 12 if name in ROUT else 7, 'o' if name in ROUT else 'h') for name in RERUN_NAMES]
     GROUPS = [('A','D','identification'),('E','G','mass'),('H','K','peak lookup'),('L','R','as measured'),
               ('S','V','from the standards table'),('W','AA','nitrogen corrections'),
               ('AB','AF','carbon corrections'),('AG','AL','elemental content'),
@@ -587,9 +638,12 @@ def build_workbook(export_path, out_path, config: Config | None = None,
               (HX['pos used'],HX['settle start'],'carryover and settling helpers, ignore'),
               (EX['desig x'],EX['elem factor C'],'reference-pulse and elemental drift helpers, ignore'),
               (EX['%N corrected'],EX['C:N mass corrected'],'elemental content, drift-corrected'),
-              (UX['u%N cert'],UX['urel CN'],'uncertainty of %N, %C and C:N: helpers, ignore'),
-              (UX['u %N'],UX['U CN mass'],'uncertainty of %N, %C and C:N, 1 SD and k x SD'),
-              (UX['inU N'],UX['inU CN'],'within U, for QC')]
+              (UX['u%N cert'],UX['urel CN'],'uncertainty of %N, %C, and C:N: helpers, ignore'),
+              (UX['u %N'],UX['U CN mass'],'uncertainty of %N, %C, and C:N, 1 SD and k x SD'),
+              (UX['inU N'],UX['inU CN'],'within U, for QC'),
+              (RX['pdev N'],RX['rr check'],'rerun marks: helpers, ignore'),
+              (RX['rerun'],RX['suggested mass'],'rerun marks'),
+              (RX['rerun rank'],RX['rerun rank'],'helper')]
     for a, b, t in GROUPS:
         wk.cell(4, wk[a + '1'].column, t).font = F_GRP
         wk.cell(4, wk[a + '1'].column).fill = FILL_GRP
@@ -620,6 +674,9 @@ def build_workbook(export_path, out_path, config: Config | None = None,
                                            'kfit N', 'kfit C', 'adev N', 'adev C', 'adev CN',
                                            'urel N', 'urel C', 'urel CN')})
     NUMF.update({UX[n]: '0.000' for n in UOUT})
+    NUMF.update({RX[n]: '0.000' for n in ('pdev N', 'apdev N', 'pdev C', 'apdev C', 'lo N', 'hi N', 'lo C',
+                                          'hi C', 'mass lo', 'mass hi')})
+    NUMF.update({RX[n]: '0.0' for n in ('per mg N', 'per mg C')})
     NUMF.update({UX[n]: '0.00000000' for n in ('d2 N', 'w2 N', 'd2 C', 'w2 C', 'cn d2', 'cal2 N', 'cal2 C',
                                                'cal2 CN', 'scale2 N', 'scale2 C', 'acert2 N', 'acert2 C',
                                                'acert2 CN')})
@@ -896,7 +953,7 @@ def build_workbook(export_path, out_path, config: Config | None = None,
         f[CH['ch bgd monitor']] = f'=IF(AND($D{i}="Drift",$N{i}<>""),$N{i},NA())'
         f[CH['mon bgd']] = f'=IF(AND($D{i}="Drift",$N{i}<>""),$N{i},"")'
         f[CH['mon bgd x']] = f'=IF(${CH["mon bgd"]}{i}="","",$A{i})'
-        # Uncertainty of %N, %C and C:N (1.4.3). Fits rows 301 to 335 hold the run's terms.
+        # Uncertainty of %N, %C, and C:N (1.4.3). Fits rows 301 to 335 hold the run's terms.
         UXc = UX
         f[UXc['u%N cert']] = stdpull(i, SUPN)
         f[UXc['u%C cert']] = stdpull(i, SUPC)
@@ -970,6 +1027,70 @@ def build_workbook(export_path, out_path, config: Config | None = None,
         f[UXc['inU CN']] = (f'=IF(AND(OR($D{i}="Anchor",$D{i}="Linearity"),ISNUMBER(${UXc["U CN molar"]}{i}),'
                             f'ISNUMBER($U{i}),ISNUMBER($V{i})),IF(AND($U{i}>0,$V{i}>0),'
                             f'IF(ABS(${CNC}{i}-{CERTCN})<=${UXc["U CN molar"]}{i},1,0),""),"")')
+        # Rerun marks (1.4.4). Fits rows 339 to 356 hold the run's numbers.
+        R_ = lambda name: f'${RX[name]}{i}'      # noqa: E731
+        for el, src, med, lim in (('N', 'BT', '$B$340', '$B$342'), ('C', 'BW', '$B$344', '$B$346')):
+            f[RX[f'pdev {el}']] = f'=IF(OR(NOT(ISNUMBER(${src}{i})),Fits!{med}=""),"",${src}{i}-Fits!{med})'
+            f[RX[f'apdev {el}']] = f'=IF({R_(f"pdev {el}")}="","",ABS({R_(f"pdev {el}")}))'
+            f[RX[f'poff {el}']] = (f'=IF(OR({R_(f"pdev {el}")}="",Fits!{lim}=""),0,'
+                                   f'IF(ABS({R_(f"pdev {el}")})>Fits!{lim},1,0))')
+        f[RX['fl noN']] = f'=IF($B{i}="","",IF($L{i}="","no N peak; ",""))'
+        f[RX['fl noC']] = f'=IF($B{i}="","",IF($P{i}="","no C peak; ",""))'
+        f[RX['fl rejC']] = f'=IF($B{i}="","",IF(${EX["rej C"]}{i}=1,"CO2 peak rejected as a reference pulse; ",""))'
+        for el, a, lo, hi in (('N', 'L', '81', '97'), ('C', 'P', '82', '104')):
+            f[RX[f'fl size{el}']] = (f'=IF($B{i}="","",IF(${a}{i}="","",IF(Fits!$B${lo}<=0,"",'
+                                     f'IF(${a}{i}<Fits!$B${lo},"{el} below linearity range; ",'
+                                     f'IF(Fits!$B${hi}<=0,"",IF(${a}{i}>Fits!$B${hi},"{el} above linearity range; ",""))))))')
+        for el, name, got, acc in (('N', 'd15N', 'AA', 'S'), ('C', 'd13C', 'AF', 'T')):
+            f[RX[f'fl check{el}']] = (f'=IF($B{i}="","",IF($D{i}<>"Check","",IF(${got}{i}="","",IF(${acc}{i}="","",'
+                                      f'IF(ABS(${got}{i}-${acc}{i})<={S_THR},"",'
+                                      f'"check {name} off by "&TEXT(${got}{i}-${acc}{i},"+0.00;-0.00")&"; ")))))')
+        for el, a, blank in (('N', 'L', '6'), ('C', 'P', '10')):
+            f[RX[f'fl blank{el}']] = (f'=IF($B{i}="","",IF($D{i}="Blank","",IF(${a}{i}="","",IF({S_MULT}="","",'
+                                      f'IF(Fits!$B${blank}<=0,"",IF(${a}{i}>=Fits!$B${blank}*{S_MULT},"",'
+                                      f'"{el} peak only "&TEXT(${a}{i}/Fits!$B${blank},"0.0")&"x the blank; "))))))')
+        f[RX['fl settle']] = f'=IF($B{i}="","",IF($A{i}>=Fits!$B$86,"","ran before the background settled; "))'
+        f[RX['fl carry']] = (f'=IF($B{i}="","",IF(${HX["carry flag"]}{i}=1,'
+                             f'"possible carryover from an oversized sample; ",""))')
+        for el, name in (('N', 'N2'), ('C', 'CO2')):
+            f[RX[f'fl pulse{el}']] = (f'=IF($B{i}="","",IF({R_(f"poff {el}")}=1,"{name} reference pulse off by "'
+                                      f'&TEXT({R_(f"pdev {el}")},"+0.00;-0.00")&"; ",""))')
+        f[RX['chk off']] = f'=IF(AND($B{i}<>"",OR({R_("fl checkN")}<>"",{R_("fl checkC")}<>"")),1,0)'
+        if n == 0:
+            f[RX['chk list']] = f'=IF({R_("chk off")}=1,$A{i}&"","")'
+        else:
+            prev = f'${RX["chk list"]}{i-1}'
+            f[RX['chk list']] = f'={prev}&IF({R_("chk off")}=1,IF({prev}="","",", ")&$A{i},"")'
+        for el, a, loa, hia in (('N', 'L', '$B$347', '$B$348'), ('C', 'P', '$B$349', '$B$350')):
+            per = R_(f'per mg {el}')
+            f[RX[f'per mg {el}']] = (f'=IF(AND(ISNUMBER(${a}{i}),ISNUMBER($G{i})),'
+                                     f'IF(AND(${a}{i}>0,$G{i}>0),${a}{i}/$G{i},""),"")')
+            f[RX[f'lo {el}']] = (f'=IF(OR({per}="",Fits!{loa}<=0,Fits!{hia}<=0,Fits!{loa}>Fits!{hia}),"",'
+                                 f'Fits!{loa}/{per})')
+            f[RX[f'hi {el}']] = f'=IF({R_(f"lo {el}")}="","",Fits!{hia}/{per})'
+        f[RX['mass lo']] = f'=IF(AND({R_("lo N")}="",{R_("lo C")}=""),"",MAX({R_("lo N")},{R_("lo C")}))'
+        f[RX['mass hi']] = f'=IF(AND({R_("hi N")}="",{R_("hi C")}=""),"",MIN({R_("hi N")},{R_("hi C")}))'
+        f[RX['rr N']] = (f'=IF($D{i}<>"Sample",0,IF(OR({R_("fl sizeN")}<>"",{R_("fl blankN")}<>"",'
+                         f'{R_("fl pulseN")}<>""),1,0))')
+        f[RX['rr C']] = (f'=IF($D{i}<>"Sample",0,IF(OR({R_("fl sizeC")}<>"",{R_("fl blankC")}<>"",'
+                         f'{R_("fl pulseC")}<>""),1,0))')
+        f[RX['rr both']] = (f'=IF($D{i}<>"Sample",0,IF(OR({R_("fl carry")}<>"",'
+                            f'AND({R_("fl noN")}<>"",{R_("fl noC")}<>"")),1,0))')
+        f[RX['rr check']] = (f'=IF($D{i}<>"Sample",0,IF(OR({R_("fl settle")}<>"",'
+                             f'AND({R_("fl noN")}<>"",{R_("fl noC")}=""),AND({R_("fl noN")}="",{R_("fl noC")}<>"")),1,0))')
+        f[RX['rerun']] = (f'=IF($D{i}<>"Sample","",IF(OR({R_("rr both")}=1,AND({R_("rr N")}=1,{R_("rr C")}=1)),'
+                          f'"N and C",IF({R_("rr N")}=1,"N",IF({R_("rr C")}=1,"C",IF({R_("rr check")}=1,"Check","")))))')
+        f[RX['why raw']] = (f'=IF({R_("rerun")}="","",' + '&'.join(
+            R_(k) for k in ('fl noN', 'fl sizeN', 'fl noC', 'fl rejC', 'fl sizeC', 'fl blankN', 'fl blankC',
+                            'fl settle', 'fl carry', 'fl pulseN', 'fl pulseC')) + ')')
+        f[RX['why']] = f'=IF({R_("why raw")}="","",LEFT({R_("why raw")},LEN({R_("why raw")})-2))'
+        f[RX['suggested mass']] = (
+            f'=IF(OR({R_("rerun")}="",{R_("rerun")}="Check",{R_("mass lo")}=""),"",'
+            f'IF({R_("mass lo")}<={R_("mass hi")},TEXT({R_("mass lo")},"0.000")&" to "&TEXT({R_("mass hi")},"0.000"),'
+            f'IF(AND({R_("lo N")}<>"",{R_("lo C")}<>""),"N "&TEXT({R_("lo N")},"0.000")&" to "'
+            f'&TEXT({R_("hi N")},"0.000")&"; C "&TEXT({R_("lo C")},"0.000")&" to "&TEXT({R_("hi C")},"0.000")'
+            f'&" (two capsules)","none")))')
+        f[RX['rerun rank']] = (f'=IF({R_("rerun")}="","",COUNTIF(${RX["rerun"]}${R0}:${RX["rerun"]}{i},"?*"))')
         for name, col, width, kind in COLS:
             c = wk.cell(i, wk[col + '1'].column, f.get(col))
             c.font = FONTS[kind]
@@ -1296,8 +1417,8 @@ def build_workbook(export_path, out_path, config: Config | None = None,
             'Off, fewer than two monitors, On, or Auto against Setup B36.' if el == 'N' else '')
     fit(250, 'positions left out', f'=IF({S_EXE}="","none",{S_EXE})', '@')
 
-    # 1.4.3: u of %N, %C and C:N. Fractions of the value, 1 SD.
-    sec(300, 'Uncertainty of %N, %C and C:N (1.4.3), as fractions of the value, 1 SD')
+    # 1.4.3: u of %N, %C, and C:N. Fractions of the value, 1 SD.
+    sec(300, 'Uncertainty of %N, %C, and C:N (1.4.3), as fractions of the value, 1 SD')
     fit(301, 'balance, standard uncertainty of one weighing (mg)', f'=IF({S_BAL}="","",{S_BAL})', '0.0000',
         'Setup B33. Empty: the weighing term is left out, here and in the monitors\' repeatability.')
     for base, el, name, X_, ug, area in ((303, 'N', 'nitrogen', EX['elem x N'], 'AY', 'AZ'),
@@ -1340,6 +1461,47 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     fit(334, 'anchors\' certificate, C:N', f'=IF($B$332=0,"",SQRT(AVERAGE({W(UX["acert2 CN"])})))', '0.00000')
     fit(335, 'trueness, C:N', '=IF($B$333="","",SQRT($B$333^2+N($B$334)^2))', '0.00000')
 
+    # 1.4.4: rerun marks
+    sec(338, 'Rerun marks (1.4.4)')
+    for base, col, name in ((339, 'BT', 'N2'), (343, 'BW', 'CO2')):
+        el = 'N' if name == 'N2' else 'C'
+        fit(base, f'{name} reference pulses read', f'=COUNT({W(col)})', '0')
+        fit(base + 1, 'their median (permil)', f'=IF($B${base}<5,"",MEDIAN({W(col)}))', '0.000',
+            'Needs five pulses.')
+        fit(base + 2, 'robust SD (permil)', f'=IF($B${base+1}="","",1.482602218505602*MEDIAN({W(RX[f"apdev {el}"])}))',
+            '0.0000', '1.4826 x the median absolute deviation from the median.')
+        fit(base + 3, 'a pulse is off beyond (permil)',
+            f'=IF(OR({S_POFF}="",N({S_POFF})<=0,$B${base+2}="",N($B${base+2})<=0),"",{S_POFF}*$B${base+2})',
+            '0.000', 'Setup B67 x the robust SD.')
+    fit(347, 'smallest Area 28 a rerun aims for',
+        f'=MAX(MAX($B$81,0),IF(OR({S_MULT}="",$B$6<=0),0,{S_MULT}*$B$6))', '0.000',
+        'The linearity range, and the blank multiple of Setup B25.')
+    fit(348, 'largest Area 28 a rerun aims for', '=MAX($B$97,0)', '0.000')
+    fit(349, 'smallest Area 44 a rerun aims for',
+        f'=MAX(MAX($B$82,0),IF(OR({S_MULT}="",$B$10<=0),0,{S_MULT}*$B$10))', '0.000')
+    fit(350, 'largest Area 44 a rerun aims for', '=MAX($B$104,0)', '0.000')
+    MARK = W(RX['rerun'])
+    fit(351, 'samples marked for a rerun',
+        f'=COUNTIF({MARK},"N")+COUNTIF({MARK},"C")+COUNTIF({MARK},"N and C")', '0')
+    fit(352, 'samples marked for a check', f'=COUNTIF({MARK},"Check")', '0')
+    NCHK = f'COUNTIF({W(RX["chk off"])},1)'
+    fit(353, 'whole run: check standards',
+        f'=IF({NCHK}=0,"","check standard off by more than "&TEXT({S_THR},"0.00")&" permil at "'
+        f'&IF({NCHK}=1,"position ","positions ")&Work!${RX["chk list"]}${R0+NSAMP-1}&"; ")', '@')
+    parts = []
+    for name, inu in (('%N', 'inU N'), ('%C', 'inU C'), ('C:N', 'inU CN')):
+        within = f'COUNTIFS({W("D")},"Anchor",{W(UX[inu])},1)'
+        total = f'COUNTIFS({W("D")},"Anchor",{W(UX[inu])},">=0")'
+        parts.append(f'IF(AND({total}>0,{within}<{total}),"anchors outside U, {name}: "'
+                     f'&TEXT({total}-{within},"0")&" of "&TEXT({total},"0")&"; ","")')
+    fit(354, 'whole run: anchors outside U', '=' + '&'.join(parts), '@')
+    fit(355, 'whole run: reference gas',
+        '=' + '&'.join(f'IF(AND({S_RGSD}<>"",$B${b}>=3,ISNUMBER($B${b+2})),IF($B${b+2}>={S_RGSD},'
+                       f'"{nm} reference pulses SD "&TEXT($B${b+2},"0.00")&" permil, at or above "'
+                       f'&TEXT({S_RGSD},"0.00")&"; ",""),"")' for b, nm in ((201, 'N2'), (208, 'CO2'))), '@')
+    fit(356, 'problems of the whole run',
+        '=IF($B$353&$B$354&$B$355="","none found",LEFT($B$353&$B$354&$B$355,LEN($B$353&$B$354&$B$355)-2))', '@')
+
     fit(217, 'check standards with a calibrated value',
         f'=COUNTIFS({W("D")},"Check",{W("AA")},">-1E+30")+COUNTIFS({W("D")},"Check",{W("AF")},">-1E+30")'
         f'-COUNTIFS({W("D")},"Check",{W("AA")},">-1E+30",{W("AF")},">-1E+30")', '0',
@@ -1352,6 +1514,7 @@ def build_workbook(export_path, out_path, config: Config | None = None,
             ('%C', 8), ('U(%C)', 8), ('%N', 8), ('U(%N)', 8),
             ('C:N molar', 10), ('U(C:N molar)', 10), ('C:N mass', 10), ('U(C:N mass)', 10),
             ('d13C (permil)', 12), ('U(d13C)', 9), ('d15N (permil)', 12), ('U(d15N)', 9), ('Flags', 54),
+            ('Rerun', 9), ('Why', 46), ('Suggested mass (mg)', 24),
             ('u(%C)', 8), ('u(%N)', 8), ('u(C:N molar)', 10), ('u(C:N mass)', 10), ('u(d13C)', 9), ('u(d15N)', 9),
             ('Elemental drift factor N', 10), ('Elemental drift factor C', 10),
             ('%C as measured', 9), ('%N as measured', 9)]
@@ -1360,7 +1523,8 @@ def build_workbook(export_path, out_path, config: Config | None = None,
                   'in Setup; %C, %N and C:N need a mass in Work column F or G, and from 1.4.2 they carry the '
                   'elemental drift correction when it is in force (Fits row 243 onwards), with the factors and '
                   'the values as measured in the last four columns. Each value is followed by U = k x u, k from '
-                  'Setup B32, and the u columns follow Flags. For the isotope values u comes from the scale '
+                  'Setup B32. Flags is followed by the rerun mark (1.4.4), its reason, and a suggested mass, which '
+                  'the Rerun sheet lists, and then by the u columns. For the isotope values u comes from the scale '
                   'calibration and the sample repeatability (Fits rows 132 onwards) and leaves out the blank, '
                   'linearity and drift corrections and day-to-day reproducibility; for %C, %N and C:N it has five '
                   'terms (Fits rows 300 onwards), and stays incomplete until Setup B33 and Setup columns J and K '
@@ -1383,38 +1547,23 @@ def build_workbook(export_path, out_path, config: Config | None = None,
                 pull(CNm), pull(UX['U CN molar']), pull(CNw), pull(UX['U CN mass']),
                 f'=IF(Work!$AF{k}="","",Work!$AF{k})', pull('CO'), f'=IF(Work!$AA{k}="","",Work!$AA{k})', pull('CM'),
                 (f'=IF(Work!$B{k}="","",'
-                 f'IF(Work!$L{k}="","no N peak; ","")'
-                 f'&IF(Work!$P{k}="","no C peak; ","")'
-                 f'&IF(Work!${EX["rej C"]}{k}=1,"CO2 peak rejected as a reference pulse; ","")'
-                 f'&IF(Work!$L{k}="","",IF(Fits!$B$81<=0,"",'
-                 f'IF(Work!$L{k}<Fits!$B$81,"N below linearity range; ",'
-                 f'IF(Fits!$B$97<=0,"",IF(Work!$L{k}>Fits!$B$97,"N above linearity range; ","")))))'
-                 f'&IF(Work!$P{k}="","",IF(Fits!$B$82<=0,"",'
-                 f'IF(Work!$P{k}<Fits!$B$82,"C below linearity range; ",'
-                 f'IF(Fits!$B$104<=0,"",IF(Work!$P{k}>Fits!$B$104,"C above linearity range; ","")))))'
+                 f'Work!${RX["fl noN"]}{k}&Work!${RX["fl noC"]}{k}&Work!${RX["fl rejC"]}{k}'
+                 f'&Work!${RX["fl sizeN"]}{k}&Work!${RX["fl sizeC"]}{k}'
                  f'&IF(OR(Work!$D{k}="Sample",Work!$D{k}="Check"),IF(Work!$AA{k}="","",IF(Fits!$B$138="","",'
                  f'IF(AND(Work!$AA{k}>=Fits!$B$138,Work!$AA{k}<=Fits!$B$139),"","d15N outside anchor range; "))),"")'
                  f'&IF(OR(Work!$D{k}="Sample",Work!$D{k}="Check"),IF(Work!$AF{k}="","",IF(Fits!$B$158="","",'
                  f'IF(AND(Work!$AF{k}>=Fits!$B$158,Work!$AF{k}<=Fits!$B$159),"","d13C outside anchor range; "))),"")'
-                 f'&IF(Work!$D{k}<>"Check","",IF(Work!$AA{k}="","",IF(Work!$S{k}="","",'
-                 f'IF(ABS(Work!$AA{k}-Work!$S{k})<={S_THR},"",'
-                 f'"check d15N off by "&TEXT(Work!$AA{k}-Work!$S{k},"+0.00;-0.00")&"; "))))'
-                 f'&IF(Work!$D{k}<>"Check","",IF(Work!$AF{k}="","",IF(Work!$T{k}="","",'
-                 f'IF(ABS(Work!$AF{k}-Work!$T{k})<={S_THR},"",'
-                 f'"check d13C off by "&TEXT(Work!$AF{k}-Work!$T{k},"+0.00;-0.00")&"; "))))'
+                 f'&Work!${RX["fl checkN"]}{k}&Work!${RX["fl checkC"]}{k}'
                  f'&IF(Work!$D{k}<>"Drift","",IF(Work!$BX{k}=1,"excluded from N drift fit; ",'
                  f'IF(Work!$CB{k}="","",IF(ABS(Work!$CB{k})>{S_TOUT},"N drift monitor outlier; ",""))))'
                  f'&IF(Work!$D{k}<>"Drift","",IF(Work!$BY{k}=1,"excluded from C drift fit; ",'
                  f'IF(Work!$CC{k}="","",IF(ABS(Work!$CC{k})>{S_TOUT},"C drift monitor outlier; ",""))))'
-                 f'&IF(Work!$D{k}="Blank","",IF(Work!$L{k}="","",IF({S_MULT}="","",IF(Fits!$B$6<=0,"",'
-                 f'IF(Work!$L{k}>=Fits!$B$6*{S_MULT},"",'
-                 f'"N peak only "&TEXT(Work!$L{k}/Fits!$B$6,"0.0")&"x the blank; ")))))'
-                 f'&IF(Work!$D{k}="Blank","",IF(Work!$P{k}="","",IF({S_MULT}="","",IF(Fits!$B$10<=0,"",'
-                 f'IF(Work!$P{k}>=Fits!$B$10*{S_MULT},"",'
-                 f'"C peak only "&TEXT(Work!$P{k}/Fits!$B$10,"0.0")&"x the blank; ")))))'
+                 f'&Work!${RX["fl blankN"]}{k}&Work!${RX["fl blankC"]}{k}'
                  f'&IF(AND(Work!$D{k}="Drift",Work!${EX["excl E"]}{k}=1),"excluded from elemental correction; ","")'
-                 f'&IF(Work!$A{k}>=Fits!$B$86,"","ran before the background settled; ")'
-                 f'&IF(Work!${HX["carry flag"]}{k}=1,"possible carryover from an oversized sample; ",""))'),
+                 f'&Work!${RX["fl settle"]}{k}&Work!${RX["fl carry"]}{k}'
+                 f'&Work!${RX["fl pulseN"]}{k}&Work!${RX["fl pulseC"]}{k})'),
+                f'=IF(Work!$B{k}="","",Work!${RX["rerun"]}{k})', f'=IF(Work!$B{k}="","",Work!${RX["why"]}{k})',
+                f'=IF(Work!$B{k}="","",Work!${RX["suggested mass"]}{k})',
                 pull(UX['u %C']), pull(UX['u %N']), pull(UX['u CN molar']), pull(UX['u CN mass']),
                 pull('CN'), pull('CL'),
                 f'=IF(Work!$B{k}="","",Work!${EX["elem factor N"]}{k})',
@@ -1422,12 +1571,51 @@ def build_workbook(export_path, out_path, config: Config | None = None,
                 f'=IF(Work!$AJ{k}="","",Work!$AJ{k})', f'=IF(Work!$AI{k}="","",Work!$AI{k})']
         for j, v in enumerate(vals, start=1):
             c = rs.cell(i, j, v); c.font = F_SM
-            if j in (5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 26, 27): c.number_format = '0.00'
+            if j in (5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 29, 30): c.number_format = '0.00'
             if j == 4: c.number_format = '0.000'
-            if j in (14, 16, 18, 19, 20, 21, 22, 23): c.number_format = '0.000'
-            if j in (24, 25): c.number_format = '0.0000'
-            if 5 <= j <= 16 or 18 <= j <= 23: c.fill = FILL_OUT
+            if j in (14, 16, 21, 22, 23, 24, 25, 26): c.number_format = '0.000'
+            if j in (27, 28): c.number_format = '0.0000'
+            if 5 <= j <= 16 or 21 <= j <= 26: c.fill = FILL_OUT
     rs.freeze_panes = 'A5'
+    RLAST = gcl(len(RHDR))
+    rs.conditional_formatting.add(f'A5:{RLAST}{5+NSAMP-1}', FormulaRule(formula=['$R5="Check"'], fill=FILL_CHECK))
+    rs.conditional_formatting.add(f'A5:{RLAST}{5+NSAMP-1}',
+                                  FormulaRule(formula=['AND($R5<>"",$R5<>"Check")'], fill=FILL_RERUN))
+
+    # ================================================================ Rerun (1.4.4)
+    rr = wb.create_sheet('Rerun')
+    rr.sheet_view.showGridLines = False
+    for col, w in zip('ABCDEFG', [6, 18, 10, 10, 10, 60, 30]):
+        rr.column_dimensions[col].width = w
+    rr.cell(1, 1, 'Rerun').font = F_TITLE
+    rr.cell(2, 1, 'Samples to measure again (Rerun: N, C, or N and C) and to check first, in the order they ran. '
+                  'A mark reads only what a rerun can fix; README, Rerun marks, says which flags count. The '
+                  'suggested mass puts the peaks inside the linearity range, from this analysis\'s area per mg.'
+                  ).font = F_NOTE
+    rr.merge_cells('A2:G2'); rr.row_dimensions[2].height = 30
+    rr['A2'].alignment = Alignment(wrap_text=True, vertical='top')
+    rr.cell(4, 1, 'Problems of the whole run').font = F_H1
+    rr.cell(5, 1, '=Fits!$B$356').font = F_SM
+    rr.merge_cells('A5:G5'); rr.row_dimensions[5].height = 30
+    rr['A5'].alignment = Alignment(wrap_text=True, vertical='top')
+    for j, h in enumerate(['Row', 'Identifier', 'Type', 'Mass (mg)', 'Rerun', 'Why', 'Suggested mass (mg)'],
+                          start=1):
+        c = rr.cell(7, j, h); c.font = F_HDR; c.fill = FILL_HDR
+        c.alignment = Alignment(horizontal='center', wrap_text=True)
+    RANK = W(RX['rerun rank'])
+    for n in range(NSAMP):
+        i = 8 + n
+        hit = f'MATCH({n + 1},{RANK},0)'
+        vals = [f'=IFERROR(INDEX({W("A")},{hit}),"")']
+        vals += [f'=IF($A{i}="","",INDEX({W(col)},{hit}))'
+                 for col in ('B', 'D', 'G', RX['rerun'], RX['why'], RX['suggested mass'])]
+        for j, v in enumerate(vals, start=1):
+            c = rr.cell(i, j, v); c.font = F_SM
+            if j == 4: c.number_format = '0.000'
+    rr.freeze_panes = 'A8'
+    rr.conditional_formatting.add(f'A8:G{8+NSAMP-1}', FormulaRule(formula=['$E8="Check"'], fill=FILL_CHECK))
+    rr.conditional_formatting.add(f'A8:G{8+NSAMP-1}',
+                                  FormulaRule(formula=['AND($E8<>"",$E8<>"Check")'], fill=FILL_RERUN))
 
     # ================================================================ QC
     qc = wb.create_sheet('QC')
@@ -1696,7 +1884,7 @@ def build_workbook(export_path, out_path, config: Config | None = None,
           '=IF(Fits!$B$240<>"Yes","",IF(Fits!$B$241=0,"ok","those positions made no sample CO2; Results shows '
           'no C peak and says why in Flags"))')
     # 1.4.3
-    qsec(150, 'Uncertainty of %N, %C and C:N')
+    qsec(150, 'Uncertainty of %N, %C, and C:N')
     qc.cell(151, 1, 'U on Results has five terms (Fits row 300 onwards). Empty inputs count as 0, so U is incomplete '
                     'until the balance (Setup B33) and the certificates (Setup columns J and K) are filled in. '
                     'The anchors and the linearity standards have known values, so how many fall within their U '
@@ -1724,6 +1912,24 @@ def build_workbook(export_path, out_path, config: Config | None = None,
         total = f'COUNTIFS({WD_},"{rl}",{W(UX["inU CN"])},">=0")'
         qline(r_, f'{word} within U, C:N', f'={within}&" of "&{total}', '@',
               f'=IF({total}=0,"",IF({within}<{total},"CHECK: "&TEXT({total}-{within},"0")&" outside U","ok"))')
+
+    # 1.4.4
+    qsec(166, 'Rerun marks')
+    qc.cell(167, 1, 'Samples are marked only for what a rerun can fix: a peak outside the linearity range or under '
+                    'the blank multiple, carryover after an oversized sample, or a reference pulse off at their '
+                    'position; a check for a sample that ran before the background settled or lacks one '
+                    'element\'s peak. The Rerun sheet lists them.').font = F_NOTE
+    qline(168, 'Samples marked for a rerun', '=Fits!$B$351', '0',
+          '=IF(Fits!$B$351=0,"ok","see the Rerun sheet")')
+    qline(169, 'Samples marked for a check', '=Fits!$B$352', '0',
+          '=IF(Fits!$B$352=0,"ok","see the Rerun sheet")')
+    qline(170, 'N2 reference pulses off at their position', f'=COUNTIF({W(RX["poff N"])},1)', '0',
+          '=IF(Fits!$B$342="","not judged: fewer than five pulses, or switched off in Setup B67","ok")')
+    qline(171, 'CO2 reference pulses off at their position', f'=COUNTIF({W(RX["poff C"])},1)', '0',
+          '=IF(Fits!$B$346="","not judged: fewer than five pulses, or switched off in Setup B67","ok")')
+    qline(172, 'Problems of the whole run', '=IF(Fits!$B$356="none found","none","listed below")', '@',
+          '=IF(Fits!$B$356="none found","ok","CHECK")')
+    qc.cell(173, 1, '=IF(Fits!$B$356="none found","",Fits!$B$356)').font = F_SM
 
     from openpyxl.chart import ScatterChart, Reference, Series
     from openpyxl.chart.marker import Marker

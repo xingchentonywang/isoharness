@@ -76,7 +76,7 @@ SHOWN = {"amt": ("Mass (mg)", 3), "dN": ("d15N (permil)", 2), "UN": ("U(d15N), k
 # Workbook Results sheet column -> results table column (as scripts/smoke.py reads it).
 BOOK = {5: "%C", 6: "U(%C), k=2.0", 7: "%N", 8: "U(%N), k=2.0", 9: "C:N molar", 10: "U(C:N molar), k=2.0",
         13: "d13C (permil)", 14: "U(d13C), k=2.0", 15: "d15N (permil)", 16: "U(d15N), k=2.0",
-        18: "u(%C)", 19: "u(%N)", 22: "u(d13C)", 23: "u(d15N)"}
+        21: "u(%C)", 22: "u(%N)", 25: "u(d13C)", 26: "u(d15N)"}
 # The decisions the test makes, and the drift monitors it leaves out.
 EXCL_N, EXCL_E = 18, 55
 

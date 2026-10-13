@@ -20,12 +20,14 @@ from pathlib import Path
 
 import openpyxl
 
-# Results columns of ea_irms 1.4.3: each value followed by its U, the u columns after Flags.
+# Results columns of ea_irms 1.4.4: each value followed by its U, Flags in Q, the rerun mark, its
+# reason and the suggested mass in R to T (text), then the u columns.
 RESULTS = {5: "pct_c_reported", 6: "U_pct_c", 7: "pct_n_reported", 8: "U_pct_n", 9: "cn_molar_reported",
            10: "U_cn_molar", 11: "cn_mass_reported", 12: "U_cn_mass", 13: "d13c_final", 14: "U_d13c",
-           15: "d15n_final", 16: "U_d15n", 18: "u_pct_c", 19: "u_pct_n", 20: "u_cn_molar", 21: "u_cn_mass",
-           22: "u_d13c", 23: "u_d15n"}
+           15: "d15n_final", 16: "U_d15n", 21: "u_pct_c", 22: "u_pct_n", 23: "u_cn_molar",
+           24: "u_cn_mass", 25: "u_d13c", 26: "u_d15n"}
 FLAGS = 17
+TEXT = {18: "rerun", 19: "rerun_why", 20: "rerun_mass"}
 
 
 def post(url, path: Path, fields=None, timeout=300):
@@ -89,8 +91,11 @@ def main(base, export):
         flags = {t.strip() for t in (rs.cell(4 + p["row"], FLAGS).value or "").split(";") if t.strip()}
         if flags != set(p["flags"]):
             problems.append((p["row"], "flags", sorted(flags ^ set(p["flags"]))))
-    print(f"workbook against /api/process: {compared} values and {len(positions)} flag lists compared, "
-          f"{len(problems)} problems")
+        for col, key in TEXT.items():
+            if (p.get(key) or "") != (rs.cell(4 + p["row"], col).value or ""):
+                problems.append((p["row"], key, p.get(key), rs.cell(4 + p["row"], col).value))
+    print(f"workbook against /api/process: {compared} values, {len(positions)} flag lists and "
+          f"{len(positions)} rerun marks compared, {len(problems)} problems")
     for item in problems[:10]:
         print("  ", item)
     return 1 if problems or compared == 0 else 0

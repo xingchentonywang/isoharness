@@ -74,6 +74,9 @@ def port_input(positions, fits, config: Config, file_name: str, size: int,
             "carry": bool(p.carry_flag), "rise": _r(p.carry_rise, 2), "over": bool(p.oversized),
             "set": _r(p.settling_fraction, 4),
             "rej": bool(getattr(p, "c_rejected", False)),
+            # 1.4.4: the pulse's distance from the run's median, only where it flags the position
+            "poN": p.pulse_dev_n if any(f.startswith("N2 reference pulse off by ") for f in p.flags) else None,
+            "poC": p.pulse_dev_c if any(f.startswith("CO2 reference pulse off by ") for f in p.flags) else None,
         })
     F = fits
     data = {
@@ -115,11 +118,13 @@ def results_csv(positions, config: Config) -> str:
     header = ["Row", "Identifier", "Type", "Mass (mg)", "%C", f"U(%C), k={k}", "%N", f"U(%N), k={k}",
               "C:N molar", f"U(C:N molar), k={k}", "C:N mass", f"U(C:N mass), k={k}",
               "d13C (permil)", f"U(d13C), k={k}", "d15N (permil)", f"U(d15N), k={k}", "Flags",
+              "Rerun", "Why", "Suggested mass (mg)",
               "u(%C)", "u(%N)", "u(C:N molar)", "u(C:N mass)", "u(d13C)", "u(d15N)",
               "Elemental drift factor N", "Elemental drift factor C", "%C as measured", "%N as measured"]
     attrs = ["row", "identifier", "role", "amount", "pct_c_reported", "U_pct_c", "pct_n_reported", "U_pct_n",
              "cn_molar_reported", "U_cn_molar", "cn_mass_reported", "U_cn_mass",
              "d13c_final", "U_d13c", "d15n_final", "U_d15n", None,
+             "rerun", "rerun_why", "rerun_mass",
              "u_pct_c", "u_pct_n", "u_cn_molar", "u_cn_mass", "u_d13c", "u_d15n",
              "elem_factor_n", "elem_factor_c", "pct_c_measured", "pct_n_measured"]
     buf = io.StringIO()

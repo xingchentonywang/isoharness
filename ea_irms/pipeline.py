@@ -116,6 +116,12 @@ class Config:
     # matches the designated reference pulses is a pulse, not the sample
     ref_pulse_ampl_tol: float | None = 0.02   # fraction of the designated pulses' amplitude at that position; None = off
     ref_pulse_d13c_window: float = 0.75       # permil around the designated pulses' mean d13C
+    # 1.4.4: rerun marks. A position's undesignated reference pulse is off when it lies more than
+    # this many robust SDs from the run's median (None = off), and a reference-gas SD at or above
+    # ref_gas_sd_limit (permil; the FIRMS guide's zero-enrichment limit, None = off) is a run-level
+    # problem on the Rerun sheet.
+    ref_pulse_off_sd: float | None = 4.0
+    ref_gas_sd_limit: float | None = 0.1
 
     def __post_init__(self):
         # Older configurations stored the switches as booleans.
@@ -327,7 +333,7 @@ def _rms(values):
 
 
 def _elemental_uncertainty(positions, F, config, excl_e):
-    """u and U of every %N, %C and C:N, from five terms combined in quadrature.
+    """u and U of every %N, %C, and C:N, from five terms combined in quadrature.
 
     For %N and %C, as fractions of the value: the instrument's repeatability, the
     drift monitors' measured over certified ratios by successive differences in
@@ -428,6 +434,130 @@ def _elemental_uncertainty(positions, F, config, excl_e):
         p.U_cn_molar = None if rel is None else k_cov * p.u_cn_molar
         p.u_cn_mass = None if rel is None else p.cn_mass_reported * rel
         p.U_cn_mass = None if rel is None else k_cov * p.u_cn_mass
+
+
+# ---- rerun marks (1.4.4) ----------------------------------------------------
+# 1 / the 0.75 quantile of the standard normal distribution: the median absolute
+# deviation times this estimates the SD of normally distributed values.
+ROBUST_SD = 1.482602218505602
+_SIZE = {"n": ("N below linearity range", "N above linearity range"),
+         "c": ("C below linearity range", "C above linearity range")}
+_PREFIX = {"n": ("N peak only ", "N2 reference pulse off by "),
+           "c": ("C peak only ", "CO2 reference pulse off by ")}
+_PLAIN = ("no N peak", "no C peak", "CO2 peak rejected as a reference pulse",
+          "ran before the background settled", "possible carryover from an oversized sample")
+
+
+def _median(values):
+    vals = sorted(values)
+    m = len(vals) // 2
+    return vals[m] if len(vals) % 2 else (vals[m - 1] + vals[m]) / 2
+
+
+def _reason(flag):
+    """Is this flag one that the rerun marks read?"""
+    return (flag in _PLAIN or flag in _SIZE["n"] or flag in _SIZE["c"]
+            or flag.startswith(_PREFIX["n"]) or flag.startswith(_PREFIX["c"]))
+
+
+def _mass_window(p, el, lo_area, hi_area):
+    """Masses (mg) that put this position's peak of el between lo_area and hi_area.
+
+    Read from this analysis's own peak area per mg. None without a mass, a peak or
+    both limits, or when no mass can reach the range (lo_area above hi_area).
+    """
+    area = getattr(p, f"area_{el}")
+    if area is None or area <= 0 or not p.amount or p.amount <= 0:
+        return None
+    if lo_area <= 0 or hi_area <= 0 or lo_area > hi_area:
+        return None
+    per_mg = area / p.amount
+    return lo_area / per_mg, hi_area / per_mg
+
+
+def _rerun_marks(positions, F, config):
+    """Mark each sample for a rerun of N, C, or both, or for a check, from its flags.
+
+    Only what a rerun can fix marks a sample: the peak's size against the linearity
+    standards and the blank, carryover from an oversized sample, and the reference
+    pulse at that position. A sample run before the background settled, or missing
+    the peak of one element, is marked for a check. A rerun's suggested mass puts
+    each peak inside the linearity range (and above the blank multiple), read from
+    this analysis's area per mg. Problems of the whole run are listed once, not on
+    every sample.
+    """
+    L = F["size_limits"]
+    mult = config.min_blank_multiple
+    lo_area = {el: max(L[f"min_{el}"] or 0,
+                       (mult * F[f"blank_{el}"]["area"]) if (mult and F[f"blank_{el}"]["area"] > 0) else 0)
+               for el in ("n", "c")}
+    hi_area = {el: L[f"max_{el}"] or 0 for el in ("n", "c")}
+    counts = {"N": 0, "C": 0, "N and C": 0, "Check": 0}
+    for p in positions:
+        p.rerun = p.rerun_why = p.rerun_mass = None
+        p.rerun_mass_lo = p.rerun_mass_hi = None
+        if p.role != "Sample":
+            continue
+        fl = p.flags
+        no_n, no_c = "no N peak" in fl, "no C peak" in fl
+        need = {el: any(f in _SIZE[el] or f.startswith(_PREFIX[el]) for f in fl) for el in ("n", "c")}
+        both = "possible carryover from an oversized sample" in fl or (no_n and no_c)
+        check = "ran before the background settled" in fl or no_n != no_c
+        if both or (need["n"] and need["c"]):
+            mark = "N and C"
+        elif need["n"]:
+            mark = "N"
+        elif need["c"]:
+            mark = "C"
+        elif check:
+            mark = "Check"
+        else:
+            continue
+        p.rerun = mark
+        p.rerun_why = "; ".join(f for f in fl if _reason(f))
+        counts[mark] += 1
+        if mark == "Check":
+            continue
+        win = {el: w for el in ("n", "c") if (w := _mass_window(p, el, lo_area[el], hi_area[el])) is not None}
+        if not win:
+            continue
+        lo, hi = max(w[0] for w in win.values()), min(w[1] for w in win.values())
+        if lo <= hi:
+            p.rerun_mass_lo, p.rerun_mass_hi = lo, hi
+            p.rerun_mass = f"{lo:.3f} to {hi:.3f}"
+        elif len(win) == 2:
+            p.rerun_mass = (f"N {win['n'][0]:.3f} to {win['n'][1]:.3f}; "
+                            f"C {win['c'][0]:.3f} to {win['c'][1]:.3f} (two capsules)")
+        else:
+            p.rerun_mass = "none"
+
+    # Problems of the whole run, for the top of the Rerun sheet.
+    items = []
+    off = [p.row for p in positions if p.role == "Check"
+           and any(f.startswith(("check d15N off by", "check d13C off by")) for f in p.flags)]
+    if off:
+        items.append(f"check standard off by more than {config.check_offset_permil:.2f} permil at "
+                     f"{'position' if len(off) == 1 else 'positions'} {', '.join(str(r) for r in off)}")
+    for name, val, cert, big_u in (("%N", "pct_n_reported", lambda p: p.pct_n, "U_pct_n"),
+                                   ("%C", "pct_c_reported", lambda p: p.pct_c, "U_pct_c"),
+                                   ("C:N", "cn_molar_reported",
+                                    lambda p: ((p.pct_c / ATOMIC_C) / (p.pct_n / ATOMIC_N))
+                                    if (p.pct_c and p.pct_n and p.pct_c > 0 and p.pct_n > 0) else None,
+                                    "U_cn_molar")):
+        used = [p for p in positions if p.role == "Anchor" and getattr(p, big_u) is not None
+                and cert(p) is not None]
+        within = sum(1 for p in used if abs(getattr(p, val) - cert(p)) <= getattr(p, big_u))
+        if used and within < len(used):
+            items.append(f"anchors outside U, {name}: {len(used) - within} of {len(used)}")
+    if config.ref_gas_sd_limit is not None:
+        for el, name in (("n", "N2"), ("c", "CO2")):
+            g = F[f"ref_gas_{el}"]
+            if g["n"] >= 3 and g["sd"] is not None and g["sd"] >= config.ref_gas_sd_limit:
+                items.append(f"{name} reference pulses SD {g['sd']:.2f} permil, at or above "
+                             f"{config.ref_gas_sd_limit:.2f}")
+    F["rerun"] = {"counts": counts, "run_level": items,
+                  "run_level_text": "; ".join(items) if items else "none found",
+                  "lo_area": lo_area, "hi_area": hi_area}
 
 
 def process(positions, config=None):
@@ -770,7 +900,7 @@ def process(positions, config=None):
             p.cn_molar_reported = p.cn_molar * p.elem_factor_n / p.elem_factor_c
             p.cn_mass_reported = p.cn_mass * p.elem_factor_n / p.elem_factor_c
 
-    # ---- uncertainty of %N, %C and C:N (1.4.3) -------------------------------
+    # ---- uncertainty of %N, %C, and C:N (1.4.3) -------------------------------
     _elemental_uncertainty(positions, F, config, excl_e)
 
     # ---- size limits -----------------------------------------------------
@@ -887,6 +1017,21 @@ def process(positions, config=None):
     checks = [p for p in role("Check") if p.d15n_final is not None or p.d13c_final is not None]
     F["checks"] = {"n": len(checks), "materials": sorted({p.identifier for p in checks})}
 
+    # ---- the reference pulse at each position (1.4.4) ----------------------
+    # Against the run's own scatter: the median and a robust SD, so that the
+    # positions being judged cannot widen the limit they are judged by.
+    F["pulse_off"] = {}
+    for el, attr in (("n", "ref_pulse_d15n"), ("c", "ref_pulse_d13c")):
+        ys = [getattr(p, attr) for p in positions if getattr(p, attr, None) is not None]
+        med = _median(ys) if len(ys) >= 5 else None
+        rsd = None if med is None else ROBUST_SD * _median([abs(y - med) for y in ys])
+        off_sd = config.ref_pulse_off_sd
+        lim = (off_sd * rsd) if (off_sd is not None and off_sd > 0 and rsd) else None
+        F["pulse_off"][el] = {"n": len(ys), "median": med, "robust_sd": rsd, "limit": lim}
+        for p in positions:
+            v = getattr(p, attr, None)
+            setattr(p, f"pulse_dev_{el}", None if (v is None or med is None) else v - med)
+
     # ---- flags -----------------------------------------------------------
     for p in positions:
         flags = []
@@ -932,7 +1077,12 @@ def process(positions, config=None):
             flags.append("ran before the background settled")
         if p.carry_flag:
             flags.append("possible carryover from an oversized sample")
+        for el, name in (("n", "N2"), ("c", "CO2")):
+            dev, lim = getattr(p, f"pulse_dev_{el}"), F["pulse_off"][el]["limit"]
+            if dev is not None and lim is not None and _above(abs(dev), lim):
+                flags.append(f"{name} reference pulse off by {dev:+.2f}")
         p.flags = flags
+    _rerun_marks(positions, F, config)
     return positions, F
 
 
@@ -1008,6 +1158,8 @@ def config_to_dict(config: Config) -> dict:
         "exclude_elemental": list(config.exclude_elemental),
         "ref_pulse_ampl_tol": config.ref_pulse_ampl_tol,
         "ref_pulse_d13c_window": config.ref_pulse_d13c_window,
+        "ref_pulse_off_sd": config.ref_pulse_off_sd,
+        "ref_gas_sd_limit": config.ref_gas_sd_limit,
     }
 
 
