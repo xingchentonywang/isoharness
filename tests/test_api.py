@@ -52,6 +52,31 @@ def test_health_version_defaults():
     assert d["config"] == json.loads(json.dumps(config_to_dict(Config())))
 
 
+def test_home_page_and_the_ea_irms_page():
+    home = client.get("/")
+    assert home.status_code == 200 and home.headers["content-type"].startswith("text/html")
+    assert "Stable isotope data reduction" in home.text
+    assert 'href="ea-irms"' in home.text
+    assert "GasBench N₂O" in home.text and "GasBench carbonate" in home.text
+    assert home.text.count(">Planned<") == 2
+    page = client.get("/ea-irms")
+    assert page.status_code == 200 and page.headers["content-type"].startswith("text/html")
+    assert page.content == (Path(__file__).resolve().parents[1] / "web" / "ea-irms.html").read_bytes()
+    assert page.headers["cache-control"] == "no-cache"
+    assert "script-src 'self'" in page.headers["content-security-policy"]
+    assert client.head("/ea-irms").status_code == 200
+    r = client.get("/ea-irms/", follow_redirects=False)
+    assert r.status_code == 308 and r.headers["location"] == "/ea-irms"
+
+
+def test_example_is_the_test_run():
+    r = client.get("/api/example")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/csv")
+    assert 'filename="20260915_raw.csv"' in r.headers["content-disposition"]
+    assert r.content == RUN.read_bytes()
+
+
 def test_process_returns_the_engine_values(engine):
     positions, fits = engine
     r = post("/api/process")

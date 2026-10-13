@@ -1,0 +1,426 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EA-IRMS data reduction · isoharness</title>
+<meta name="description" content="EA-IRMS data reduction: δ¹⁵N, δ¹³C, %N, and %C from an Isodat export, corrected step by step with the standards in the same run. Uploaded files are deleted as soon as they are processed.">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400&amp;family=Source+Sans+3:wght@400;600;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap">
+<style>
+body { margin: 0; background: #FFFFFF; }
+button:disabled { opacity: 0.62; }
+.dc-wait { max-width: 1360px; margin: 0 auto; padding: 40px 24px; box-sizing: border-box; color: #4A5A66; font: 15px/1.6 'Source Sans 3', 'Segoe UI', 'Helvetica Neue', Helvetica, system-ui, sans-serif; }
+</style>
+<!-- Preact 10.29.8 (MIT), dist/preact.min.js as published on npm; its license is in vendor/preact/LICENSE. -->
+<script defer src="vendor/preact/preact.min.js"></script>
+<!-- The preview port, port/engine.js as continuous integration checks it, served by the API. -->
+<script defer src="engine.js"></script>
+<script defer src="dc.js"></script>
+<script defer src="logic.js"></script>
+</head>
+<body>
+<div id="app"><p class="dc-wait">Loading isoharness…</p><noscript><p class="dc-wait">This page needs JavaScript, because it recalculates each correction in your browser. The API, documented at api/docs, works without it.</p></noscript></div>
+<!-- The approved prototype's markup (Main.dc.html), drawn by dc.js with the view model of logic.js. -->
+<template id="dc-main">
+<div style="min-height: 100vh; background: #FFFFFF; color: #13212B; font-family: 'Source Sans 3', 'Segoe UI', 'Helvetica Neue', Helvetica, system-ui, sans-serif; font-size: 15px; line-height: 1.5; -webkit-font-smoothing: antialiased; font-feature-settings: 'kern'">
+
+<header style="background: #FFFFFF; border-bottom: 1px solid #D9E0E5">
+<div style="max-width: 1360px; margin: 0 auto; box-sizing: border-box; padding: 8px 24px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 28px">
+<a href="./" aria-label="isoharness, all instruments" style="display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 0; color: #13212B; text-decoration: none">
+<span style="font-family: 'Newsreader', Georgia, serif; font-style: italic; font-size:27px; font-weight: 400; letter-spacing: 0">isoharness</span>
+</a>
+<nav aria-label="Main" style="flex: 1 1 auto; display: flex; flex-wrap: wrap; gap: 2px 8px">
+<sc-for list="{{nav}}" as="n"><button type="button" onClick="{{n.pick}}" aria-current="{{n.cur}}" style="font: inherit; font-size: 15px; font-weight: {{n.fw}}; color: {{n.fg}}; min-height: 44px; padding: 10px 8px 8px; border: 0; border-bottom: 2px solid {{n.bd}}; background: none; cursor: pointer" style-hover="color: #13212B">{{n.t}}</button></sc-for>
+</nav>
+<div style="display: flex; align-items: center; gap: 14px">
+<sc-if value="{{version}}"><span style="font-size: 13.5px; color: #4A5A66">ea_irms {{version}}</span></sc-if>
+<a href="api/docs" style="display: inline-flex; align-items: center; min-height: 44px; padding: 0 4px; font-size: 14px; font-weight: 600; color: #3B4A55; text-decoration: none" style-hover="color: #13212B">API</a>
+</div>
+</div>
+</header>
+
+<main style="max-width: 1360px; margin: 0 auto; box-sizing: border-box; padding: 28px 24px 56px; display: flex; flex-direction: column; gap: 24px">
+<sc-if value="{{toast.show}}">
+<div role="status" style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding: 12px 16px; border-radius: 4px; background: #13212B; color: #E8EEF3; font-size: 14.5px">
+<span style="flex: 1 1 320px; min-width: 0">{{toast.t}}</span>
+<button type="button" onClick="{{toast.close}}" style="font: inherit; font-size: 14px; color: #FFFFFF; min-height: 36px; padding: 4px 12px; border: 1px solid #4A5D70; border-radius: 3px; background: none; cursor: pointer">Close</button>
+</div>
+</sc-if>
+
+<sc-if value="{{is.upload}}">
+<sc-if value="{{up.fresh}}">
+<section aria-label="isoharness" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(460px, 100%), 1fr)); gap: 48px; align-items: end; max-width: 1240px; padding: 24px 0 40px; border-bottom: 1px solid #D9E0E5">
+<div style="min-width: 0; display: flex; flex-direction: column; gap: 22px">
+<h1 style="margin: 0; font-family: 'Newsreader', Georgia, serif; font-weight: 400; font-size:clamp(40px, 4.6vw, 64px); line-height: 1.04; letter-spacing: -0.015em; text-wrap: balance">EA-IRMS data reduction</h1>
+<p style="margin: 0; max-width: 560px; font-size:19px; line-height: 1.55; color: #3B4A55; text-wrap: pretty">isoharness checks how the instrument behaved during an EA-IRMS run, then corrects δ¹⁵N and δ¹³C step by step with the standards measured in the same run. At the end you can download the results table and an Excel workbook with every calculation.</p>
+<div style="display: flex; flex-wrap: wrap; gap: 12px">
+<button type="button" onClick="{{up.choose}}" disabled="{{up.busy}}" style="font: inherit; font-size:16px; font-weight: 600; min-height: 48px; padding: 0 24px; border: 0; border-radius: 4px; background: #13212B; color: #FFFFFF; cursor: pointer" style-hover="background: #000000">Upload an export</button>
+<button type="button" onClick="{{up.example}}" disabled="{{up.busy}}" style="font: inherit; font-size:16px; font-weight: 600; min-height: 48px; padding: 0 22px; border: 1px solid #13212B; border-radius: 4px; background: #FFFFFF; color: #13212B; cursor: pointer" style-hover="background: #F4F6F8">Try the 15 Sep 2026 test run</button>
+</div>
+</div>
+<figure style="margin: 0; min-width: 0; display: flex; flex-direction: column; gap: 12px">
+<div style="border-top: 2px solid #13212B; border-bottom: 1px solid #D9E0E5; padding: 18px 0 8px">
+<svg viewBox="0 0 640 260" width="100%" style="display: block; height: auto" aria-hidden="true">
+<line x1="10" x2="630" y1="60" y2="60" stroke="#E1E7EC" stroke-width="1"></line>
+<line x1="10" x2="630" y1="110" y2="110" stroke="#E1E7EC" stroke-width="1"></line>
+<line x1="10" x2="630" y1="160" y2="160" stroke="#E1E7EC" stroke-width="1"></line>
+<line x1="10" x2="630" y1="210" y2="210" stroke="#E1E7EC" stroke-width="1"></line>
+<path d="M10.0 236.0 L12.0 236.0 L14.0 236.0 L16.0 236.0 L18.0 236.0 L20.0 236.0 L22.0 236.0 L24.0 235.9 L26.0 235.8 L28.0 235.5 L30.0 234.9 L32.0 233.6 L34.0 231.2 L36.0 227.2 L38.0 221.1 L40.0 212.6 L42.0 202.3 L44.0 191.1 L46.0 180.9 L48.0 173.8 L50.0 171.2 L52.0 173.8 L54.0 180.9 L56.0 191.1 L58.0 202.3 L60.0 212.6 L62.0 221.1 L64.0 227.2 L66.0 231.2 L68.0 233.6 L70.0 234.9 L72.0 235.5 L74.0 235.8 L76.0 235.9 L78.0 235.9 L80.0 235.9 L82.0 235.7 L84.0 235.3 L86.0 234.4 L88.0 232.6 L90.0 229.4 L92.0 224.4 L94.0 217.0 L96.0 207.4 L98.0 196.4 L100.0 185.4 L102.0 176.4 L104.0 171.4 L106.0 171.4 L108.0 176.4 L110.0 185.4 L112.0 196.4 L114.0 207.4 L116.0 217.0 L118.0 224.4 L120.0 229.4 L122.0 232.6 L124.0 234.4 L126.0 235.3 L128.0 235.7 L130.0 235.9 L132.0 236.0 L134.0 236.0 L136.0 236.0 L138.0 236.0 L140.0 236.0 L142.0 236.0 L144.0 236.0 L146.0 236.0 L148.0 236.0 L150.0 236.0 L152.0 236.0 L154.0 236.0 L156.0 236.0 L158.0 236.0 L160.0 236.0 L162.0 236.0 L164.0 236.0 L166.0 236.0 L168.0 236.0 L170.0 236.0 L172.0 235.9 L174.0 235.8 L176.0 235.6 L178.0 234.9 L180.0 233.5 L182.0 230.5 L184.0 225.0 L186.0 215.7 L188.0 201.5 L190.0 181.9 L192.0 157.9 L194.0 132.1 L196.0 108.6 L198.0 92.0 L200.0 86.0 L202.0 92.0 L204.0 108.6 L206.0 132.1 L208.0 157.9 L210.0 181.9 L212.0 201.5 L214.0 215.7 L216.0 225.0 L218.0 230.5 L220.0 233.5 L222.0 234.9 L224.0 235.6 L226.0 235.8 L228.0 235.9 L230.0 236.0 L232.0 236.0 L234.0 236.0 L236.0 236.0 L238.0 236.0 L240.0 236.0 L242.0 236.0 L244.0 236.0 L246.0 236.0 L248.0 236.0 L250.0 236.0 L252.0 236.0 L254.0 236.0 L256.0 236.0 L258.0 236.0 L260.0 236.0 L262.0 236.0 L264.0 236.0 L266.0 236.0 L268.0 236.0 L270.0 236.0 L272.0 236.0 L274.0 236.0 L276.0 236.0 L278.0 236.0 L280.0 236.0 L282.0 236.0 L284.0 236.0 L286.0 236.0 L288.0 236.0 L290.0 236.0 L292.0 236.0 L294.0 236.0 L296.0 236.0 L298.0 236.0 L300.0 236.0 L302.0 236.0 L304.0 236.0 L306.0 236.0 L308.0 236.0 L310.0 236.0 L312.0 236.0 L314.0 236.0 L316.0 236.0 L318.0 236.0 L320.0 236.0 L322.0 236.0 L324.0 236.0 L326.0 236.0 L328.0 236.0 L330.0 236.0 L332.0 236.0 L334.0 236.0 L336.0 236.0 L338.0 236.0 L340.0 236.0 L342.0 236.0 L344.0 236.0 L346.0 236.0 L348.0 236.0 L350.0 236.0 L352.0 236.0 L354.0 236.0 L356.0 236.0 L358.0 236.0 L360.0 236.0 L362.0 236.0 L364.0 236.0 L366.0 236.0 L368.0 236.0 L370.0 236.0 L372.0 236.0 L374.0 236.0 L376.0 236.0 L378.0 236.0 L380.0 236.0 L382.0 236.0 L384.0 236.0 L386.0 236.0 L388.0 236.0 L390.0 236.0 L392.0 236.0 L394.0 236.0 L396.0 236.0 L398.0 236.0 L400.0 236.0 L402.0 236.0 L404.0 236.0 L406.0 236.0 L408.0 236.0 L410.0 236.0 L412.0 236.0 L414.0 236.0 L416.0 236.0 L418.0 236.0 L420.0 236.0 L422.0 236.0 L424.0 236.0 L426.0 236.0 L428.0 236.0 L430.0 236.0 L432.0 236.0 L434.0 236.0 L436.0 236.0 L438.0 236.0 L440.0 236.0 L442.0 236.0 L444.0 236.0 L446.0 236.0 L448.0 236.0 L450.0 236.0 L452.0 236.0 L454.0 236.0 L456.0 236.0 L458.0 236.0 L460.0 236.0 L462.0 236.0 L464.0 236.0 L466.0 236.0 L468.0 236.0 L470.0 236.0 L472.0 236.0 L474.0 236.0 L476.0 236.0 L478.0 236.0 L480.0 236.0 L482.0 236.0 L484.0 236.0 L486.0 236.0 L488.0 236.0 L490.0 236.0 L492.0 236.0 L494.0 236.0 L496.0 236.0 L498.0 236.0 L500.0 236.0 L502.0 236.0 L504.0 236.0 L506.0 236.0 L508.0 236.0 L510.0 236.0 L512.0 236.0 L514.0 236.0 L516.0 236.0 L518.0 236.0 L520.0 236.0 L522.0 236.0 L524.0 236.0 L526.0 236.0 L528.0 236.0 L530.0 236.0 L532.0 236.0 L534.0 236.0 L536.0 236.0 L538.0 236.0 L540.0 236.0 L542.0 236.0 L544.0 236.0 L546.0 236.0 L548.0 236.0 L550.0 236.0 L552.0 236.0 L554.0 236.0 L556.0 236.0 L558.0 236.0 L560.0 236.0 L562.0 236.0 L564.0 236.0 L566.0 236.0 L568.0 236.0 L570.0 236.0 L572.0 236.0 L574.0 236.0 L576.0 236.0 L578.0 236.0 L580.0 236.0 L582.0 236.0 L584.0 236.0 L586.0 236.0 L588.0 236.0 L590.0 236.0 L592.0 236.0 L594.0 236.0 L596.0 236.0 L598.0 236.0 L600.0 236.0 L602.0 236.0 L604.0 236.0 L606.0 236.0 L608.0 236.0 L610.0 236.0 L612.0 236.0 L614.0 236.0 L616.0 236.0 L618.0 236.0 L620.0 236.0 L622.0 236.0 L624.0 236.0 L626.0 236.0 L628.0 236.0 L630.0 236.0" fill="none" stroke="#0B5E8E" stroke-width="1.8" stroke-linejoin="round"></path>
+<path d="M10.0 236.0 L12.0 236.0 L14.0 236.0 L16.0 236.0 L18.0 236.0 L20.0 236.0 L22.0 236.0 L24.0 236.0 L26.0 236.0 L28.0 236.0 L30.0 236.0 L32.0 236.0 L34.0 236.0 L36.0 236.0 L38.0 236.0 L40.0 236.0 L42.0 236.0 L44.0 236.0 L46.0 236.0 L48.0 236.0 L50.0 236.0 L52.0 236.0 L54.0 236.0 L56.0 236.0 L58.0 236.0 L60.0 236.0 L62.0 236.0 L64.0 236.0 L66.0 236.0 L68.0 236.0 L70.0 236.0 L72.0 236.0 L74.0 236.0 L76.0 236.0 L78.0 236.0 L80.0 236.0 L82.0 236.0 L84.0 236.0 L86.0 236.0 L88.0 236.0 L90.0 236.0 L92.0 236.0 L94.0 236.0 L96.0 236.0 L98.0 236.0 L100.0 236.0 L102.0 236.0 L104.0 236.0 L106.0 236.0 L108.0 236.0 L110.0 236.0 L112.0 236.0 L114.0 236.0 L116.0 236.0 L118.0 236.0 L120.0 236.0 L122.0 236.0 L124.0 236.0 L126.0 236.0 L128.0 236.0 L130.0 236.0 L132.0 236.0 L134.0 236.0 L136.0 236.0 L138.0 236.0 L140.0 236.0 L142.0 236.0 L144.0 236.0 L146.0 236.0 L148.0 236.0 L150.0 236.0 L152.0 236.0 L154.0 236.0 L156.0 236.0 L158.0 236.0 L160.0 236.0 L162.0 236.0 L164.0 236.0 L166.0 236.0 L168.0 236.0 L170.0 236.0 L172.0 236.0 L174.0 236.0 L176.0 236.0 L178.0 236.0 L180.0 236.0 L182.0 236.0 L184.0 236.0 L186.0 236.0 L188.0 236.0 L190.0 236.0 L192.0 236.0 L194.0 236.0 L196.0 236.0 L198.0 236.0 L200.0 236.0 L202.0 236.0 L204.0 236.0 L206.0 236.0 L208.0 236.0 L210.0 236.0 L212.0 236.0 L214.0 236.0 L216.0 236.0 L218.0 236.0 L220.0 236.0 L222.0 236.0 L224.0 236.0 L226.0 236.0 L228.0 236.0 L230.0 236.0 L232.0 236.0 L234.0 236.0 L236.0 236.0 L238.0 236.0 L240.0 236.0 L242.0 236.0 L244.0 236.0 L246.0 236.0 L248.0 236.0 L250.0 236.0 L252.0 236.0 L254.0 236.0 L256.0 236.0 L258.0 236.0 L260.0 236.0 L262.0 236.0 L264.0 236.0 L266.0 236.0 L268.0 236.0 L270.0 236.0 L272.0 236.0 L274.0 236.0 L276.0 236.0 L278.0 236.0 L280.0 236.0 L282.0 236.0 L284.0 236.0 L286.0 236.0 L288.0 236.0 L290.0 236.0 L292.0 236.0 L294.0 236.0 L296.0 236.0 L298.0 236.0 L300.0 236.0 L302.0 236.0 L304.0 235.9 L306.0 235.8 L308.0 235.6 L310.0 235.2 L312.0 234.4 L314.0 232.9 L316.0 230.3 L318.0 225.9 L320.0 219.1 L322.0 208.9 L324.0 194.8 L326.0 176.4 L328.0 153.8 L330.0 128.1 L332.0 101.3 L334.0 75.9 L336.0 54.8 L338.0 40.9 L340.0 36.0 L342.0 40.9 L344.0 54.8 L346.0 75.9 L348.0 101.3 L350.0 128.1 L352.0 153.8 L354.0 176.4 L356.0 194.8 L358.0 208.9 L360.0 219.1 L362.0 225.9 L364.0 230.3 L366.0 232.9 L368.0 234.4 L370.0 235.2 L372.0 235.6 L374.0 235.8 L376.0 235.9 L378.0 236.0 L380.0 236.0 L382.0 236.0 L384.0 236.0 L386.0 236.0 L388.0 236.0 L390.0 236.0 L392.0 236.0 L394.0 236.0 L396.0 236.0 L398.0 236.0 L400.0 236.0 L402.0 236.0 L404.0 235.9 L406.0 235.9 L408.0 235.7 L410.0 235.3 L412.0 234.7 L414.0 233.4 L416.0 231.2 L418.0 227.5 L420.0 221.7 L422.0 213.2 L424.0 201.3 L426.0 185.7 L428.0 166.7 L430.0 145.1 L432.0 122.5 L434.0 101.0 L436.0 83.3 L438.0 71.6 L440.0 67.4 L442.0 71.6 L444.0 83.3 L446.0 101.0 L448.0 122.5 L450.0 145.1 L452.0 166.7 L454.0 185.7 L456.0 201.3 L458.0 213.2 L460.0 221.7 L462.0 227.5 L464.0 231.1 L466.0 233.3 L468.0 234.4 L470.0 234.7 L472.0 234.4 L474.0 233.3 L476.0 231.1 L478.0 227.5 L480.0 221.7 L482.0 213.1 L484.0 201.2 L486.0 185.6 L488.0 166.6 L490.0 144.9 L492.0 122.2 L494.0 100.7 L496.0 83.0 L498.0 71.2 L500.0 67.1 L502.0 71.2 L504.0 83.0 L506.0 100.7 L508.0 122.2 L510.0 144.9 L512.0 166.6 L514.0 185.6 L516.0 201.2 L518.0 213.1 L520.0 221.7 L522.0 227.5 L524.0 231.1 L526.0 233.3 L528.0 234.4 L530.0 234.7 L532.0 234.4 L534.0 233.3 L536.0 231.1 L538.0 227.5 L540.0 221.7 L542.0 213.2 L544.0 201.3 L546.0 185.7 L548.0 166.6 L550.0 145.0 L552.0 122.4 L554.0 100.9 L556.0 83.2 L558.0 71.4 L560.0 67.3 L562.0 71.4 L564.0 83.2 L566.0 100.9 L568.0 122.4 L570.0 145.0 L572.0 166.6 L574.0 185.7 L576.0 201.3 L578.0 213.2 L580.0 221.7 L582.0 227.5 L584.0 231.2 L586.0 233.4 L588.0 234.7 L590.0 235.3 L592.0 235.7 L594.0 235.9 L596.0 235.9 L598.0 236.0 L600.0 236.0 L602.0 236.0 L604.0 236.0 L606.0 236.0 L608.0 236.0 L610.0 236.0 L612.0 236.0 L614.0 236.0 L616.0 236.0 L618.0 236.0 L620.0 236.0 L622.0 236.0 L624.0 236.0 L626.0 236.0 L628.0 236.0 L630.0 236.0" fill="none" stroke="#C2510A" stroke-width="1.8" stroke-linejoin="round"></path>
+<text x="18" y="252" font-size="12" fill="#5A6975" font-family="IBM Plex Mono, ui-monospace, monospace">m/z 28</text>
+<text x="330" y="252" font-size="12" fill="#5A6975" font-family="IBM Plex Mono, ui-monospace, monospace">m/z 44</text>
+</svg>
+</div>
+<figcaption style="font-size:14px; line-height: 1.5; color: #3B4A55"><strong style="color: #13212B">Fig. 1 | The signal from one analysis.</strong> Two N₂ reference pulses and the sample’s N₂ at m/z 28 (blue), then the sample’s CO₂ and three reference pulses at m/z 44 (orange). Peak heights are from position 55 of the test run; the peak shapes are schematic.</figcaption>
+</figure>
+</section>
+</sc-if>
+<div style="display: flex; flex-direction: column; gap: 22px; max-width: 940px">
+<div style="display: flex; flex-direction: column; gap: 6px">
+<sc-if value="{{up.fresh}}"><h2 style="margin: 0; font-family: 'Newsreader', Georgia, serif; font-size:34px; line-height: 1.15; font-weight: 500">Upload a run</h2></sc-if>
+<sc-if value="{{up.has}}"><h1 style="margin: 0; font-family: 'Newsreader', Georgia, serif; font-size:clamp(34px, 3.6vw, 46px); line-height: 1.08; font-weight: 500; letter-spacing: -0.01em">Correct a run</h1></sc-if>
+<p style="margin: 0; max-width: 680px; font-size: 16px; line-height: 1.6; color: #3B4A55; text-wrap: pretty">Upload one sequence as Isodat exported it. The server deletes the file before it sends its reply, and nothing is kept. Each correction uses the standards in this run, and when you change a choice in a later step, your browser recalculates the values.</p>
+</div>
+<button type="button" onClick="{{up.choose}}" disabled="{{up.busy}}" aria-describedby="dc-drop-note" style="font: inherit; min-height: 220px; padding: 32px 20px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; text-align: center; background: {{up.dropBg}}; border: 1.5px dashed {{up.dropBd}}; border-radius: 4px; color: #13212B; cursor: {{up.dropCursor}}" style-hover="border-color: #13212B; background: #F8FAFB">
+<svg width="40" height="40" viewBox="0 0 40 40" aria-hidden="true"><path d="M20 27V8M12 15.5l8-8 8 8M8 26v7h24v-7" fill="none" stroke="#13212B" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+<span style="font-size: 18px; font-weight: 600; overflow-wrap: anywhere">{{up.dropTitle}}</span>
+<span id="dc-drop-note" style="max-width: 560px; font-size: 14px; line-height: 1.5; color: #4A5A66">{{up.dropNote}}</span>
+</button>
+<input id="dc-export" type="file" accept=".xls,.xlsx,.xlsm,.csv,.txt,.tsv" hidden onchange="{{up.picked}}">
+<section aria-label="Options" style="padding: 16px 18px; background: #FFFFFF; border: 1px solid #D9E0E5; border-radius: 4px; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: 16px 32px">
+<div style="min-width: 0; display: flex; flex-direction: column; gap: 8px">
+<div style="display: flex; flex-direction: column; gap: 2px">
+<span style="font-size: 15px; font-weight: 600">Lab configuration <span style="font-weight: 400; color: #4A5A66">(optional)</span></span>
+<span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13.5px; overflow-wrap: anywhere">{{up.cfgName}}</span>
+</div>
+<div style="display: flex; flex-wrap: wrap; gap: 8px">
+<button type="button" onClick="{{up.chooseCfg}}" disabled="{{up.busy}}" style="font: inherit; font-size: 14px; font-weight: 600; min-height: 38px; padding: 7px 14px; border: 1px solid #B9C4CC; border-radius: 4px; background: #FFFFFF; color: #13212B; cursor: pointer" style-hover="border-color: #13212B">{{up.cfgButton}}</button>
+<sc-if value="{{up.hasCfg}}"><button type="button" onClick="{{up.clearCfg}}" disabled="{{up.busy}}" style="font: inherit; font-size: 14px; font-weight: 600; min-height: 38px; padding: 7px 14px; border: 1px solid #B9C4CC; border-radius: 4px; background: #FFFFFF; color: #13212B; cursor: pointer" style-hover="border-color: #13212B">Use the package defaults</button></sc-if>
+</div>
+<span style="font-size: 13.5px; line-height: 1.5; color: #4A5A66">{{up.cfgNote}}</span>
+<input id="dc-config" type="file" accept=".json,application/json" hidden onchange="{{up.pickedCfg}}">
+</div>
+<label style="min-width: 0; display: flex; flex-direction: column; gap: 6px; font-size: 15px; font-weight: 600">
+<span>Run date <span style="font-weight: 400; color: #4A5A66">(optional)</span></span>
+<input id="dc-date" type="date" value="{{up.dateValue}}" oninput="{{up.setDate}}" disabled="{{up.busy}}" style="font: inherit; font-size: 15px; font-weight: 400; width: 100%; max-width: 240px; min-height: 44px; padding: 8px 12px; box-sizing: border-box; border: 1px solid #B9C4CC; border-radius: 4px; background: #FFFFFF; color: #13212B">
+<span style="font-size: 13.5px; font-weight: 400; line-height: 1.5; color: #4A5A66">{{up.dateNote}}</span>
+</label>
+</section>
+<sc-if value="{{up.hasError}}">
+<div role="alert" style="display: flex; flex-direction: column; gap: 6px; padding: 14px 16px; background: #FDF1EC; border: 1px solid #E3B3A0; border-radius: 4px">
+<strong style="font-size: 15px; font-weight: 600; color: #A33A00; overflow-wrap: anywhere">{{up.errTitle}}</strong>
+<span data-dc="error-detail" style="font-size: 14.5px; line-height: 1.55; color: #22313B; white-space: pre-wrap; overflow-wrap: anywhere">{{up.errText}}</span>
+</div>
+</sc-if>
+<sc-if value="{{up.has}}">
+<section style="padding: 18px 20px; background: #FFFFFF; border: 1px solid #D9E0E5; border-radius: 4px; display: flex; flex-direction: column; gap: 16px">
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px">
+<svg width="34" height="34" viewBox="0 0 34 34" aria-hidden="true"><path d="M8 3h12l7 7v21H8z" fill="#EEF2F5" stroke="#13212B" stroke-width="1.6" stroke-linejoin="round"></path><path d="M20 3v7h7M12 18h10M12 22h10M12 26h6" fill="none" stroke="#13212B" stroke-width="1.6" stroke-linecap="round"></path></svg>
+<div style="flex: 1 1 300px; min-width: 0; display: flex; flex-direction: column">
+<span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 15px; font-weight: 600; overflow-wrap: anywhere">{{up.name}}</span>
+<span style="font-size: 14px; color: #4A5A66">{{up.meta}}</span>
+</div>
+<span style="padding: 4px 11px; border-radius: 3px; background: #DDF2EA; color: #0B6E4F; font-size: 13px; font-weight: 600">{{up.badge}}</span>
+</div>
+<ul style="margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 8px">
+<sc-for list="{{up.checks}}" as="k"><li style="display: flex; gap: 10px; align-items: flex-start; font-size: 14.5px; line-height: 1.5; color: #22313B"><svg width="18" height="18" viewBox="0 0 20 20" aria-hidden="true" style="flex: 0 0 auto; margin-top: 1px"><circle cx="10" cy="10" r="8" fill="none" stroke="{{k.c}}" stroke-width="1.6"></circle><path d="{{k.d}}" fill="none" stroke="{{k.c}}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path></svg><span>{{k.t}}</span></li></sc-for>
+</ul>
+<div style="display: flex; flex-direction: column; gap: 10px">
+<div style="display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 16px">
+<h2 style="margin: 0; font-size: 16px; font-weight: 600">Columns</h2>
+<span style="font-size: 13.5px; color: #4A5A66">{{up.mapNote}}</span>
+</div>
+<div style="overflow-x: auto; border: 1px solid #D9E0E5; border-radius: 4px">
+<div role="table" aria-label="Column mapping" style="min-width: 560px; font-size: 14px">
+<div role="row" style="display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr) minmax(0, 0.9fr); gap: 10px; padding: 8px 14px; background: #F4F6F8; border-bottom: 1px solid #E3E8EC; font-size: 13px; font-weight: 600; color: #4A5A66"><span role="columnheader">What ea_irms needs</span><span role="columnheader">Column in this file</span><span role="columnheader">Match</span></div>
+<sc-for list="{{up.cols}}" as="c"><div role="row" style="display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr) minmax(0, 0.9fr); gap: 10px; align-items: center; padding: 7px 14px; border-bottom: 1px solid #ECF0F3"><span role="cell">{{c.field}} <span style="color: #56646F">{{c.unit}}</span></span><span role="cell" style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13.5px; white-space: pre">{{c.col}}</span><span role="cell" style="color: #0B6E4F; font-size: 13.5px; font-weight: 600">{{c.how}}</span></div></sc-for>
+</div>
+</div>
+<p style="margin: 0; font-size: 13.5px; line-height: 1.5; color: #4A5A66">{{up.mapFoot}}</p>
+</div>
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: 12px">
+<div style="padding: 10px 12px; border: 1px solid #D9E0E5; border-radius: 4px; display: flex; flex-direction: column; gap: 2px"><span style="font-size: 13px; color: #56646F">Instrument</span><span style="font-weight: 600">EA-IRMS</span></div>
+<div style="padding: 10px 12px; border: 1px solid #D9E0E5; border-radius: 4px; display: flex; flex-direction: column; gap: 2px"><span style="font-size: 13px; color: #56646F">Starting configuration</span><span style="font-weight: 600; overflow-wrap: anywhere">{{up.cfgShort}}</span></div>
+<div style="padding: 10px 12px; border: 1px solid #D9E0E5; border-radius: 4px; display: flex; flex-direction: column; gap: 2px"><span style="font-size: 13px; color: #56646F">Run date</span><span style="font-weight: 600">{{up.date}}</span></div>
+</div>
+<div style="display: flex; justify-content: flex-end"><button type="button" onClick="{{up.start}}" disabled="{{up.busy}}" style="font: inherit; font-size: 15px; font-weight: 600; min-height: 46px; padding: 11px 20px; border: 0; border-radius: 4px; background: #13212B; color: #FFFFFF; cursor: pointer" style-hover="background: #22374B">Start the corrections</button></div>
+</section>
+</sc-if>
+<p style="margin: 0; max-width: 760px; font-size: 13.5px; line-height: 1.55; color: #4A5A66">Your browser keeps the export in this tab, so that it can send it again when you download the workbook or the results table.</p>
+<sc-if value="{{up.fresh}}">
+<section aria-label="The nine steps" style="display: flex; flex-direction: column; gap: 8px; padding-top: 28px">
+<h2 style="margin: 0; font-family: 'Newsreader', Georgia, serif; font-weight: 500; font-size:34px; line-height: 1.15">The nine steps</h2>
+<p style="margin: 0 0 14px; max-width: 680px; font-size:17px; color: #3B4A55">Step 1 checks the instrument. Steps 2 to 9 follow the order of the lab’s correction workbook. Each step shows its numbers, and you can change its choice before you go on.</p>
+<ol style="margin: 0; padding: 0; list-style: none; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr)); column-gap: 48px; font-size:16px">
+<li style="display: flex; gap: 18px; padding: 14px 0; border-top: 1px solid #D9E0E5"><span style="font-family: 'Newsreader', Georgia, serif; font-size:26px; line-height: 1; color: #C2510A; min-width: 28px">1</span><span><strong style="font-weight: 600">Instrument performance.</strong> How steady the reference gas was, and when the background settled.</span></li>
+<li style="display: flex; gap: 18px; padding: 14px 0; border-top: 1px solid #D9E0E5"><span style="font-family: 'Newsreader', Georgia, serif; font-size:26px; line-height: 1; color: #0B5E8E; min-width: 28px">2</span><span><strong style="font-weight: 600">Standards and roles.</strong> Which positions are standards, blanks, and samples.</span></li>
+<li style="display: flex; gap: 18px; padding: 14px 0; border-top: 1px solid #D9E0E5"><span style="font-family: 'Newsreader', Georgia, serif; font-size:26px; line-height: 1; color: #0B5E8E; min-width: 28px">3</span><span><strong style="font-weight: 600">Blank.</strong> What the empty capsules add, and whether to subtract it.</span></li>
+<li style="display: flex; gap: 18px; padding: 14px 0; border-top: 1px solid #D9E0E5"><span style="font-family: 'Newsreader', Georgia, serif; font-size:26px; line-height: 1; color: #0B5E8E; min-width: 28px">4</span><span><strong style="font-weight: 600">Linearity.</strong> Whether δ changes with peak size.</span></li>
+<li style="display: flex; gap: 18px; padding: 14px 0; border-top: 1px solid #D9E0E5"><span style="font-family: 'Newsreader', Georgia, serif; font-size:26px; line-height: 1; color: #0B5E8E; min-width: 28px">5</span><span><strong style="font-weight: 600">Drift.</strong> Whether the instrument drifted during the run.</span></li>
+<li style="display: flex; gap: 18px; padding: 14px 0; border-top: 1px solid #D9E0E5"><span style="font-family: 'Newsreader', Georgia, serif; font-size:26px; line-height: 1; color: #0B5E8E; min-width: 28px">6</span><span><strong style="font-weight: 600">Calibration.</strong> Reference materials with known values put the run on the AIR and VPDB scales.</span></li>
+<li style="display: flex; gap: 18px; padding: 14px 0; border-top: 1px solid #D9E0E5"><span style="font-family: 'Newsreader', Georgia, serif; font-size:26px; line-height: 1; color: #0B5E8E; min-width: 28px">7</span><span><strong style="font-weight: 600">Elemental content.</strong> %N and %C from peak areas and sample weights.</span></li>
+<li style="display: flex; gap: 18px; padding: 14px 0; border-top: 1px solid #D9E0E5"><span style="font-family: 'Newsreader', Georgia, serif; font-size:26px; line-height: 1; color: #0B5E8E; min-width: 28px">8</span><span><strong style="font-weight: 600">Uncertainty.</strong> The uncertainty U of each sample value.</span></li>
+<li style="display: flex; gap: 18px; padding: 14px 0; border-top: 1px solid #D9E0E5"><span style="font-family: 'Newsreader', Georgia, serif; font-size:26px; line-height: 1; color: #0B5E8E; min-width: 28px">9</span><span><strong style="font-weight: 600">Quality checks.</strong> All warnings in one list, then the downloads.</span></li>
+</ol>
+</section>
+</sc-if>
+</div>
+</sc-if>
+
+<sc-if value="{{is.flow}}">
+<div style="display: flex; flex-wrap: wrap; align-items: flex-start; gap: 28px">
+<aside style="flex: 1 1 236px; min-width: 0; max-width: 100%; display: flex; flex-direction: column; gap: 14px">
+<div style="padding: 14px 16px; background: #FFFFFF; border: 1px solid #D9E0E5; border-radius: 4px; display: flex; flex-direction: column; gap: 4px">
+<span style="font-size: 12.5px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #56646F">Run</span>
+<span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13.5px; font-weight: 600; overflow-wrap: anywhere">{{flow.file}}</span>
+<span style="font-size: 13.5px; color: #4A5A66">{{up.positions}} positions · {{up.date}}</span>
+<sc-if value="{{flow.warn}}"><span style="margin-top: 4px; padding: 6px 8px; border-radius: 3px; background: #FADFD2; color: #A33A00; font-size: 13px; line-height: 1.4">{{flow.warnText}}</span></sc-if>
+</div>
+<nav aria-label="Correction steps">
+<ol style="margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 2px">
+<sc-for list="{{flow.rail}}" as="s"><li><button type="button" onClick="{{s.pick}}" aria-current="{{s.cur}}" style="font: inherit; width: 100%; display: flex; align-items: flex-start; gap: 12px; padding: 9px 10px; text-align: left; background: {{s.rbg}}; border: 1px solid {{s.rbd}}; border-radius: 4px; color: #13212B; cursor: pointer" style-hover="background: #FFFFFF"><span style="flex: 0 0 auto; box-sizing: border-box; width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 600; background: {{s.nbg}}; color: {{s.nfg}}; border: 1.5px solid {{s.nbd}}">{{s.n}}</span><span style="min-width: 0; display: flex; flex-direction: column; gap: 1px"><span style="font-size: 15px; font-weight: {{s.tw}}">{{s.t}}</span><span style="font-size: 13px; line-height: 1.4; color: #4A5A66">{{s.sub}}</span></span></button></li></sc-for>
+</ol>
+</nav>
+</aside>
+<div style="flex: 999 1 640px; min-width: 0; display: flex; flex-direction: column; gap: 20px">
+<div style="display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 14px 24px">
+<div style="flex: 1 1 520px; min-width: 0; display: flex; flex-direction: column; gap: 8px">
+<span style="font-size: 12.5px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #C2510A">{{flow.kicker}}</span>
+<sc-if value="{{is.inst}}"><h1 style="margin: 0; font-family: 'Newsreader', Georgia, serif; font-size:clamp(34px, 3.6vw, 46px); line-height: 1.08; font-weight: 500; letter-spacing: -0.01em">Instrument performance</h1><p style="margin: 0; max-width: 780px; font-size: 16px; line-height: 1.6; color: #3B4A55; text-wrap: pretty">This step checks the instrument before any correction. Isodat calculates each analysis against one reference gas pulse, the one it marks with the Is Ref flag. The other reference pulses are measured the same way, so their spread shows the instrument’s precision without any sample. BGD 28 is the background at m/z 28 under each peak, and analyses made before it settled are flagged. Nothing on this screen changes a value. Only the m/z 28 background is checked; BGD 44 and retention times are not read.</p></sc-if>
+<sc-if value="{{is.setup}}"><h1 style="margin: 0; font-family: 'Newsreader', Georgia, serif; font-size:clamp(34px, 3.6vw, 46px); line-height: 1.08; font-weight: 500; letter-spacing: -0.01em">Standards and roles</h1><p style="margin: 0; max-width: 780px; font-size: 16px; line-height: 1.6; color: #3B4A55; text-wrap: pretty">Each sample name (Identifier 1) is matched to the standards table by its text, and upper and lower case count as the same. If two rows match, the lower row is used. Positions that match no row are treated as samples.</p></sc-if>
+<sc-if value="{{is.blank}}"><h1 style="margin: 0; font-family: 'Newsreader', Georgia, serif; font-size:clamp(34px, 3.6vw, 46px); line-height: 1.08; font-weight: 500; letter-spacing: -0.01em">Blank</h1><p style="margin: 0; max-width: 780px; font-size: 16px; line-height: 1.6; color: #3B4A55; text-wrap: pretty">Empty tin capsules show how much the capsule and the system add to every peak. On Auto, the blank is subtracted only if at least three capsules gave a peak and their δ values agree within 2‰ (1 SD). {{text.blankFlag}}</p></sc-if>
+<sc-if value="{{is.lin}}"><h1 style="margin: 0; font-family: 'Newsreader', Georgia, serif; font-size:clamp(34px, 3.6vw, 46px); line-height: 1.08; font-weight: 500; letter-spacing: -0.01em">Linearity</h1><p style="margin: 0; max-width: 780px; font-size: 16px; line-height: 1.6; color: #3B4A55; text-wrap: pretty">{{text.linSeries}} is one standard run at several sizes, so it shows whether δ changes with peak size. On Auto, the correction is applied only if the slope differs from zero at p &lt; {{text.alpha}}. A peak with the series’ mean area is not changed, and larger or smaller peaks are moved along the slope. Peaks outside the size range of the series are extrapolated and flagged.</p></sc-if>
+<sc-if value="{{is.drift}}"><h1 style="margin: 0; font-family: 'Newsreader', Georgia, serif; font-size:clamp(34px, 3.6vw, 46px); line-height: 1.08; font-weight: 500; letter-spacing: -0.01em">Drift</h1><p style="margin: 0; max-width: 780px; font-size: 16px; line-height: 1.6; color: #3B4A55; text-wrap: pretty">{{text.monitors}} are one standard placed at intervals through the run, so they show whether the instrument drifted. On Auto, the correction is applied only if the slope differs from zero at p &lt; {{text.alpha}}. Click a monitor on a chart to leave it out of the fit, and click it again to put it back.</p></sc-if>
+<sc-if value="{{is.cal}}"><h1 style="margin: 0; font-family: 'Newsreader', Georgia, serif; font-size:clamp(34px, 3.6vw, 46px); line-height: 1.08; font-weight: 500; letter-spacing: -0.01em">Calibration</h1><p style="margin: 0; max-width: 780px; font-size: 16px; line-height: 1.6; color: #3B4A55; text-wrap: pretty">{{text.anchors}} are reference materials with accepted values, and they put the run on the AIR and VPDB scales. A straight line is fitted with the accepted values against the measured ones, and that line converts each sample directly. Samples outside the range of the anchors are extrapolated, and their uncertainty grows with the distance.</p></sc-if>
+<sc-if value="{{is.elem}}"><h1 style="margin: 0; font-family: 'Newsreader', Georgia, serif; font-size:clamp(34px, 3.6vw, 46px); line-height: 1.08; font-weight: 500; letter-spacing: -0.01em">Elemental content</h1><p style="margin: 0; max-width: 780px; font-size: 16px; line-height: 1.6; color: #3B4A55; text-wrap: pretty">The weighed standards give a k-factor that turns peak area into micrograms of N and C. If the instrument’s sensitivity changes during the run, the drift monitors read too high or too low in %N and %C. The correction divides each position by the monitors’ factor at that point in the run, interpolated between monitors and held constant before the first and after the last. On Auto, it is applied when a monitor is off by more than {{text.elemGate}}%. Click a monitor to leave it out.</p></sc-if>
+<sc-if value="{{is.unc}}"><h1 style="margin: 0; font-family: 'Newsreader', Georgia, serif; font-size:clamp(34px, 3.6vw, 46px); line-height: 1.08; font-weight: 500; letter-spacing: -0.01em">Uncertainty</h1><p style="margin: 0; max-width: 780px; font-size: 16px; line-height: 1.6; color: #3B4A55; text-wrap: pretty">Each value has a standard uncertainty u. It combines the uncertainty of the anchors’ certified values, the standard errors of their measured means, and the repeatability of a single analysis, carried through the calibration line as in a Kragten spreadsheet. The expanded uncertainty is U = {{text.k}}u. U does not include the blank, linearity, or drift corrections, or differences between runs.</p></sc-if>
+<sc-if value="{{is.qc}}"><h1 style="margin: 0; font-family: 'Newsreader', Georgia, serif; font-size:clamp(34px, 3.6vw, 46px); line-height: 1.08; font-weight: 500; letter-spacing: -0.01em">Quality checks</h1><p style="margin: 0; max-width: 780px; font-size: 16px; line-height: 1.6; color: #3B4A55; text-wrap: pretty">These checks change no value; they show how far the values can be trusted. A Caution means that reversing a linearity or drift choice would move a sample by more than U, or that a monitor used for elemental content is off by more than 10%. A Note marks anything else to look at. The instrument rows repeat those of step 1, so the list covers the whole run.</p></sc-if>
+<sc-if value="{{is.results}}"><h1 style="margin: 0; font-family: 'Newsreader', Georgia, serif; font-size:clamp(34px, 3.6vw, 46px); line-height: 1.08; font-weight: 500; letter-spacing: -0.01em">Results</h1><p style="margin: 0; max-width: 780px; font-size: 16px; line-height: 1.6; color: #3B4A55; text-wrap: pretty">Corrected values for every sample, with U (k = {{text.k}}), %N, %C, and C:N. Click a row or a point to see each step of its correction.</p></sc-if>
+</div>
+<div style="display: flex; flex-wrap: wrap; gap: 8px">
+<button type="button" onClick="{{flow.prev.pick}}" style="font: inherit; font-size: 15px; font-weight: 600; min-height: 44px; padding: 10px 16px; border: 1px solid #B9C4CC; border-radius: 4px; background: #FFFFFF; color: #13212B; cursor: pointer" style-hover="border-color: #13212B">{{flow.prev.t}}</button>
+<button type="button" onClick="{{flow.next.pick}}" disabled="{{flow.next.busy}}" style="font: inherit; font-size: 15px; font-weight: 600; min-height: 44px; padding: 10px 18px; border: 0; border-radius: 4px; background: #13212B; color: #FFFFFF; cursor: pointer" style-hover="background: #22374B">{{flow.next.t}}</button>
+</div>
+</div>
+
+<sc-if value="{{flow.hasCtrl}}">
+<section aria-label="Decisions" style="padding: 16px 18px; background: #F5F7F9; border-radius: 4px; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr)); gap: 16px 32px">
+<sc-for list="{{flow.ctrl}}" as="k">
+<div style="min-width: 0; display: flex; flex-direction: column; gap: 10px">
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px">
+<span style="min-width: 116px; font-size: 15px; font-weight: 600">{{k.label}}</span>
+<div role="group" aria-label="{{k.label}}" style="display: inline-flex; flex-wrap: wrap; gap: 2px; padding: 3px; background: #EEF2F5; border-radius: 4px">
+<sc-for list="{{k.opts}}" as="o"><button type="button" onClick="{{o.pick}}" aria-pressed="{{o.pressed}}" style="font: inherit; font-size: 14px; font-weight: 600; min-height: 36px; padding: 7px 14px; border: 0; border-radius: 3px; background: {{o.bg}}; color: {{o.fg}}; cursor: pointer">{{o.t}}</button></sc-for>
+</div>
+</div>
+<sc-for list="{{k.lines}}" as="l"><div style="display: flex; align-items: baseline; gap: 8px; font-size: 14px; line-height: 1.5; color: #3B4A55"><span style="flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: {{l.dot}}"></span><span>{{l.t}}</span></div></sc-for>
+</div>
+</sc-for>
+</section>
+</sc-if>
+
+<sc-if value="{{is.step}}">
+<section aria-label="Sequence" style="padding: 14px 18px 12px; background: #F5F7F9; border-radius: 4px; display: flex; flex-direction: column; gap: 10px">
+<div style="display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 18px">
+<h2 style="margin: 0; font-size: 15px; font-weight: 600">Sequence <span style="font-weight: 400; color: #4A5A66">Bar height is the N₂ peak area on a log scale. Click a bar to see that position.</span></h2>
+<div style="display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 13px; color: #3B4A55"><sc-for list="{{flow.legend}}" as="l"><span style="display: inline-flex; align-items: center; gap: 6px"><span style="width: 9px; height: 9px; border-radius: 2px; background: {{l.bg}}"></span>{{l.t}}</span></sc-for></div>
+</div>
+<div style="display: flex; align-items: flex-end; gap: 2px; height: 64px">
+<sc-for list="{{flow.ribbon}}" as="b"><button type="button" onClick="{{b.pick}}" title="{{b.label}}" aria-label="{{b.label}}" style="flex: 1 1 0; min-width: 0; height: 64px; padding: 0; border: 0; border-radius: 3px; background: {{b.sbg}}; display: flex; align-items: flex-end; cursor: pointer" style-hover="background: #E3E9EF"><span style="display: block; width: 100%; height: {{b.h}}px; background: {{b.bg}}; opacity: {{b.op}}; border-radius: 2px 2px 0 0"></span></button></sc-for>
+</div>
+<div style="display: flex; justify-content: space-between; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 12px; color: #56646F"><span>{{flow.ribbonStart}}</span><span>{{flow.ribbonEnd}}</span></div>
+</section>
+</sc-if>
+
+<sc-if value="{{is.setup}}">
+<section aria-label="Standards table" style="background: #FFFFFF; border-top: 2px solid #13212B; border-bottom: 2px solid #13212B; overflow: hidden">
+<div style="padding: 16px 18px 10px; display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 16px">
+<h2 style="margin: 0; font-size: 16px; font-weight: 600">Standards table</h2>
+<span style="font-size: 13.5px; color: #4A5A66">{{flow.stdSource}} Accepted δ in ‰; u is 1 SD. Grey rows match no position in this run.</span>
+</div>
+<div style="overflow-x: auto">
+<div role="table" style="min-width: 780px; font-size: 14px">
+<div role="row" style="display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1.2fr) repeat(4, minmax(0, 0.75fr)) minmax(0, 1fr) minmax(0, 0.8fr); gap: 10px; padding: 8px 18px; background: #F4F6F8; border-top: 1px solid #E3E8EC; border-bottom: 1px solid #E3E8EC; font-size: 13px; font-weight: 600; color: #4A5A66"><span role="columnheader">Match text</span><span role="columnheader">Role</span><span role="columnheader">δ¹³C</span><span role="columnheader">δ¹⁵N</span><span role="columnheader">%C</span><span role="columnheader">%N</span><span role="columnheader">u(δ¹³C), u(δ¹⁵N)</span><span role="columnheader">Positions</span></div>
+<sc-for list="{{flow.setupRows}}" as="r"><div role="row" style="display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1.2fr) repeat(4, minmax(0, 0.75fr)) minmax(0, 1fr) minmax(0, 0.8fr); gap: 10px; padding: 8px 18px; border-bottom: 1px solid #ECF0F3; opacity: {{r.op}}"><span role="cell" style="font-weight: 500">{{r.text}}</span><span role="cell" style="display: inline-flex; align-items: center; gap: 7px"><span style="flex: 0 0 auto; width: 9px; height: 9px; border-radius: 2px; background: {{r.bg}}"></span>{{r.role}}</span><span role="cell" style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13.5px">{{r.d13}}</span><span role="cell" style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13.5px">{{r.d15}}</span><span role="cell" style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13.5px">{{r.pc}}</span><span role="cell" style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13.5px">{{r.pn}}</span><span role="cell" style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13.5px">{{r.u}}</span><span role="cell" style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13.5px; font-weight: {{r.fw}}">{{r.n}}</span></div></sc-for>
+</div>
+</div>
+</section>
+</sc-if>
+
+<sc-if value="{{flow.hasChecks}}">
+<section aria-label="Checks" style="background: #FFFFFF; border-top: 2px solid #13212B; border-bottom: 1px solid #D9E0E5; padding: 0">
+<sc-for list="{{flow.checks}}" as="k"><div style="display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px 16px; padding: 13px 18px; border-bottom: 1px solid #ECF0F3"><span style="flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px; min-width: 96px; box-sizing: border-box; padding: 3px 10px 3px 5px; border-radius: 3px; background: {{k.bg}}; color: {{k.fg}}; font-size: 13px; font-weight: 600"><svg width="18" height="18" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="1.6"></circle><path d="{{k.icon}}" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"></path></svg>{{k.label}}</span><div style="flex: 1 1 320px; min-width: 0; display: flex; flex-direction: column; gap: 2px"><strong style="font-size: 15px; font-weight: 600">{{k.title}}</strong><span style="font-size: 14px; line-height: 1.55; color: #3B4A55">{{k.t}}</span></div><sc-if value="{{k.hasGo}}"><button type="button" onClick="{{k.go}}" style="font: inherit; font-size: 14px; font-weight: 600; align-self: center; padding: 6px 12px; border: 1px solid #B9C4CC; border-radius: 8px; background: #FFFFFF; color: #13212B; cursor: pointer" style-hover="border-color: #13212B">{{k.goText}}</button></sc-if></div></sc-for>
+</section>
+</sc-if>
+
+<sc-if value="{{flow.hasCharts}}">
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); gap: 20px">
+<sc-for list="{{flow.charts}}" as="c">
+<figure style="margin: 0; min-width: 0; background: #FFFFFF; border-top: 2px solid #13212B; padding: 14px 2px 6px; display: flex; flex-direction: column; gap: 10px">
+<div style="display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 6px 12px">
+<div style="flex: 1 1 240px; min-width: 0; display: flex; flex-direction: column; gap: 2px">
+<h3 style="margin: 0; font-family: 'Newsreader', Georgia, serif; font-size:20px; font-weight: 500; line-height: 1.3"><span style="font-family: 'Source Sans 3', 'Segoe UI', 'Helvetica Neue', Helvetica, system-ui, sans-serif; font-size:15px; font-weight: 700; color: #C2510A">Fig. {{c.num}}</span> {{c.title}}</h3>
+<span style="font-size: 13.5px; line-height: 1.45; color: #56646F">{{c.sub}}</span>
+</div>
+<sc-if value="{{c.hasBadge}}"><span style="flex: 0 0 auto; padding: 4px 10px; border-radius: 3px; font-size: 13px; font-weight: 600; white-space: nowrap; background: {{c.badge.bg}}; color: {{c.badge.fg}}">{{c.badge.text}}</span></sc-if>
+</div>
+<sc-if value="{{c.full}}">
+<span style="font-size: 13px; color: #3B4A55">{{c.yLabel}}</span>
+<div style="position: relative; width: 100%; aspect-ratio: {{c.ar}}; margin-bottom: 18px">
+<svg viewBox="{{c.vb}}" preserveAspectRatio="none" aria-hidden="true" style="position: absolute; left: 0; top: 0; width: 100%; height: 100%; overflow: visible">
+<path d="{{c.s0.d}}" fill="{{c.s0.f}}" stroke="{{c.s0.s}}" stroke-width="{{c.s0.w}}" stroke-dasharray="{{c.s0.da}}"></path>
+<path d="{{c.s1.d}}" fill="{{c.s1.f}}" stroke="{{c.s1.s}}" stroke-width="{{c.s1.w}}" stroke-dasharray="{{c.s1.da}}"></path>
+<path d="{{c.s2.d}}" fill="{{c.s2.f}}" stroke="{{c.s2.s}}" stroke-width="{{c.s2.w}}" stroke-dasharray="{{c.s2.da}}"></path>
+<path d="{{c.s3.d}}" fill="{{c.s3.f}}" stroke="{{c.s3.s}}" stroke-width="{{c.s3.w}}" stroke-dasharray="{{c.s3.da}}"></path>
+<path d="{{c.s4.d}}" fill="{{c.s4.f}}" stroke="{{c.s4.s}}" stroke-width="{{c.s4.w}}" stroke-dasharray="{{c.s4.da}}"></path>
+<path d="{{c.s5.d}}" fill="{{c.s5.f}}" stroke="{{c.s5.s}}" stroke-width="{{c.s5.w}}" stroke-dasharray="{{c.s5.da}}"></path>
+<path d="{{c.s6.d}}" fill="{{c.s6.f}}" stroke="{{c.s6.s}}" stroke-width="{{c.s6.w}}" stroke-dasharray="{{c.s6.da}}"></path>
+<path d="{{c.s7.d}}" fill="{{c.s7.f}}" stroke="{{c.s7.s}}" stroke-width="{{c.s7.w}}" stroke-dasharray="{{c.s7.da}}"></path>
+<path d="{{c.s8.d}}" fill="{{c.s8.f}}" stroke="{{c.s8.s}}" stroke-width="{{c.s8.w}}" stroke-dasharray="{{c.s8.da}}"></path>
+<path d="{{c.s9.d}}" fill="{{c.s9.f}}" stroke="{{c.s9.s}}" stroke-width="{{c.s9.w}}" stroke-dasharray="{{c.s9.da}}"></path>
+<path d="{{c.s10.d}}" fill="{{c.s10.f}}" stroke="{{c.s10.s}}" stroke-width="{{c.s10.w}}" stroke-dasharray="{{c.s10.da}}"></path>
+<path d="{{c.s11.d}}" fill="{{c.s11.f}}" stroke="{{c.s11.s}}" stroke-width="{{c.s11.w}}" stroke-dasharray="{{c.s11.da}}"></path>
+</svg>
+<sc-for list="{{c.yl}}" as="t"><span style="position: absolute; left: {{t.x}}%; top: {{t.y}}%; transform: translate(calc(-100% - 7px), -50%); font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 12px; color: #56646F; white-space: nowrap">{{t.t}}</span></sc-for>
+<sc-for list="{{c.xl}}" as="t"><span style="position: absolute; left: {{t.x}}%; top: {{t.y}}%; transform: translate(-50%, 6px); font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 12px; color: #56646F; white-space: nowrap">{{t.t}}</span></sc-for>
+<sc-for list="{{c.notes}}" as="t"><span style="position: absolute; left: {{t.x}}%; top: {{t.y}}%; transform: {{t.tf}}; font-size: 12.5px; font-weight: 600; color: {{t.c}}; white-space: nowrap; pointer-events: none">{{t.t}}</span></sc-for>
+<sc-for list="{{c.hits}}" as="h"><button type="button" onClick="{{h.pick}}" title="{{h.label}}" aria-label="{{h.label}}" style="position: absolute; left: {{h.x}}%; top: {{h.y}}%; width: 28px; height: 28px; margin: -14px 0 0 -14px; padding: 0; border: 0; border-radius: 50%; background: transparent; cursor: pointer" style-hover="background: rgba(14, 26, 38, 0.08)"></button></sc-for>
+</div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 16px">
+<div style="display: flex; flex-wrap: wrap; gap: 4px 14px"><sc-for list="{{c.legend}}" as="l"><span style="display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: #3B4A55"><svg width="22" height="12" viewBox="0 0 22 12" aria-hidden="true"><path d="{{l.d}}" fill="{{l.f}}" stroke="{{l.s}}" stroke-width="{{l.w}}" stroke-dasharray="{{l.da}}"></path></svg>{{l.label}}</span></sc-for></div>
+<span style="font-size: 13px; color: #3B4A55">{{c.xLabel}}</span>
+</div>
+</sc-if>
+<sc-if value="{{c.empty}}"><div style="display: grid; place-items: center; min-height: 240px; padding: 24px; border: 1px dashed #B9C4CC; border-radius: 4px; background: #F6F8FA; color: #3B4A55; font-size: 14.5px; line-height: 1.55; text-align: center">{{c.emptyText}}</div></sc-if>
+</figure>
+</sc-for>
+</div>
+</sc-if>
+
+<sc-if value="{{is.results}}">
+<div style="display: flex; flex-wrap: wrap; gap: 8px"><sc-for list="{{res.chips}}" as="k"><span style="padding: 5px 11px; border-radius: 3px; background: #FFFFFF; border: 1px solid #D9E0E5; font-size: 13.5px; color: #22313B">{{k.t}}</span></sc-for></div>
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(460px, 100%), 1fr)); align-items: start; gap: 20px">
+<sc-for list="{{res.charts}}" as="c">
+<figure style="margin: 0; min-width: 0; background: #FFFFFF; border-top: 2px solid #13212B; padding: 14px 2px 6px; display: flex; flex-direction: column; gap: 10px">
+<div style="display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 6px 12px">
+<div style="flex: 1 1 240px; min-width: 0; display: flex; flex-direction: column; gap: 2px">
+<h3 style="margin: 0; font-family: 'Newsreader', Georgia, serif; font-size:20px; font-weight: 500; line-height: 1.3"><span style="font-family: 'Source Sans 3', 'Segoe UI', 'Helvetica Neue', Helvetica, system-ui, sans-serif; font-size:15px; font-weight: 700; color: #C2510A">Fig. {{c.num}}</span> {{c.title}}</h3>
+<span style="font-size: 13.5px; line-height: 1.45; color: #56646F">{{c.sub}}</span>
+</div>
+<sc-if value="{{c.hasBadge}}"><span style="flex: 0 0 auto; padding: 4px 10px; border-radius: 3px; font-size: 13px; font-weight: 600; white-space: nowrap; background: {{c.badge.bg}}; color: {{c.badge.fg}}">{{c.badge.text}}</span></sc-if>
+</div>
+<sc-if value="{{c.full}}">
+<span style="font-size: 13px; color: #3B4A55">{{c.yLabel}}</span>
+<div style="position: relative; width: 100%; aspect-ratio: {{c.ar}}; margin-bottom: 18px">
+<svg viewBox="{{c.vb}}" preserveAspectRatio="none" aria-hidden="true" style="position: absolute; left: 0; top: 0; width: 100%; height: 100%; overflow: visible">
+<path d="{{c.s0.d}}" fill="{{c.s0.f}}" stroke="{{c.s0.s}}" stroke-width="{{c.s0.w}}" stroke-dasharray="{{c.s0.da}}"></path>
+<path d="{{c.s1.d}}" fill="{{c.s1.f}}" stroke="{{c.s1.s}}" stroke-width="{{c.s1.w}}" stroke-dasharray="{{c.s1.da}}"></path>
+<path d="{{c.s2.d}}" fill="{{c.s2.f}}" stroke="{{c.s2.s}}" stroke-width="{{c.s2.w}}" stroke-dasharray="{{c.s2.da}}"></path>
+<path d="{{c.s3.d}}" fill="{{c.s3.f}}" stroke="{{c.s3.s}}" stroke-width="{{c.s3.w}}" stroke-dasharray="{{c.s3.da}}"></path>
+<path d="{{c.s4.d}}" fill="{{c.s4.f}}" stroke="{{c.s4.s}}" stroke-width="{{c.s4.w}}" stroke-dasharray="{{c.s4.da}}"></path>
+<path d="{{c.s5.d}}" fill="{{c.s5.f}}" stroke="{{c.s5.s}}" stroke-width="{{c.s5.w}}" stroke-dasharray="{{c.s5.da}}"></path>
+<path d="{{c.s6.d}}" fill="{{c.s6.f}}" stroke="{{c.s6.s}}" stroke-width="{{c.s6.w}}" stroke-dasharray="{{c.s6.da}}"></path>
+<path d="{{c.s7.d}}" fill="{{c.s7.f}}" stroke="{{c.s7.s}}" stroke-width="{{c.s7.w}}" stroke-dasharray="{{c.s7.da}}"></path>
+<path d="{{c.s8.d}}" fill="{{c.s8.f}}" stroke="{{c.s8.s}}" stroke-width="{{c.s8.w}}" stroke-dasharray="{{c.s8.da}}"></path>
+<path d="{{c.s9.d}}" fill="{{c.s9.f}}" stroke="{{c.s9.s}}" stroke-width="{{c.s9.w}}" stroke-dasharray="{{c.s9.da}}"></path>
+<path d="{{c.s10.d}}" fill="{{c.s10.f}}" stroke="{{c.s10.s}}" stroke-width="{{c.s10.w}}" stroke-dasharray="{{c.s10.da}}"></path>
+<path d="{{c.s11.d}}" fill="{{c.s11.f}}" stroke="{{c.s11.s}}" stroke-width="{{c.s11.w}}" stroke-dasharray="{{c.s11.da}}"></path>
+</svg>
+<sc-for list="{{c.yl}}" as="t"><span style="position: absolute; left: {{t.x}}%; top: {{t.y}}%; transform: translate(calc(-100% - 7px), -50%); font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 12px; color: #56646F; white-space: nowrap">{{t.t}}</span></sc-for>
+<sc-for list="{{c.xl}}" as="t"><span style="position: absolute; left: {{t.x}}%; top: {{t.y}}%; transform: translate(-50%, 6px); font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 12px; color: #56646F; white-space: nowrap">{{t.t}}</span></sc-for>
+<sc-for list="{{c.notes}}" as="t"><span style="position: absolute; left: {{t.x}}%; top: {{t.y}}%; transform: {{t.tf}}; font-size: 12.5px; font-weight: 600; color: {{t.c}}; white-space: nowrap; pointer-events: none">{{t.t}}</span></sc-for>
+<sc-for list="{{c.hits}}" as="h"><button type="button" onClick="{{h.pick}}" title="{{h.label}}" aria-label="{{h.label}}" style="position: absolute; left: {{h.x}}%; top: {{h.y}}%; width: 28px; height: 28px; margin: -14px 0 0 -14px; padding: 0; border: 0; border-radius: 50%; background: transparent; cursor: pointer" style-hover="background: rgba(14, 26, 38, 0.08)"></button></sc-for>
+</div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 16px">
+<div style="display: flex; flex-wrap: wrap; gap: 4px 14px"><sc-for list="{{c.legend}}" as="l"><span style="display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: #3B4A55"><svg width="22" height="12" viewBox="0 0 22 12" aria-hidden="true"><path d="{{l.d}}" fill="{{l.f}}" stroke="{{l.s}}" stroke-width="{{l.w}}" stroke-dasharray="{{l.da}}"></path></svg>{{l.label}}</span></sc-for></div>
+<span style="font-size: 13px; color: #3B4A55">{{c.xLabel}}</span>
+</div>
+</sc-if>
+<sc-if value="{{c.empty}}"><div style="display: grid; place-items: center; min-height: 240px; padding: 24px; border: 1px dashed #B9C4CC; border-radius: 4px; background: #F6F8FA; color: #3B4A55; font-size: 14.5px; line-height: 1.55; text-align: center">{{c.emptyText}}</div></sc-if>
+</figure>
+</sc-for>
+<section aria-label="Files and methods" style="min-width: 0; padding: 16px 18px; background: #FFFFFF; border: 1px solid #D9E0E5; border-radius: 4px; display: flex; flex-direction: column; gap: 14px">
+<h2 style="margin: 0; font-size: 16px; font-weight: 600">Downloads</h2>
+<div style="display: flex; flex-direction: column; gap: 8px">
+<sc-for list="{{res.downloads}}" as="x"><button type="button" onClick="{{x.pick}}" disabled="{{x.busy}}" aria-busy="{{x.aria}}" style="font: inherit; display: flex; align-items: center; gap: 12px; padding: 10px 12px; text-align: left; background: #FFFFFF; border: 1px solid #D9E0E5; border-radius: 4px; color: #13212B; cursor: {{x.cursor}}" style-hover="border-color: #13212B"><svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true" style="flex: 0 0 auto"><path d="M10 3v10M5.5 9l4.5 4.5L14.5 9M4 16.5h12" fill="none" stroke="#13212B" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"></path></svg><span style="min-width: 0; display: flex; flex-direction: column"><span style="font-size: 15px; font-weight: 600">{{x.t}}</span><span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 12.5px; color: #4A5A66; overflow-wrap: anywhere">{{x.sub}}</span><span style="font-size: 13px; color: #56646F">{{x.note}}</span></span></button></sc-for>
+</div>
+<div style="display: flex; flex-direction: column; gap: 6px">
+<h3 style="margin: 0; font-size: 14.5px; font-weight: 600">Methods text for a paper, written from the choices above</h3>
+<p style="margin: 0; padding: 12px 14px; background: #F6F8FA; border: 1px solid #E3E8EC; border-radius: 4px; font-size: 14px; line-height: 1.6; color: #22313B">{{res.methods}}</p>
+</div>
+</section>
+</div>
+<section aria-label="Samples" style="background: #FFFFFF; border: 1px solid #D9E0E5; border-radius: 4px; overflow: hidden">
+<div style="padding: 14px 18px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px">
+<h2 style="margin: 0; font-size: 16px; font-weight: 600">Samples</h2>
+<div role="group" aria-label="Filter the samples" style="display: flex; flex-wrap: wrap; gap: 6px"><sc-for list="{{res.filters}}" as="f"><button type="button" onClick="{{f.pick}}" style="font: inherit; font-size: 13.5px; font-weight: 600; min-height: 34px; padding: 5px 12px; border: 1px solid {{f.bd}}; border-radius: 3px; background: {{f.bg}}; color: {{f.fg}}; cursor: pointer">{{f.t}}</button></sc-for></div>
+</div>
+<div style="overflow-x: auto">
+<div role="table" style="min-width: 1020px; font-size: 14px">
+<div role="row" style="display: grid; grid-template-columns: 48px minmax(0, 1.2fr) repeat(9, minmax(0, 0.7fr)) minmax(0, 2fr); gap: 8px; padding: 8px 18px; background: #F4F6F8; border-top: 1px solid #E3E8EC; border-bottom: 1px solid #E3E8EC; font-size: 13px; font-weight: 600; color: #4A5A66"><span role="columnheader">Pos.</span><span role="columnheader">Sample</span><span role="columnheader">mg</span><span role="columnheader">N2, Vs</span><span role="columnheader">δ¹⁵N</span><span role="columnheader">U</span><span role="columnheader">δ¹³C</span><span role="columnheader">U</span><span role="columnheader">%N</span><span role="columnheader">%C</span><span role="columnheader">C:N</span><span role="columnheader">Flags</span></div>
+<sc-for list="{{res.rows}}" as="r"><button type="button" onClick="{{r.pick}}" style="font: inherit; width: 100%; display: grid; grid-template-columns: 48px minmax(0, 1.2fr) repeat(9, minmax(0, 0.7fr)) minmax(0, 2fr); gap: 8px; align-items: center; padding: 7px 18px; text-align: left; background: {{r.sbg}}; border: 0; border-bottom: 1px solid #ECF0F3; color: #13212B; cursor: pointer" style-hover="background: #F2F6F9"><span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px; color: #4A5A66">{{r.r}}</span><span style="font-weight: 600">{{r.id}}</span><span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13.5px">{{r.amt}}</span><span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13.5px">{{r.aN}}</span><span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13.5px; font-weight: 600; color: #0B5E8E">{{r.dN}}</span><span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px; color: #4A5A66">{{r.UN}}</span><span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13.5px; font-weight: 600; color: #A84600">{{r.dC}}</span><span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13px; color: #4A5A66">{{r.UC}}</span><span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13.5px">{{r.pN}}</span><span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13.5px">{{r.pC}}</span><span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13.5px">{{r.cn}}</span><span style="display: flex; flex-wrap: wrap; gap: 4px"><sc-for list="{{r.chips}}" as="k"><span title="{{k.title}}" style="padding: 1px 7px; border-radius: 5px; background: #EEF2F5; color: #3B4A55; font-size: 12.5px; white-space: nowrap">{{k.t}}</span></sc-for></span></button></sc-for>
+</div>
+</div>
+</section>
+</sc-if>
+
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(330px, 100%), 1fr)); align-items: start; gap: 20px">
+<sc-if value="{{flow.hasStats}}">
+<section aria-label="The numbers" style="min-width: 0; padding: 16px 18px; background: #FFFFFF; border: 1px solid #D9E0E5; border-radius: 4px; display: flex; flex-direction: column; gap: 8px">
+<h2 style="margin: 0; font-size: 16px; font-weight: 600">Summary</h2>
+<div role="table" style="display: flex; flex-direction: column; font-size: 14px">
+<div role="row" style="display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) minmax(0, 1fr); gap: 10px; padding: 6px 0; border-bottom: 1px solid #D9E0E5; font-size: 13px; font-weight: 600; color: #4A5A66"><span role="columnheader"></span><span role="columnheader">{{flow.statA}}</span><span role="columnheader">{{flow.statB}}</span></div>
+<sc-for list="{{flow.stats.rows}}" as="r"><div role="row" style="display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) minmax(0, 1fr); gap: 10px; padding: 7px 0; border-bottom: 1px solid #ECF0F3"><span role="rowheader" style="color: #3B4A55">{{r.k}}</span><span role="cell" style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13.5px; overflow-wrap: anywhere">{{r.a}}</span><span role="cell" style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13.5px; overflow-wrap: anywhere">{{r.b}}</span></div></sc-for>
+</div>
+</section>
+</sc-if>
+<sc-if value="{{flow.hasEffect}}">
+<section aria-label="{{flow.effect.title}}" style="min-width: 0; padding: 16px 18px; background: #FFFFFF; border: 1px solid #D9E0E5; border-radius: 4px; display: flex; flex-direction: column; gap: 10px">
+<h2 style="margin: 0; font-size: 16px; font-weight: 600">{{flow.effect.title}}</h2>
+<sc-for list="{{flow.effect.lines}}" as="l"><p style="margin: 0; font-size: 14.5px; line-height: 1.6; color: #22313B">{{l.t}}</p></sc-for>
+</section>
+</sc-if>
+<sc-if value="{{flow.hasBudget}}">
+<section aria-label="Sources of uncertainty" style="min-width: 0; padding: 16px 18px; background: #FFFFFF; border: 1px solid #D9E0E5; border-radius: 4px; display: flex; flex-direction: column; gap: 10px">
+<h2 style="margin: 0; font-size: 16px; font-weight: 600">Sources of uncertainty <span style="font-weight: 400; color: #4A5A66">{{flow.budget.title}}, share of u²</span></h2>
+<sc-for list="{{flow.budget.rows}}" as="r"><div style="display: flex; flex-direction: column; gap: 5px; padding: 6px 0; border-bottom: 1px solid #ECF0F3"><span style="font-size: 14px; color: #22313B">{{r.k}}</span><div style="display: grid; grid-template-columns: 44px minmax(0, 1fr) 40px; align-items: center; gap: 8px; font-size: 13px; color: #4A5A66"><span>δ¹⁵N</span><span style="height: 8px; border-radius: 4px; background: #E3E8EC; overflow: hidden"><span style="display: block; height: 100%; width: {{r.wn}}; background: #0072B2"></span></span><span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace">{{r.n}}</span></div><div style="display: grid; grid-template-columns: 44px minmax(0, 1fr) 40px; align-items: center; gap: 8px; font-size: 13px; color: #4A5A66"><span>δ¹³C</span><span style="height: 8px; border-radius: 4px; background: #E3E8EC; overflow: hidden"><span style="display: block; height: 100%; width: {{r.wc}}; background: #D55E00"></span></span><span style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace">{{r.c}}</span></div></div></sc-for>
+</section>
+</sc-if>
+<section aria-label="Selected position" style="min-width: 0; padding: 16px 18px; background: #F5F7F9; border-radius: 4px; display: flex; flex-direction: column; gap: 12px">
+<div style="display: flex; flex-direction: column; gap: 2px">
+<span style="font-size: 12.5px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #56646F">Selected position</span>
+<h2 style="margin: 0; font-size: 19px; font-weight: 600; letter-spacing: -0.01em">{{flow.insp.title}}</h2>
+<span style="font-size: 13.5px; color: #4A5A66">{{flow.insp.sub}}</span>
+</div>
+<dl style="margin: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 14px; font-size: 14px">
+<sc-for list="{{flow.insp.facts}}" as="f"><dt style="color: #4A5A66">{{f.k}}</dt><dd style="margin: 0; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13.5px">{{f.v}}</dd></sc-for>
+</dl>
+<div role="table" aria-label="Correction chain" style="display: flex; flex-direction: column; font-size: 13.5px">
+<div role="row" style="display: grid; grid-template-columns: minmax(0, 1.5fr) repeat(4, minmax(min-content, 0.8fr)); gap: 6px; padding: 5px 0; border-bottom: 1px solid #D9E0E5; font-size: 12.5px; font-weight: 600; color: #4A5A66"><span role="columnheader">Step</span><span role="columnheader">δ¹⁵N</span><span role="columnheader">change</span><span role="columnheader">δ¹³C</span><span role="columnheader">change</span></div>
+<sc-for list="{{flow.insp.chain}}" as="r"><div role="row" style="display: grid; grid-template-columns: minmax(0, 1.5fr) repeat(4, minmax(min-content, 0.8fr)); gap: 6px; padding: 5px 0; border-bottom: 1px solid #ECF0F3"><span role="rowheader" style="color: #3B4A55">{{r.stage}}</span><span role="cell" style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; color: #0B5E8E">{{r.n}}</span><span role="cell" style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; color: #56646F">{{r.dn}}</span><span role="cell" style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; color: #A84600">{{r.c}}</span><span role="cell" style="font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; color: #56646F">{{r.dc}}</span></div></sc-for>
+</div>
+<dl style="margin: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 14px; font-size: 14px">
+<sc-for list="{{flow.insp.tail}}" as="f"><dt style="color: #4A5A66">{{f.k}}</dt><dd style="margin: 0; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; font-size: 13.5px">{{f.v}}</dd></sc-for>
+</dl>
+<sc-if value="{{flow.insp.hasFlags}}"><div style="display: flex; flex-wrap: wrap; gap: 6px"><sc-for list="{{flow.insp.flags}}" as="g"><span style="padding: 3px 9px; border-radius: 6px; background: #FBEFD6; color: #6E4700; font-size: 13px">{{g.t}}</span></sc-for></div></sc-if>
+<sc-if value="{{flow.insp.noFlags}}"><span style="font-size: 13.5px; color: #4A5A66">No flags at this position.</span></sc-if>
+</section>
+</div>
+
+<div style="display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; padding-top: 14px; border-top: 1px solid #D9E0E5">
+<button type="button" onClick="{{flow.prev.pick}}" style="font: inherit; font-size: 15px; font-weight: 600; min-height: 44px; padding: 10px 16px; border: 1px solid #B9C4CC; border-radius: 4px; background: #FFFFFF; color: #13212B; cursor: pointer" style-hover="border-color: #13212B">{{flow.prev.t}}</button>
+<button type="button" onClick="{{flow.next.pick}}" disabled="{{flow.next.busy}}" style="font: inherit; font-size: 15px; font-weight: 600; min-height: 44px; padding: 10px 18px; border: 0; border-radius: 4px; background: #13212B; color: #FFFFFF; cursor: pointer" style-hover="background: #22374B">{{flow.next.t}}</button>
+</div>
+</div>
+</div>
+</sc-if>
+
+</main>
+<footer style="max-width: 1360px; margin: 0 auto; box-sizing: border-box; padding: 0 24px 40px; font-size: 13px; line-height: 1.5; color: #4A5A66">{{footer}}</footer>
+</div>
+</template>
+</body>
+</html>

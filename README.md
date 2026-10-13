@@ -1,10 +1,10 @@
 # isoharness
 
-isoharness corrects Thermo EA-IRMS carbon and nitrogen runs on the web. Its numbers come from ea_irms, the Python engine behind the lab's EA-IRMS correction workbook, which this repository carries at version 1.4.2.
+isoharness is a website for stable isotope data reduction, one instrument at a time. EA-IRMS comes first: it corrects Thermo EA-IRMS carbon and nitrogen runs, with numbers from ea_irms, the Python engine behind the lab's EA-IRMS correction workbook, which this repository carries at version 1.4.2. GasBench N₂O (nitrate by the denitrifier method, and organic nitrogen after persulfate oxidation) and GasBench carbonate are planned.
 
 ## Where it stands
 
-Phase one put the engine behind a web API, LibreOffice in the container image to compute the workbook's formulas, and the browser's preview port under a check against the engine in continuous integration. Phase two adds the web page: upload an export, go through the eight correction steps, and download the workbook, the results table, and the configuration. Anyone can use the page without signing in. Sign-in, saving, and history come in phase three. The service stores nothing; each upload is processed in a temporary folder that is removed before the response is sent. [DEPLOY.md](DEPLOY.md) puts it on Google Cloud Run.
+Phase one put the engine behind a web API, LibreOffice in the container image to compute the workbook's formulas, and the browser's preview port under a check against the engine in continuous integration. Phase two adds the web pages: a home page at `/` that lists the instruments, and the EA-IRMS page at `/ea-irms`, where you upload an export, check the instrument's reference gas and background, go through the eight correction steps, and download the workbook, the results table, and the configuration. Anyone can use the page without signing in. Sign-in, saving, and history come in phase three. The service stores nothing; each upload is processed in a temporary folder that is removed before the response is sent. It runs at [isoharness.org](https://isoharness.org), on Google Cloud Run behind Firebase Hosting, and [DEPLOY.md](DEPLOY.md) has the steps.
 
 ## Layout
 
@@ -12,13 +12,14 @@ Phase one put the engine behind a web API, LibreOffice in the container image to
 | --- | --- |
 | `ea_irms/` | The engine, 1.4.2, unchanged (parsing, the corrections, the workbook, and the Postgres store that phase three will use) |
 | `isoharness/` | The web API (FastAPI) |
-| `web/` | The page the API serves at `/`: `index.html` (the approved prototype's markup, as a template), `dc.js` (draws the template), `logic.js` (the views), and Preact 10.29.8 in `vendor/preact/` with its MIT license |
+| `web/` | The pages the API serves: `index.html`, the home page at `/`, which lists the instruments; `ea-irms.html`, the EA-IRMS page at `/ea-irms` (the approved prototype's markup, as a template); `dc.js` (draws the template), `logic.js` (the views), and Preact 10.29.8 in `vendor/preact/` with its MIT license |
 | `port/` | The preview port (the steps that depend on a user's choices, in JavaScript) and its test |
 | `scripts/` | `port_cases.py` (engine outputs for the port test), `smoke.py` (checks a running service), `e2e_web.py` (the page in Chromium against a service it starts), `reference_check.py` (the engine check on reference runs kept outside this repository) |
 | `db/` | The Postgres schema for accounts and saved runs (phase three) |
 | `tests/` | The engine, store, isolation, and API tests, with the 2026-09-15 test run in `tests/data/` |
 | `Dockerfile` | One image with the API, the page, ea_irms, and LibreOffice |
-| `DEPLOY.md` | The steps to run it on Google Cloud Run from this repository |
+| `DEPLOY.md` | The steps to run it on Google Cloud Run from this repository and to serve it at a domain through Firebase Hosting |
+| `firebase.json`, `public/` | Firebase Hosting's configuration, which passes every request to the Cloud Run service; `public/` holds only a placeholder, so Hosting serves no files of its own |
 | `.github/workflows/ci.yml` | The tests, the port check on three runs, the page in a browser, and an image build with a smoke test, on every push |
 
 ## Running it
@@ -28,15 +29,18 @@ docker build -t isoharness .
 docker run -p 8000:8000 isoharness
 ```
 
-Then http://localhost:8000 is the page, and http://localhost:8000/api/docs lists the endpoints and lets you try each one. Without Docker, `pip install -r requirements.txt` and `uvicorn isoharness.app:app` run the same service, but its workbooks carry formulas only unless LibreOffice (`soffice`) is on the PATH.
+Then http://localhost:8000 is the home page, http://localhost:8000/ea-irms the EA-IRMS page, and http://localhost:8000/api/docs lists the endpoints and lets you try each one. Without Docker, `pip install -r requirements.txt` and `uvicorn isoharness.app:app` run the same service, but its workbooks carry formulas only unless LibreOffice (`soffice`) is on the PATH.
 
 ## The API
+
+These endpoints serve the EA-IRMS page. An instrument added later gets endpoints of its own, and these keep their paths.
 
 | Endpoint | Returns |
 | --- | --- |
 | `GET /api/health` | `{"status": "ok"}` |
 | `GET /api/version` | The isoharness and ea_irms versions, and whether LibreOffice is present |
 | `GET /api/defaults` | The package default configuration, in the form the POST endpoints accept |
+| `GET /api/example` | The 2026-09-15 test run, which the page offers as an example |
 | `POST /api/process` | Every position's values and flags, the fitted steps, and the block the preview port recomputes from |
 | `POST /api/workbook` | The correction workbook (.xlsx), with its formulas computed by LibreOffice unless `values=false` |
 | `POST /api/results.csv` | The workbook's Results sheet as CSV, at full precision |
@@ -68,7 +72,7 @@ The tests run with `pip install -r requirements-dev.txt` and `python -m pytest`.
 
 `python scripts/smoke.py http://localhost:8000 tests/data/20260915_raw.csv` checks a running service, requiring the workbook it returns to have its formulas computed and to hold the values `/api/process` returned.
 
-`python scripts/e2e_web.py` checks the page end to end: it starts the service on a free port, drives the page in Chromium through the upload, a lab configuration, all nine screens and five decisions, and requires every value on the results screen to equal, to the shown precision, the results table the service returns for the same decisions built without the page, and the downloaded configuration to reproduce it. It fails on any console error or failed request, and saves screenshots (`--shots`). With `--url` it checks a service already running, such as the image or a deployment. It needs Playwright for Python (in `requirements-dev.txt`) with its Chromium (`python -m playwright install chromium`), and LibreOffice.
+`python scripts/e2e_web.py` checks the page end to end: it starts the service on a free port, opens the home page and follows its link to the EA-IRMS page, drives that page in Chromium through the upload, a lab configuration, all ten screens from the instrument step to the results, five decisions, and the landing page's example run, and requires every value on the results screen to equal, to the shown precision, the results table the service returns for the same decisions built without the page, and the downloaded configuration to reproduce it. It fails on any console error or failed request, and saves screenshots (`--shots`). With `--url` it checks a service already running, such as the image or a deployment. It needs Playwright for Python (in `requirements-dev.txt`) with its Chromium (`python -m playwright install chromium`), and LibreOffice.
 
 `python scripts/reference_check.py MANIFEST.json --url http://localhost:8000` is the engine check before a release, on reference runs that stay outside this repository (the manifest format is in the script). On each run the API's values must equal its workbook, they must equal ea_irms called directly, and the workbook must equal the one delivered from the same export, cell by cell.
 

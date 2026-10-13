@@ -28,7 +28,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from ea_irms.parse import ExportFormatError, parse_export
@@ -50,6 +50,10 @@ _libreoffice = threading.Lock()
 ROOT = Path(__file__).resolve().parents[1]
 WEB = ROOT / "web"
 PORT_ENGINE = ROOT / "port" / "engine.js"
+# The 2026-09-15 test run, offered on the page as an example: in the image it sits in
+# warmup/, where the Dockerfile copies it; in the repository, in tests/data/.
+EXAMPLE = next((p for p in (ROOT / "warmup" / "20260915_raw.csv",
+                            ROOT / "tests" / "data" / "20260915_raw.csv") if p.is_file()), None)
 LIMITED = ("/api/process", "/api/workbook", "/api/results.csv")
 WINDOW_S = 3600.0
 # The page's own scripts and styles, Google Fonts, and calls back to this address.
@@ -105,8 +109,8 @@ limiter = UploadLimiter()
 app = FastAPI(
     title="isoharness API",
     version=__version__,
-    description="EA-IRMS corrections with ea_irms. Uploads are processed and discarded; "
-                "nothing is stored.",
+    description="Stable isotope data reduction. These endpoints serve the EA-IRMS page, with ea_irms. "
+                "Uploaded files are deleted as soon as they are processed, and nothing is stored.",
     docs_url="/api/docs",
     redoc_url=None,
     openapi_url="/api/openapi.json",
@@ -302,6 +306,15 @@ def results(file: UploadFile = File(...), config: str | None = Form(None)):
         "Content-Disposition": f'attachment; filename="{name}"'})
 
 
+@app.get("/api/example")
+def example():
+    """The 2026-09-15 test run, the export the page's example uses; the repository holds it too."""
+    if EXAMPLE is None:
+        raise HTTPException(404, "the example run is not in this deployment")
+    return FileResponse(EXAMPLE, media_type="text/csv", filename="20260915_raw.csv",
+                        headers={"Cache-Control": "no-cache"})
+
+
 @app.get("/engine.js", include_in_schema=False)
 def preview_port():
     """The preview port the page runs, the same file continuous integration checks."""
@@ -319,6 +332,17 @@ class _Site(StaticFiles):
 
 
 if (WEB / "index.html").is_file():
+    # The home page, web/index.html, lists the instruments. Each instrument's page has a path
+    # without a trailing slash, so that its relative links (scripts, api/...) reach the root.
+    @app.api_route("/ea-irms", methods=["GET", "HEAD"], include_in_schema=False)
+    def ea_irms_page():
+        return FileResponse(WEB / "ea-irms.html", media_type="text/html",
+                            headers={"Cache-Control": "no-cache"})
+
+    @app.get("/ea-irms/", include_in_schema=False)
+    def ea_irms_slash():
+        return RedirectResponse("/ea-irms", status_code=308)
+
     app.mount("/", _Site(directory=WEB, html=True), name="site")
 else:
     @app.get("/")

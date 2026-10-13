@@ -7,13 +7,17 @@ root (LibreOffice on the PATH computes the workbook), or with --url uses a servi
 already running there (the container image, say), opens the page in Chromium
 (Python Playwright, with PLAYWRIGHT_BROWSERS_PATH set) and:
 
+0. opens the home page, checks that it lists the three instruments with two of them
+   planned, and follows its link to the EA-IRMS page;
 1. uploads two files that are not exports and checks that the page shows the
    service's message for each, word for word;
 2. uploads tests/data/20260915_raw.csv and checks the upload screen (the twelve
    columns found, the positions, the page's agreement with the engine);
 3. loads a lab configuration after the upload, checks that the run is processed
    again with it and the decisions start from it, then goes back to the defaults;
-4. visits all nine step screens, changing decisions on the way: the blank switch,
+4. visits all ten step screens, checking the instrument screen's charts and its
+   settling line and the quality-check summary's links back to it, and changing
+   decisions on the way: the blank switch,
    a drift monitor left out of the d15N fit, the drift model, a monitor left out of
    the elemental correction, and the d15N repeatability (the drift monitors' SD);
 5. checks that every value the results screen shows (mass, d15N, U, d13C, U, %N,
@@ -25,7 +29,10 @@ already running there (the container image, say), opens the page in Chromium
    workbook's computed Results sheet, and posts the downloaded configuration back to
    /api/results.csv to check that it reproduces the page's values;
 7. saves a screenshot of every screen at 1440 by 1000 (full page) and of the upload
-   and results screens at 400 px wide.
+   and results screens at 400 px wide;
+8. loads the page afresh, checks the landing page at 400 px and 1440 px wide, follows
+   the brand back to the home page and checks it at 400 px, and reads the example run
+   through its button.
 
 Any console error, page error, failed request, or HTTP error the test did not
 cause on purpose fails the run. Prints one result line; exits 1 on failure.
@@ -56,10 +63,12 @@ from playwright.sync_api import expect, sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
 RUN = ROOT / "tests" / "data" / "20260915_raw.csv"
-SCREENS = ["setup", "blank", "lin", "drift", "cal", "elem", "unc", "qc", "results"]
-TITLES = {"setup": "Standards and roles", "blank": "Blank", "lin": "Linearity", "drift": "Drift",
+SCREENS = ["inst", "setup", "blank", "lin", "drift", "cal", "elem", "unc", "qc", "results"]
+TITLES = {"inst": "Instrument performance", "setup": "Standards and roles", "blank": "Blank", "lin": "Linearity", "drift": "Drift",
           "cal": "Calibration", "elem": "Elemental content", "unc": "Uncertainty",
           "qc": "Quality checks", "results": "Results"}
+# The step names the Back and Continue buttons use, where they differ from the headings.
+BUTTONS = dict(TITLES, inst="Instrument", setup="Setup")
 # Results screen column -> results table column, and the decimals the page shows.
 SHOWN = {"amt": ("Mass (mg)", 3), "dN": ("d15N (permil)", 2), "UN": ("U(d15N), k=2.0", 2),
          "dC": ("d13C (permil)", 2), "UC": ("U(d13C), k=2.0", 2), "pN": ("%N", 2), "pC": ("%C", 2),
@@ -219,11 +228,21 @@ def main(argv=None):
             def heading(scr):
                 expect(page.get_by_role("heading", level=1, name=TITLES[scr], exact=True)).to_be_visible()
 
-            # ---- the landing page
+            # ---- the home page, which lists the instruments
             page.goto(base + "/")
+            expect(page.get_by_role("heading", level=1, name="Stable isotope data reduction")).to_be_visible()
+            names = page.locator("main li h3").all_text_contents()
+            check(names == ["EA-IRMS", "GasBench N₂O", "GasBench carbonate"], f"the home page lists {names}")
+            status = page.locator("main li .status").all_text_contents()
+            check(status == ["Available", "Planned", "Planned"], f"the home page marks them {status}")
+            shot("1440-home.png")
+            page.get_by_role("link", name="Open EA-IRMS").click()
+            page.wait_for_url(re.compile(r"/ea-irms$"))
+
+            # ---- the landing page
             expect(page.get_by_text("Drop an export here, or choose a file")).to_be_visible()
-            check("processed and discarded; nothing is stored" in page.inner_text("body"),
-                  "the upload screen does not say that nothing is stored")
+            check("deletes the file before it sends its reply" in page.inner_text("body"),
+                  "the upload screen does not say that the file is deleted")
             no_prototype()
             shot("1440-01-upload-empty.png")
 
@@ -255,7 +274,7 @@ def main(argv=None):
             check(found == 12, f"{found} of 12 columns marked found")
             body_text = page.inner_text("body")
             check("56 positions" in body_text, "the upload screen does not count 56 positions")
-            check("agrees with the engine at all 56 positions" in body_text,
+            check("match the server’s at all 56 positions" in body_text,
                   "the page's own check against the engine did not pass")
             check("Run date 15 Sep 2026, read from the file name" in body_text, "the run date was not read from the file name")
             shot("1440-03-upload.png")
@@ -268,6 +287,8 @@ def main(argv=None):
                 page.set_input_files("#dc-config", str(lab))
             expect(page.get_by_text("The run was processed again with lab-config.json")).to_be_visible(timeout=30000)
             page.get_by_role("button", name="Start the corrections").click()
+            heading("inst")
+            page.locator("nav[aria-label='Correction steps'] button", has_text="Setup").click()
             heading("setup")
             expect(page.get_by_text("From lab-config.json.")).to_be_visible()
             page.locator("nav[aria-label='Correction steps'] button", has_text="Blank").click()
@@ -276,7 +297,7 @@ def main(argv=None):
             page.locator("nav[aria-label='Correction steps'] button", has_text="Results").click()
             heading("results")
             expect(page.get_by_text("with U (k = 3), %N, %C, and C:N")).to_be_visible()
-            page.get_by_role("button", name="isoharness, go to the upload page").click()
+            page.get_by_role("navigation", name="Main").get_by_role("button", name="EA-IRMS").click()
             with page.expect_request(lambda r: r.url.endswith("/api/process") and r.method == "POST"):
                 page.get_by_role("button", name="Use the package defaults").click()
             expect(page.get_by_text("processed again with the package defaults")).to_be_visible(timeout=30000)
@@ -286,6 +307,13 @@ def main(argv=None):
             for scr in SCREENS:
                 heading(scr)
                 no_prototype()
+                if scr == "inst":
+                    for title in ("N2 reference pulses", "CO2 reference pulses", "Reference peak size", "Background at m/z 28"):
+                        expect(page.locator("figure", has_text=title)).to_have_count(1)
+                    expect(page.get_by_text("26 positions ran before the background settled at position 27")).to_be_visible()
+                    expect(page.get_by_text("under the 0.1‰ limit the FIRMS guide")).to_have_count(2)
+                    check(page.get_by_role("button", name=re.compile(r"^Step 1, ")).count() == 0,
+                          "the instrument screen links to itself")
                 if scr == "setup":
                     expect(page.get_by_text("Package defaults, ea_irms " + ver + ".")).to_be_visible()
                 if scr == "blank":
@@ -306,6 +334,13 @@ def main(argv=None):
                     chart = page.locator("figure", has_text="%N of the drift monitors against certified")
                     chart.get_by_role("button", name=re.compile(rf", position {EXCL_E}: ")).click()
                     expect(chart).to_contain_text("12 of 13 monitors used")
+                if scr == "qc":
+                    back = page.get_by_role("button", name="Step 1, Instrument")
+                    expect(back).to_have_count(5)
+                    back.first.click()
+                    heading("inst")
+                    page.locator("nav[aria-label='Correction steps'] button", has_text="Quality checks").click()
+                    heading("qc")
                 if scr == "unc":
                     group = page.get_by_role("group", name="δ¹⁵N repeatability")
                     group.get_by_role("button", name="Drift monitors").click()
@@ -313,7 +348,7 @@ def main(argv=None):
                     expect(page.get_by_text("SD of the drift monitors in the fit")).to_be_visible()
                 shot(f"1440-{SCREENS.index(scr) + 4:02d}-{scr}.png")
                 if scr != "results":
-                    page.get_by_role("button", name="Continue to " + TITLES[SCREENS[SCREENS.index(scr) + 1]]).first.click()
+                    page.get_by_role("button", name="Continue to " + BUTTONS[SCREENS[SCREENS.index(scr) + 1]]).first.click()
 
             # ---- the results screen against the service, decisions built here without the page
             page_rows = page.eval_on_selector_all(
@@ -411,11 +446,32 @@ def main(argv=None):
             # ---- 400 px wide
             page.set_viewport_size({"width": 400, "height": 1000})
             shot("400-results.png")
-            page.get_by_role("button", name="isoharness, go to the upload page").click()
+            page.get_by_role("navigation", name="Main").get_by_role("button", name="EA-IRMS").click()
             expect(page.get_by_text("Read without errors")).to_be_visible()
             shot("400-upload.png")
             wide = page.evaluate("document.documentElement.scrollWidth")
             check(wide <= 400, f"the upload screen is {wide} px wide at a 400 px viewport")
+
+            # ---- the landing page, fresh, at both widths; the home page at 400 px; the example run
+            page.goto(base + "/ea-irms")
+            expect(page.get_by_role("heading", level=1, name="EA-IRMS data reduction", exact=True)).to_be_visible()
+            shot("400-landing.png")
+            wide = page.evaluate("document.documentElement.scrollWidth")
+            check(wide <= 400, f"the landing page is {wide} px wide at a 400 px viewport")
+            page.get_by_role("link", name="isoharness, all instruments").click()
+            expect(page.get_by_role("heading", level=1, name="Stable isotope data reduction")).to_be_visible()
+            shot("400-home.png")
+            wide = page.evaluate("document.documentElement.scrollWidth")
+            check(wide <= 400, f"the home page is {wide} px wide at a 400 px viewport")
+            page.set_viewport_size({"width": 1440, "height": 1000})
+            page.goto(base + "/ea-irms")
+            shot("1440-00-landing.png")
+            with page.expect_request(lambda r: r.url.endswith("/api/example") and r.method == "GET"):
+                page.get_by_role("button", name="Try the 15 Sep 2026 test run").click()
+            expect(page.get_by_text("Read without errors")).to_be_visible(timeout=30000)
+            check("56 positions" in page.inner_text("body"), "the example run does not count 56 positions")
+            check(page.get_by_role("heading", level=1, name="Correct a run").count() == 1,
+                  "the upload screen has no heading once a run is read")
 
             context.close()
             browser.close()
@@ -434,7 +490,7 @@ def main(argv=None):
                 server.kill()
         log.close()
     n, values, exact = stats["compared"]
-    print(f"e2e_web: passed. 10 screens; {n} samples on the results screen equal the service's table for the "
+    print(f"e2e_web: passed. {len(SCREENS) + 1} screens and the home page; {n} samples on the results screen equal the service's table for the "
           f"same decisions ({values} values and {n} flag lists, {exact} formatted identically; {stats['moved']} "
           f"d15N values moved by the decisions); workbook, table and configuration downloaded, {stats['book']} "
           f"workbook values checked, configuration round trip exact; 2 refused uploads shown as written; "

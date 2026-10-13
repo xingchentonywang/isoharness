@@ -6,13 +6,13 @@
 // table and the processed configuration come from the engine on the server.
 //
 // The upload screen posts the export, and a lab configuration if one is chosen, to
-// /api/process. Its "port" block and configuration drive the eight steps and the
-// results. The downloads post the same export again, kept in this tab only, with the
+// /api/process. Its "port" block and configuration drive the instrument check, the eight
+// steps and the results. The downloads post the same export again, kept in this tab only, with the
 // configuration built from the decisions (configFor).
 'use strict';
 
-const FLOW = ['setup', 'blank', 'lin', 'drift', 'cal', 'elem', 'unc', 'qc', 'results'];
-const NAMES = { upload: 'Upload', setup: 'Setup', blank: 'Blank', lin: 'Linearity', drift: 'Drift', cal: 'Calibration',
+const FLOW = ['inst', 'setup', 'blank', 'lin', 'drift', 'cal', 'elem', 'unc', 'qc', 'results'];
+const NAMES = { upload: 'Upload', inst: 'Instrument', setup: 'Setup', blank: 'Blank', lin: 'Linearity', drift: 'Drift', cal: 'Calibration',
   elem: 'Elemental content', unc: 'Uncertainty', qc: 'Quality checks', results: 'Results' };
 // The twelve columns ea_irms reads (ea_irms.parse.REQUIRED), by their exact names.
 const COLUMNS = [
@@ -23,6 +23,10 @@ const COLUMNS = [
   ['δ¹⁵N against the reference gas', '(‰)', 'd 15N/14N'], ['δ¹³C against the reference gas', '(‰)', 'd 13C/12C'],
 ];
 const WORDS = ['no', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve'];
+// The working-gas SD limit, in permil: the FIRMS guide (Dunn and Carter, 2018, 2nd edition,
+// section 4.3.2) asks for an SD under 0.1 permil for CO2 and N2 in its zero-enrichment test of
+// about ten pulses; Tony chose on 2026-10-12 to hold each run's pulses to it.
+const REF_SD_LIMIT = 0.1;
 const OK_ICON = { c: '#0B6E4F', d: 'M6 10.5l2.6 2.6L14 7.6' };
 const WARN_ICON = { c: '#A33A00', d: 'M10 5.5v5.5M10 14v.1' };
 
@@ -30,7 +34,7 @@ class Component extends DCLogic {
   constructor(props) {
     super(props);
     this.state = { screen: 'upload', boot: null, run: null, cfg: null, runDate: '', dateFrom: '', busy: '',
-      pending: '', error: null, toast: '', drag: false, dec: null, sel: {}, filt: 'all', last: 'setup' };
+      pending: '', error: null, toast: '', drag: false, dec: null, sel: {}, filt: 'all', last: 'inst' };
     this._runs = 0;
     this._depth = 0;
   }
@@ -197,6 +201,17 @@ class Component extends DCLogic {
     this.process(file, this.state.cfg, 'export');
   }
 
+  // The 2026-09-15 test run, fetched from the service and then read like a dropped file
+  // (dc.js applies setState at once, so busy is clear when pickExport looks).
+  loadExample() {
+    if (this.state.busy) return;
+    this.setState({ busy: 'process', pending: '20260915_raw.csv', error: null });
+    fetch('api/example', { cache: 'no-store' })
+      .then((r) => { if (!r.ok) throw new Error('the service answered ' + r.status); return r.blob(); })
+      .then((b) => { this.setState({ busy: '', pending: '' }); this.pickExport(new File([b], '20260915_raw.csv', { type: 'text/csv' })); })
+      .catch((e) => this.setState({ busy: '', pending: '', error: { title: 'The example run was not loaded', detail: String(e && e.message ? e.message : e) } }));
+  }
+
   async process(file, cfg, why) {
     this.setState({ busy: 'process', pending: file.name, error: null, toast: '' });
     const form = new FormData();
@@ -231,7 +246,7 @@ class Component extends DCLogic {
     const toast = why !== 'config' ? '' : cfg
       ? 'The run was processed again with ' + cfg.name + '; the decisions now start from it.'
       : 'The run was processed again with the package defaults; the decisions now start from them.';
-    this.setState({ busy: '', pending: '', run, cfg, dec: run.dec0, sel: {}, filt: 'all', error: null, toast, last: 'setup' });
+    this.setState({ busy: '', pending: '', run, cfg, dec: run.dec0, sel: {}, filt: 'all', error: null, toast, last: 'inst' });
     run.check = this.verify(run);
     if (run.check.bad.length) console.warn('isoharness: the preview differs from the engine at positions', run.check.bad);
     this.forceUpdate();
@@ -248,7 +263,7 @@ class Component extends DCLogic {
       return;
     }
     if (!data || typeof data !== 'object' || Array.isArray(data)) {
-      fail('A configuration is a JSON object, in the form /api/defaults returns under "config".');
+      fail('A configuration is a JSON object, such as the Configuration file downloaded from a run.');
       return;
     }
     const known = this.state.boot && this.state.boot.defaults ? Object.keys(this.state.boot.defaults) : null;
@@ -546,7 +561,7 @@ class Component extends DCLogic {
   roles() {
     return {
       S: { one: 'Sample', many: 'Samples', bg: '#8796A5', dk: '#8193A5' },
-      A: { one: 'Anchor', many: 'Anchors', bg: '#0E1A26', dk: '#F1F5F8' },
+      A: { one: 'Anchor', many: 'Anchors', bg: '#13212B', dk: '#F1F5F8' },
       L: { one: 'Linearity', many: 'Linearity', bg: '#56B4E9', dk: '#56B4E9' },
       D: { one: 'Drift monitor', many: 'Drift monitors', bg: '#E69F00', dk: '#E69F00' },
       B: { one: 'Blank', many: 'Blanks', bg: '#AEB9C4', dk: '#5A6E82' },
@@ -640,8 +655,8 @@ class Component extends DCLogic {
     const yt = yr.ticks || this.ticks(yr.min, yr.max, yr.n || 5);
     let g = '';
     for (const v of yt) if (v >= yr.min - 1e-9 && v <= yr.max + 1e-9) g += 'M' + m.l + ' ' + r1(Y(v)) + 'H' + (W - m.r);
-    S[2] = { d: g, f: 'none', s: '#E3E8ED', w: 1, da: '', o: 1 };
-    S[3] = { d: 'M' + m.l + ' ' + m.t + 'V' + (H - m.b) + 'H' + (W - m.r), f: 'none', s: '#A3AFBA', w: 1, da: '', o: 1 };
+    S[2] = { d: g, f: 'none', s: '#E1E7EC', w: 1, da: '', o: 1 };
+    S[3] = { d: 'M' + m.l + ' ' + m.t + 'V' + (H - m.b) + 'H' + (W - m.r), f: 'none', s: '#8A99A5', w: 1, da: '', o: 1 };
     const R = o.r || 5;
     const pts = (o.pts || []).filter((p) => ok([p.x, p.y]));
     const small = pts.filter((p) => p.kind === 'small');
@@ -659,7 +674,7 @@ class Component extends DCLogic {
     const rings = pts.filter((p) => p.ring);
     if (rings.length) S[10] = { d: rings.map((p) => dot(cx(p.x), cy(p.y), R + 4.5)).join(''), f: 'none', s: '#B23A00', w: 1.8, da: '', o: 1 };
     const sel = pts.filter((p) => p.sel);
-    if (sel.length) S[11] = { d: sel.map((p) => dot(cx(p.x), cy(p.y), R + 8)).join(''), f: 'none', s: '#0E1A26', w: 2, da: '', o: 1 };
+    if (sel.length) S[11] = { d: sel.map((p) => dot(cx(p.x), cy(p.y), R + 8)).join(''), f: 'none', s: '#13212B', w: 2, da: '', o: 1 };
     const xf = xr.fmt || ((v) => this.fx(v, this.tdec(xt)));
     const yf = yr.fmt || ((v) => this.fx(v, this.tdec(yt)));
     const pc = (v, t) => Math.round(v / t * 10000) / 100;
@@ -679,13 +694,13 @@ class Component extends DCLogic {
       }
     }
     const notes = placed.map((n) => ({
-      x: pc(cx(n.x), W), y: pc(cy(n.y), H), t: n.t, c: n.c || '#3A4856',
+      x: pc(cx(n.x), W), y: pc(cy(n.y), H), t: n.t, c: n.c || '#3B4A55',
       tf: n.at === 'left' ? 'translate(calc(-100% - 10px), -50%)' : n.at === 'below' ? 'translate(-50%, 10px)'
         : n.at === 'above' ? 'translate(-50%, calc(-100% - 10px))' : 'translate(10px, -50%)',
     }));
     const legend = (o.legend || []).map((l) => Object.assign({ label: l.label }, this.swatch(l.kind, l.color)));
     return {
-      title: o.title, sub: o.sub || '', hasBadge: !!o.badge, badge: o.badge || { text: '', bg: '#FFFFFF', fg: '#0E1A26' },
+      title: o.title, sub: o.sub || '', hasBadge: !!o.badge, badge: o.badge || { text: '', bg: '#FFFFFF', fg: '#13212B' },
       vb: '0 0 ' + W + ' ' + H, ar: W + ' / ' + H,
       s0: S[0], s1: S[1], s2: S[2], s3: S[3], s4: S[4], s5: S[5], s6: S[6], s7: S[7], s8: S[8], s9: S[9], s10: S[10], s11: S[11],
       xl, yl, hits, notes, legend, hasLegend: legend.length > 0,
@@ -699,12 +714,13 @@ class Component extends DCLogic {
   }
 
   badge(on, text) {
-    return on ? { text: text || 'Applied', bg: '#DDF2EA', fg: '#0B6E4F' } : { text: text || 'Not applied', bg: '#EEF1F4', fg: '#3A4856' };
+    return on ? { text: text || 'Applied', bg: '#DDF2EA', fg: '#0B6E4F' } : { text: text || 'Not applied', bg: '#EEF1F4', fg: '#3B4A55' };
   }
 
   status(s) {
     if (s === 'ok') return { label: 'OK', bg: '#DDF2EA', fg: '#0B6E4F', icon: 'M5 10.5l3.2 3.2L15 7' };
     if (s === 'note') return { label: 'Note', bg: '#FBEFD6', fg: '#8A5A00', icon: 'M10 9v5M10 6.2v.1' };
+    if (s === 'info') return { label: 'Measured', bg: '#EEF1F4', fg: '#3B4A55', icon: 'M10 10v.1' };
     return { label: 'Caution', bg: '#FADFD2', fg: '#A33A00', icon: 'M10 5.5v5.5M10 14v.1' };
   }
 
@@ -732,13 +748,14 @@ class Component extends DCLogic {
       label,
       opts: opts.map((o) => {
         const v = typeof o === 'string' ? o : o.v, t = typeof o === 'string' ? o : o.t, on = value === v;
-        return { t, pick: () => H.set(key, v), bg: on ? '#0E1A26' : 'transparent', fg: on ? '#FFFFFF' : '#3A4856', pressed: on ? 'true' : 'false' };
+        return { t, pick: () => H.set(key, v), bg: on ? '#13212B' : 'transparent', fg: on ? '#FFFFFF' : '#3B4A55', pressed: on ? 'true' : 'false' };
       }),
-      lines: (lines || []).map((l) => ({ t: l.t, dot: l.on ? '#0B8A62' : '#A3AFBA' })),
+      lines: (lines || []).map((l) => ({ t: l.t, dot: l.on ? '#0B8A62' : '#8A99A5' })),
     };
   }
 
   focus(scr) {
+    if (scr === 'inst') return () => true;
     if (scr === 'blank') return (q) => q.role === 'B' || q.flags.some((f) => / the blank$/.test(f));
     if (scr === 'lin') return (q) => q.role === 'L' || q.flags.some((f) => /linearity range/.test(f));
     if (scr === 'drift') return (q) => q.role === 'D';
@@ -752,7 +769,7 @@ class Component extends DCLogic {
   // The position each screen opens on: the first one the screen is about.
   firstSel(M, scr) {
     const first = (f) => { const q = M.P.find(f); return q ? q.r : null; };
-    const by = { blank: (q) => q.role === 'B', lin: (q) => q.role === 'L', drift: (q) => q.role === 'D', elem: (q) => q.role === 'D',
+    const by = { inst: () => true, blank: (q) => q.role === 'B', lin: (q) => q.role === 'L', drift: (q) => q.role === 'D', elem: (q) => q.role === 'D',
       cal: (q) => q.role === 'A', qc: (q) => q.carry || q.over || q.role === 'D' };
     const r = by[scr] ? first(by[scr]) : null;
     return r != null ? r : first((q) => q.role === 'S') != null ? first((q) => q.role === 'S') : M.P[0].r;
@@ -777,7 +794,7 @@ class Component extends DCLogic {
     return out;
   }
 
-  inspect(M, row) {
+  inspect(M, row, scr) {
     const q = M.P.find((p) => p.r === row) || M.P[0];
     const R = this.roles(), k = this.num(M.settings.k);
     const st = [['Raw, as exported', 'raw'], ['After blank', 'blank'], ['After linearity', 'lin'], ['After drift', 'drift'], ['Calibrated', 'fin']];
@@ -793,6 +810,14 @@ class Component extends DCLogic {
       { k: 'CO2 peak', v: q.aC != null ? this.fx(q.aC, 2) + ' Vs' : 'none' },
       { k: 'BGD 28', v: q.bgd != null ? this.fx(q.bgd, 1) + ' mV' : 'none' },
     ];
+    if (scr === 'inst') {
+      facts.push(
+        { k: 'BGD 28, reference', v: q.rbgd != null ? this.fx(q.rbgd, 1) + ' mV' : 'none' },
+        { k: 'N2 pulse', v: q.pN != null ? this.fx(q.pN, 3) + '‰' : 'none' },
+        { k: 'CO2 pulse', v: q.pC != null ? this.fx(q.pC, 3) + '‰' : 'none' },
+        { k: 'N2 reference peak', v: q.raN != null ? this.fx(q.raN, 2) + ' Vs' : 'none' },
+        { k: 'CO2 reference peak', v: q.raC != null ? this.fx(q.raC, 2) + ' Vs' : 'none' });
+    }
     const tail = [
       { k: 'U (k = ' + k + '), δ¹⁵N', v: q.n.U != null ? this.fx(q.n.U, 3) + '‰' : '' },
       { k: 'U (k = ' + k + '), δ¹³C', v: q.c.U != null ? this.fx(q.c.U, 3) + '‰' : '' },
@@ -804,6 +829,153 @@ class Component extends DCLogic {
       title: q.id, sub: 'Position ' + q.r + ' of ' + M.P.length, facts, chain, tail,
       flags: q.flags.map((f) => ({ t: this.ftext(f) })), hasFlags: q.flags.length > 0, noFlags: q.flags.length === 0,
     };
+  }
+
+  // ---------------------------------------------------------------- the instrument
+  // Step 1 reads what the mass spectrometer did before any correction: the working-gas
+  // pulses, the reference peaks' size, and the background at mass 28. Nothing here
+  // changes a value. The start of the run is looked at on its own, over the same five
+  // positions the engine uses to scale the background's settling.
+  pulseStart(M, k) {
+    const pts = M.P.filter((q) => q[k] != null).sort((a, b) => a.r - b.r);
+    const start = pts.slice(0, 5), rest = pts.slice(5);
+    if (rest.length < 3) return null;
+    const mean = rest.reduce((t, q) => t + q[k], 0) / rest.length;
+    return { start, rest, mean, sdRest: engine.sdev(rest.map((q) => q[k])), devs: start.map((q) => q[k] - mean) };
+  }
+
+  settleSpan(M) {
+    const D = this.data(), ax = this.rowAxis(M), sf = D.settle.settled_from;
+    const off = !this.state.run.config.settled_threshold;
+    return { sf, off, first: ax.min + 1, last: ax.max - 1, never: !off && sf > ax.max - 1, late: !off && sf > ax.min + 1 };
+  }
+
+  instChecks(M) {
+    const D = this.data(), out = [], sp = this.settleSpan(M);
+    const roleWords = { A: ['anchor analysis', 'anchor analyses'], L: ['linearity standard', 'linearity standards'],
+      D: ['drift monitor', 'drift monitors'], K: ['check analysis', 'check analyses'], S: ['sample', 'samples'] };
+    // the reference gas
+    for (const [el, gas, k] of [['n', 'N2', 'pN'], ['c', 'CO2', 'pC']]) {
+      const r = D.refgas[el];
+      if (!r || !r.n) { out.push({ s: 'note', title: 'Reference gas, ' + gas, t: 'No ' + gas + ' reference pulse besides the designated one was exported, so the working gas was not followed.' }); continue; }
+      const st = this.pulseStart(M, k);
+      const high = r.sd != null && r.sd >= REF_SD_LIMIT;
+      out.push({ s: r.trend || high ? 'note' : 'ok', title: 'Reference gas, ' + gas,
+        t: r.n + ' pulses that Isodat did not designate read with SD ' + this.fx(r.sd, 3) + '‰'
+          + (st ? ' over the run and ' + this.fx(st.sdRest, 3) + '‰ without the first five positions' : '')
+          + (r.sd != null ? ', ' + (high ? 'at or above' : 'under') + ' the ' + this.num(REF_SD_LIMIT) + '‰ limit the FIRMS guide (Dunn and Carter, 2018, section 4.3.2) sets for working-gas pulses' : '') + '; '
+          + (r.fit ? (r.trend ? 'they trend with position (' : 'no trend with position (') + this.peq(r.fit.p) + ').' : 'too few to test for a trend.')
+          + (st ? ' The first five read ' + this.andList(st.devs.map((v) => this.fs(v, 3))) + '‰ against the mean of the rest.' : '') });
+    }
+    // the reference peaks' size
+    const size = [];
+    for (const [gas, k] of [['N2', 'raN'], ['CO2', 'raC']]) {
+      const v = M.P.map((q) => q[k]).filter((x) => x != null).sort((a, b) => a - b);
+      if (v.length < 3) continue;
+      const med = v.length % 2 ? v[(v.length - 1) / 2] : (v[v.length / 2 - 1] + v[v.length / 2]) / 2;
+      size.push(gas + ' ' + this.fx(v[0], 2) + ' to ' + this.fx(v[v.length - 1], 2) + ' Vs (' + this.fs((v[0] / med - 1) * 100, 1) + '% to ' + this.fs((v[v.length - 1] / med - 1) * 100, 1) + '% of its median)');
+    }
+    if (size.length) out.push({ s: 'info', title: 'Reference peak size', t: 'The area of the peak Isodat designates in each analysis ran ' + size.join('; ') + '.' });
+    // the background at the start, and who ran before it settled
+    const before = [];
+    if (sp.late && !sp.never) {
+      for (const code of ['A', 'L', 'D', 'K', 'S']) {
+        const all = M.P.filter((q) => q.role === code), b = all.filter((q) => q.r < sp.sf).length;
+        if (b) before.push((b === all.length ? (b > 1 ? 'all ' : '') + b : b + ' of ' + all.length) + ' ' + (all.length === 1 ? roleWords[code][0] : roleWords[code][1]));
+      }
+    }
+    out.push({ s: sp.late ? 'note' : 'ok', title: 'Background at the start',
+      t: sp.off ? 'The configuration turns the settling check off.' : sp.never ? 'The background never settled, so every position ran before it did.'
+        : sp.late ? this.count(sp.sf - sp.first, 'position', 'positions') + ' ran before the background settled at position ' + sp.sf + (before.length ? ', among them ' + this.andList(before) : '') + '.'
+          : 'Settled from the first position.' });
+    // what the drift monitors did while it settled, before any correction
+    if (sp.late && !sp.never) {
+      const mons = M.P.filter((q) => q.role === 'D' && q.dN != null);
+      const pre = mons.filter((q) => q.r < sp.sf), post = mons.filter((q) => q.r >= sp.sf);
+      const fit = (g) => (g.length >= 3 ? engine.fit(g.map((q) => q.r), g.map((q) => q.dN)) : null);
+      const fb = fit(pre), fa = fit(post);
+      const part = (f, g, where) => (f ? where + ', ' + this.fs(f.slope, 3) + '‰ per position (' + this.peq(f.p) + ', ' + this.count(g.length, 'monitor') + ')' : where + ', ' + (g.length ? 'only ' + this.count(g.length, 'monitor') : 'no monitor'));
+      if (mons.length) out.push({ s: 'info', title: 'Drift monitors while the background settled',
+        t: 'Raw ' + this.iso('n') + ' of the drift monitors against position: ' + part(fb, pre, 'before position ' + sp.sf) + '; ' + part(fa, post, 'from position ' + sp.sf) + '.' });
+    }
+    const mb = D.monBgd;
+    if (mb && mb.n) {
+      const f = mb.fit;
+      out.push({ s: mb.trend ? 'note' : 'ok', title: 'Background under the drift monitors',
+        t: 'BGD 28 ran ' + this.fx(mb.min, 1) + ' to ' + this.fx(mb.max, 1) + ' mV across the ' + mb.n + ' monitors'
+          + (f ? (mb.trend ? ', ' + (f.slope > 0 ? 'rising' : 'falling') + ' with position (' : ', with no trend (') + this.peq(f.p) + ').' : '.') });
+    }
+    const C = D.carry;
+    if (C.threshold == null) out.push({ s: 'note', title: 'Carryover', t: 'The configuration turns the carryover check off.' });
+    else {
+      const cf = C.flagged || [];
+      out.push({ s: cf.length ? 'note' : 'ok', title: 'Carryover',
+        t: !C.oversized ? 'No position was larger than the size series, so none was watched for carryover.'
+          : this.count(C.oversized, 'position was', 'positions were') + ' larger than the size series. ' + (cf.length
+            ? 'The background under the next peak rose by more than ' + this.num(C.threshold) + ' mV at ' + this.andList(cf.map((r) => this.who(M.P.find((q) => q.r === r)))) + ', by up to ' + this.fx(C.maxRise, 1) + ' mV.'
+            : 'No background rise above ' + this.num(C.threshold) + ' mV followed them.') });
+    }
+    return out.map((c) => Object.assign({}, c, this.status(c.s)));
+  }
+
+  vInst(M, d, sel, H) {
+    const D = this.data(), charts = [], ax = this.rowAxis(M), sp = this.settleSpan(M);
+    const before = sp.late && !sp.never ? { list: [{ x0: ax.min, x1: sp.sf - 0.5 }], fill: '#E6EBF0' } : null;
+    for (const [el, gas, k] of [['n', 'N2', 'pN'], ['c', 'CO2', 'pC']]) {
+      const r = D.refgas[el], col = this.col(el), pts = M.P.filter((q) => q[k] != null), title = gas + ' reference pulses';
+      if (!pts.length) { charts.push(this.none(title, col, 'No ' + gas + ' reference pulse besides the designated one was exported, so the working gas cannot be followed.')); continue; }
+      const st = this.pulseStart(M, k), early = new Set(st ? st.start.map((q) => q.r) : []), f = r.fit, lo = ax.min + 1, hi = ax.max - 1;
+      const mean = st ? st.mean : r.mean;
+      charts.push(this.chart({
+        title, sub: 'The first pulse Isodat did not designate, ' + r.n + ' positions; SD ' + this.fx(r.sd, 3) + '‰' + (st ? ', ' + this.fx(st.sdRest, 3) + '‰ without the first five' : ''),
+        badge: r.trend ? { text: 'Trend, ' + this.peq(f && f.p), bg: '#FBEFD6', fg: '#8A5A00' } : { text: 'No trend', bg: '#DDF2EA', fg: '#0B6E4F' }, color: col, r: 3.6,
+        x: ax, y: this.dom(pts.map((q) => q[k]), 0.1), bandA: before,
+        lineB: { paths: [[[ax.min, mean], [ax.max, mean]]], stroke: col, w: 1.2, dash: '5 4' },
+        lineA: r.trend && f ? { paths: [[[lo, f.intercept + f.slope * lo], [hi, f.intercept + f.slope * hi]]], stroke: col, w: 2 } : null,
+        pts: pts.map((q) => ({ x: q.r, y: q[k], kind: early.has(q.r) ? 'hollow' : 'fill', sel: q.r === sel,
+          label: q.id + ', position ' + q.r + ': ' + this.fx(q[k], 3) + '‰' + (early.has(q.r) ? ', one of the first five' : ''), pick: () => H.pick(q.r) })),
+        legend: [{ kind: 'dot', color: col, label: 'Pulse' }].concat(st ? [{ kind: 'hollow', color: col, label: 'First five positions' }] : [])
+          .concat([{ kind: 'dash', color: col, label: (st ? 'Mean of the rest ' : 'Mean ') + this.fx(mean, 3) + '‰' }])
+          .concat(before ? [{ kind: 'band', color: '#E6EBF0', label: 'Before the background settled' }] : []),
+        xLabel: 'Position in the run', yLabel: this.iso(el) + ' of the pulse (‰)',
+      }));
+    }
+    // the designated reference peaks' area, each as a percentage of its run median
+    const rel = (k) => {
+      const v = M.P.map((q) => q[k]).filter((x) => x != null).sort((a, b) => a - b);
+      if (v.length < 3) return null;
+      const med = v.length % 2 ? v[(v.length - 1) / 2] : (v[v.length / 2 - 1] + v[v.length / 2]) / 2;
+      return M.P.filter((q) => q[k] != null).sort((a, b) => a.r - b.r).map((q) => [q.r, (q[k] / med - 1) * 100]);
+    };
+    const rN = rel('raN'), rC = rel('raC');
+    if (rN || rC) {
+      const ys = [].concat(rN || [], rC || []).map((p) => p[1]).concat([0]);
+      charts.push(this.chart({
+        title: 'Reference peak size', sub: 'Area of the peak Isodat designates in each analysis, against its median in this run',
+        color: this.col('n'), x: ax, y: this.dom(ys, 0.15), bandA: before,
+        lineA: rN ? { paths: [rN], stroke: this.col('n'), w: 2 } : null,
+        lineB: rC ? { paths: [rC], stroke: this.col('c'), w: 2, dash: '6 3' } : null,
+        legend: [].concat(rN ? [{ kind: 'line', color: this.col('n'), label: 'N2' }] : [], rC ? [{ kind: 'dash', color: this.col('c'), label: 'CO2' }] : [],
+          before ? [{ kind: 'band', color: '#E6EBF0', label: 'Before the background settled' }] : []),
+        xLabel: 'Position in the run', yLabel: 'Area against the median (%)',
+      }));
+    }
+    const pts = M.P.filter((q) => q.bgd != null || q.rbgd != null), flagged = (D.carry.flagged || []).length;
+    const vals = [].concat(M.P.map((q) => q.bgd), M.P.map((q) => q.rbgd));
+    charts.push(pts.length ? this.chart({
+      title: 'Background at m/z 28', sub: 'BGD 28 under each sample N2 peak and under the reference peak' + (sp.late && !sp.never ? '; settled from position ' + sp.sf : ''),
+      badge: flagged ? { text: flagged + ' carryover', bg: '#FBEFD6', fg: '#8A5A00' } : sp.late ? { text: 'Settled late', bg: '#FBEFD6', fg: '#8A5A00' } : { text: 'Steady', bg: '#DDF2EA', fg: '#0B6E4F' },
+      color: '#3B4A55', r: 3.6, smallColor: '#8D9AA7',
+      x: ax, y: this.dom(vals, 0.1), bandA: before,
+      pts: M.P.filter((q) => q.rbgd != null).map((q) => ({ x: q.r, y: q.rbgd, kind: 'small' }))
+        .concat(M.P.filter((q) => q.bgd != null).map((q) => ({ x: q.r, y: q.bgd, kind: q.over ? 'hollow' : 'fill', ring: q.carry, sel: q.r === sel,
+          label: q.id + ', position ' + q.r + ': ' + this.fx(q.bgd, 1) + ' mV under the sample peak' + (q.rbgd != null ? ', ' + this.fx(q.rbgd, 1) + ' mV under the reference' : '') + (q.over ? ', larger than the size series' : '') + (q.carry ? ', possible carryover' : ''), pick: () => H.pick(q.r) }))),
+      legend: [{ kind: 'dot', color: '#3B4A55', label: 'Under the sample peak' }, { kind: 'small', color: '#8D9AA7', label: 'Under the reference peak' },
+        { kind: 'hollow', color: '#3B4A55', label: 'Larger than the series' }, { kind: 'ring', color: '#3B4A55', label: 'Carryover flag' }]
+        .concat(before ? [{ kind: 'band', color: '#E6EBF0', label: 'Before it settled' }] : []),
+      xLabel: 'Position in the run', yLabel: 'BGD 28 (mV)',
+    }) : this.none('Background at m/z 28', '#3B4A55', 'No position has an N2 peak, so there is no background to follow.'));
+    return { ctrl: [], charts, checks: this.instChecks(M) };
   }
 
   // ---------------------------------------------------------------- the steps
@@ -849,7 +1021,7 @@ class Component extends DCLogic {
     }
     const mats = this.anchorGroups(M).length;
     if (mats < 2) lines.push({ t: (mats ? 'Only one anchor material is in this run' : 'No anchor is in this run') + '; a calibration needs two that bracket the samples.' });
-    return { rows, effect: { title: 'Worth a look', lines } };
+    return { rows, effect: { title: 'Notes', lines } };
   }
 
   blankChart(M, el, blanks, sel, H) {
@@ -871,7 +1043,7 @@ class Component extends DCLogic {
       bandA: blk.sd != null ? { fill: this.tint(el), list: [{ y0: blk.d - blk.sd, y1: blk.d + blk.sd }] } : null,
       lineB: { paths: [[[ax.min, blk.d], [ax.max, blk.d]]], stroke: col, w: 1.5, dash: '5 4' },
       pts: withP.map((q) => ({ x: q.r, y: q[dk], kind: 'fill', sel: q.r === sel, label: q.id + ', position ' + q.r + ': ' + this.fx(q[dk], 2) + '‰, ' + this.fx(q[ak], 2) + ' Vs', pick: () => H.pick(q.r) })),
-      notes: withP.map((q) => ({ x: q.r, y: q[dk], t: this.fx(q[ak], 2) + ' Vs', at: this.side(ax, q.r), c: '#5B6876' })),
+      notes: withP.map((q) => ({ x: q.r, y: q[dk], t: this.fx(q[ak], 2) + ' Vs', at: this.side(ax, q.r), c: '#56646F' })),
       legend: [{ kind: 'dot', color: col, label: 'Blank capsule' }, { kind: 'dash', color: col, label: 'Mean ' + this.fx(blk.d, 2) + '‰' }]
         .concat(blk.sd != null ? [{ kind: 'band', color: this.tint(el), label: '±1 SD' }] : []),
       xLabel: 'Position in the run', yLabel: this.iso(el) + ', raw (‰)',
@@ -916,17 +1088,17 @@ class Component extends DCLogic {
       const big = sh.big;
       if (big && Math.abs(big.d) > 0.5) {
         lines.push({ t: 'The largest change is ' + this.who(big.q) + ' (' + this.fs(big.d, 2) + '‰), whose ' + (el === 'n' ? 'N2' : 'CO2') + ' peak is '
-          + this.fx(big.q[ak] / b[el].area, 1) + ' times the blank. A correction this size says the sample is too small, not that the blank is known.' });
+          + this.fx(big.q[ak] / b[el].area, 1) + ' times the blank. A sample this small relative to the blank cannot be corrected reliably.' });
       }
     }
     for (const [el, list, gas] of [['n', uN, 'N2'], ['c', uC, 'CO2']]) {
       if (!list.length) continue;
       const ak = el === 'n' ? 'aN' : 'aC';
       lines.push({ t: 'Under ' + this.times(mult) + ' the blank in ' + gas + ': ' + list.map((q) => q.id + ' (' + q.r + ', ' + this.fx(q[ak] / b[el].area, 1) + '×)').join(', ')
-        + '. Their ' + this.iso(el) + ' carries the blank either way.' });
+        + '. Their ' + this.iso(el) + ' is affected by the blank whether or not it is subtracted.' });
     }
     if (!lines.length) lines.push({ t: b.n.n || b.c.n ? 'The switch changes no sample in this run.' : 'No blank capsule gave a peak, so the switch changes nothing in this run.' });
-    return { ctrl, charts, stats, effect: { title: 'What the choice does', lines } };
+    return { ctrl, charts, stats, effect: { title: 'Effect of this choice', lines } };
   }
 
   vLin(M, d, sel, H) {
@@ -986,7 +1158,7 @@ class Component extends DCLogic {
       lines.push({ t: (on ? 'Switching the ' + this.iso(el) + ' correction off' : 'Forcing the ' + this.iso(el) + ' correction on') + ' would move sample ' + this.iso(el) + ' by ' + this.span(sh.lo, sh.hi, 2, true) + '‰, ' + sh.beyond + ' of ' + sh.n + ' by more than U.' });
     }
     if (!lines.length) lines.push({ t: lin.length < 3 ? 'With fewer than three size standards, no slope can be applied, so the switches change nothing.' : 'The switches change no sample in this run.' });
-    return { ctrl, charts, stats, effect: { title: 'What the choice does', lines } };
+    return { ctrl, charts, stats, effect: { title: 'Effect of this choice', lines } };
   }
 
   vDrift(M, d, sel, H) {
@@ -998,7 +1170,7 @@ class Component extends DCLogic {
     const ctrl = [
       this.seg('Drift correction', 'drift', d.drift, ['Auto', 'On', 'Off'], H, [verdict('n'), verdict('c')]),
       this.seg('Model', 'model', d.model, [{ t: 'Row', v: 'Row' }, { t: 'Background', v: 'Background' }, { t: 'Auto', v: 'Auto' }], H, [
-        { t: 'Row fits against position; Background against the N2 reference peak’s background; Auto takes whichever leaves less scatter.', on: false }]),
+        { t: 'Row fits drift against position. Background fits it against the background under the N2 reference peak. Auto uses whichever leaves less scatter.', on: false }]),
     ];
     const charts = [];
     for (const el of ['n', 'c']) {
@@ -1027,7 +1199,7 @@ class Component extends DCLogic {
         }),
         notes: mons.filter((q) => r.outliers.includes(q.r) || r.excluded.includes(q.r) || early.has(q.r)).map((q) => ({
           x: bg ? q.rbgd : q.r, y: q[el].lin, t: r.excluded.includes(q.r) ? 'left out' : early.has(q.r) ? 'before the fit' : 't ' + this.fs(r.t[q.r], 2),
-          c: r.outliers.includes(q.r) ? '#A33A00' : '#5B6876', at: side(bg ? q.rbgd : q.r),
+          c: r.outliers.includes(q.r) ? '#A33A00' : '#56646F', at: side(bg ? q.rbgd : q.r),
         })),
         legend: [{ kind: 'dot', color: col, label: 'In the fit' }, { kind: 'hollow', color: col, label: 'Left out' }, { kind: 'ring', color: col, label: 'Outlier, |t| > ' + T }, { kind: r.inForce ? 'line' : 'dash', color: col, label: r.inForce ? 'Fit, applied' : 'Fit, not applied' }],
         xLabel: bg ? 'N2 reference-peak background (mV)' : 'Position in the run', yLabel: this.iso(el) + ' after linearity (‰)',
@@ -1054,9 +1226,9 @@ class Component extends DCLogic {
       if (!sh.n) continue;
       lines.push({ t: (alt === 'On' ? 'Forcing drift on' : 'Switching drift off') + ' would move sample ' + this.iso(el) + ' by ' + this.span(sh.lo, sh.hi, 2, true) + '‰, ' + sh.beyond + ' of ' + sh.n + ' by more than U.' });
     }
-    if (Dr.n.outliers.length || Dr.c.outliers.length) lines.push({ t: 'With ' + this.words(mons.length) + ' monitors, leaving one out can make another look like an outlier. Leave a monitor out for a cause in the capsule or the weighing, not for its value alone.' });
+    if (Dr.n.outliers.length || Dr.c.outliers.length) lines.push({ t: 'With ' + this.words(mons.length) + ' monitors, leaving one out can make another look like an outlier. Leave a monitor out only when there is a known problem with its capsule or its weighing.' });
     if (!lines.length) lines.push({ t: Math.max(Dr.n.n, Dr.c.n) < 3 ? 'Fewer than three monitors are in the fit, so no drift slope can be applied.' : 'Reversing the switch changes no sample in this run.' });
-    return { ctrl, charts, stats, effect: { title: 'What the choice does', lines } };
+    return { ctrl, charts, stats, effect: { title: 'Effect of this choice', lines } };
   }
 
   vCal(M, d, sel, H) {
@@ -1081,7 +1253,7 @@ class Component extends DCLogic {
       for (const q of A) (names[q.si] = names[q.si] || []).push(q);
       charts.push(this.chart({
         title, sub: 'Slope ' + this.fx(f.slope, 4) + ', intercept ' + this.fx(f.intercept, 3) + '‰, residual SD ' + this.fx(f.sd, 3) + '‰',
-        badge: { text: inside + ' of ' + withV.length + ' inside the anchors', bg: '#EEF1F4', fg: '#3A4856' }, color: col, x: xd, y: yd,
+        badge: { text: inside + ' of ' + withV.length + ' inside the anchors', bg: '#EEF1F4', fg: '#3B4A55' }, color: col, x: xd, y: yd,
         bandB: { fill: '#FBF1DE', list: [{ y1: f.accMin }, { y0: f.accMax }] },
         lineA: { paths: [[[xd.min, f.slope * xd.min + f.intercept], [xd.max, f.slope * xd.max + f.intercept]]], stroke: col, w: 1.8 },
         pts: A.map((q) => ({ x: q[el].drift, y: q[el].fin, kind: 'fill', sel: q.r === sel, label: q.id + ', position ' + q.r + ': measured ' + this.fx(q[el].drift, 3) + ', accepted ' + this.fx(el === 'n' ? q.acc15 : q.acc13, 2) + '‰', pick: () => H.pick(q.r) }))
@@ -1090,7 +1262,7 @@ class Component extends DCLogic {
           const g = names[k].filter((q) => q[el].drift != null);
           if (!g.length) return { x: null, y: null, t: '' };
           const mx = g.reduce((s, q) => s + q[el].drift, 0) / g.length;
-          return { x: mx, y: el === 'n' ? g[0].acc15 : g[0].acc13, t: g[0].id, at: mx > (xd.min + xd.max) / 2 ? 'left' : 'right', c: '#0E1A26' };
+          return { x: mx, y: el === 'n' ? g[0].acc15 : g[0].acc13, t: g[0].id, at: mx > (xd.min + xd.max) / 2 ? 'left' : 'right', c: '#13212B' };
         }),
         legend: [{ kind: 'dot', color: col, label: 'Anchor' }, { kind: 'small', color: '#8D9AA7', label: 'Sample' }, { kind: 'band', color: '#FBF1DE', label: 'Outside the anchors' }],
         xLabel: 'Measured, after drift (‰)', yLabel: this.iso(el) + ' calibrated (‰)',
@@ -1164,7 +1336,7 @@ class Component extends DCLogic {
           label: q.id + ', position ' + q.r + ': ' + this.fs(ys[i], 1) + '%' + (e.excluded.includes(q.r) ? '. Left out; click to put it back.' : '. Click to leave it out.'),
           pick: () => H.toggle('exclE', q.r),
         })),
-        notes: mons.filter((q, i) => ys[i] != null && Math.abs(ys[i]) > gate).map((q) => ({ x: q.r, y: q['bias' + el] * 100, t: this.fs(q['bias' + el] * 100, 1) + '%', at: this.side(ax, q.r), c: '#3A4856' })),
+        notes: mons.filter((q, i) => ys[i] != null && Math.abs(ys[i]) > gate).map((q) => ({ x: q.r, y: q['bias' + el] * 100, t: this.fs(q['bias' + el] * 100, 1) + '%', at: this.side(ax, q.r), c: '#3B4A55' })),
         legend: [{ kind: 'dot', color: col, label: 'Monitor used' }, { kind: 'hollow', color: col, label: 'Left out' }, { kind: e.inForce ? 'line' : 'dash', color: col, label: e.inForce ? 'Factor applied' : 'Factor, not applied' }, { kind: 'band', color: '#E7F3EC', label: 'Within ' + this.num(gate) + '%' }],
         xLabel: 'Position in the run', yLabel: 'Measured over certified, minus 1 (%)',
       }));
@@ -1193,8 +1365,8 @@ class Component extends DCLogic {
       lines.push({ t: 'Fewer than two monitors are used, so the switch changes nothing.' });
     }
     if (S.length && !S.some((q) => q.pctN != null || q.pctC != null)) lines.push({ t: 'The samples were not weighed, so the run reports no %N or %C for them' + (S.some((q) => q.cn != null) ? '; the correction still moves their C:N.' : '.') });
-    lines.push({ t: 'Leave a monitor out when its weight is in doubt, not the instrument: a capsule weighed 10% light reads 10% high in both %N and %C.' });
-    return { ctrl, charts, stats, effect: { title: 'What the choice does', lines } };
+    lines.push({ t: 'Leave a monitor out when its weight is in doubt. A capsule weighed 10% light reads 10% high in both %N and %C.' });
+    return { ctrl, charts, stats, effect: { title: 'Effect of this choice', lines } };
   }
 
   vUnc(M, d, sel, H) {
@@ -1237,12 +1409,12 @@ class Component extends DCLogic {
         title, sub: 'Samples ' + this.span(Math.min(...Us), Math.max(...Us), 3) + '‰; least near the anchors’ mean',
         badge: this.badge(true, 'k = ' + kt), color: col, x: xd, y: yd,
         lineA: { paths: [curve], stroke: col, w: 1.8 },
-        lineB: { paths: [[[f.accMin, 0], [f.accMin, yd.max]], [[f.accMax, 0], [f.accMax, yd.max]]], stroke: '#5B6876', w: 1, dash: '3 4' },
+        lineB: { paths: [[[f.accMin, 0], [f.accMin, yd.max]], [[f.accMax, 0], [f.accMax, yd.max]]], stroke: '#56646F', w: 1, dash: '3 4' },
         pts: S.map((q) => ({ x: q[el].fin, y: q[el].U, kind: 'fill', sel: q.r === sel, label: q.id + ', position ' + q.r + ': ' + this.fx(q[el].fin, 2) + ' ± ' + this.fx(q[el].U, 3) + '‰', pick: () => H.pick(q.r) })),
         // the anchors' names, one lower than the other when the anchors sit close on the axis
-        notes: [{ x: f.accMin, y: yd.max * 0.94, t: name(f.accMin), at: 'right', c: '#3A4856' },
-          { x: f.accMax, y: yd.max * ((f.accMax - f.accMin) / (xd.max - xd.min) < 0.3 ? 0.82 : 0.94), t: name(f.accMax), at: 'left', c: '#3A4856' }],
-        legend: [{ kind: 'dot', color: col, label: 'Sample' }, { kind: 'line', color: col, label: 'U along the line' }, { kind: 'dash', color: '#5B6876', label: 'Anchor values' }],
+        notes: [{ x: f.accMin, y: yd.max * 0.94, t: name(f.accMin), at: 'right', c: '#3B4A55' },
+          { x: f.accMax, y: yd.max * ((f.accMax - f.accMin) / (xd.max - xd.min) < 0.3 ? 0.82 : 0.94), t: name(f.accMax), at: 'left', c: '#3B4A55' }],
+        legend: [{ kind: 'dot', color: col, label: 'Sample' }, { kind: 'line', color: col, label: 'U along the line' }, { kind: 'dash', color: '#56646F', label: 'Anchor values' }],
         xLabel: this.iso(el) + ' calibrated (‰)', yLabel: 'U, k = ' + kt + ' (‰)',
       }));
     }
@@ -1284,8 +1456,8 @@ class Component extends DCLogic {
       lines.push({ t: 'With the ' + (alt === 'monitors' ? 'drift monitors’ SD (' + this.fx(M.monSD[el], 3) + '‰)' : 'pooled anchor SD (' + this.fx(U[el].pooled, 3) + '‰)')
         + ', U(' + this.iso(el) + ') would be ' + this.span(Math.min(...a), Math.max(...a), 3) + '‰ instead of ' + this.span(Math.min(...b), Math.max(...b), 3) + '‰.' });
     }
-    lines.push({ t: 'U leaves out the blank, linearity, and drift corrections, and how this run compares with others.' });
-    return { ctrl, charts, stats: { rows }, effect: { title: 'What the choice does', lines }, budget: pn || pc ? budget : null };
+    lines.push({ t: 'U does not include the blank, linearity, or drift corrections, or differences between runs.' });
+    return { ctrl, charts, stats: { rows }, effect: { title: 'Effect of this choice', lines }, budget: pn || pc ? budget : null };
   }
 
   qcChecks(M, d) {
@@ -1298,7 +1470,7 @@ class Component extends DCLogic {
         rev.push({ el, lab, on, sh: this.shift(M, Ma, el) });
       }
       const hit = rev.filter((r) => r.sh.beyond > 0);
-      out.push({ s: hit.length ? 'caution' : 'ok', title: 'How much the choices matter',
+      out.push({ s: hit.length ? 'caution' : 'ok', title: 'Effect of the choices',
         t: 'If each choice were reversed, ' + rev.map((r, i) => (i === rev.length - 1 ? 'and ' : '') + this.iso(r.el) + ' ' + r.lab + ' (' + (r.on ? 'applied' : 'not applied') + ') would move ' + r.sh.beyond + (i ? '' : ' of ' + r.sh.n + ' samples')).join(', ') + ' by more than U.' });
     }
     const E = M.elem, mons = M.P.filter((q) => q.role === 'D');
@@ -1337,34 +1509,7 @@ class Component extends DCLogic {
       out.push({ s: nu + no + cu + co ? 'note' : 'ok', title: 'Sample size against the size series',
         t: 'N2 peaks of ' + nu + ' samples fall below the series and ' + no + ' above it; CO2 peaks of ' + cu + ' below and ' + co + ' above.' });
     }
-    const C = D.carry;
-    if (C.threshold == null) out.push({ s: 'note', title: 'Carryover', t: 'The configuration turns the carryover check off.' });
-    else {
-      const cf = C.flagged || [];
-      out.push({ s: cf.length ? 'note' : 'ok', title: 'Carryover',
-        t: !C.oversized ? 'No position was larger than the size series, so none was watched for carryover.'
-          : this.count(C.oversized, 'position was', 'positions were') + ' larger than the size series. ' + (cf.length
-            ? 'The background under the next peak rose by more than ' + this.num(C.threshold) + ' mV at ' + this.andList(cf.map((r) => this.who(M.P.find((q) => q.r === r)))) + ', by up to ' + this.fx(C.maxRise, 1) + ' mV.'
-            : 'No background rise above ' + this.num(C.threshold) + ' mV followed them.') });
-    }
-    const sf = D.settle.settled_from, first = ax.min + 1, last = ax.max - 1;
-    const settleOff = !this.state.run.config.settled_threshold;
-    out.push({ s: !settleOff && sf > first ? 'note' : 'ok', title: 'Background at the start',
-      t: settleOff ? 'The configuration turns the settling check off.' : sf > last ? 'The background never settled, so every position ran before it did.'
-        : sf > first ? this.count(sf - first, 'position', 'positions') + ' ran before the background settled.' : 'Settled from the first position.' });
-    const mb = D.monBgd;
-    if (mb && mb.n) {
-      const f = mb.fit;
-      out.push({ s: mb.trend ? 'note' : 'ok', title: 'Background under the drift monitors',
-        t: 'BGD 28 ran ' + this.fx(mb.min, 1) + ' to ' + this.fx(mb.max, 1) + ' mV across the ' + mb.n + ' monitors'
-          + (f ? (mb.trend ? ', ' + (f.slope > 0 ? 'rising' : 'falling') + ' with position (' : ', with no trend (') + this.peq(f.p) + ').' : '.') });
-    }
-    for (const [el, gas] of [['n', 'N2'], ['c', 'CO2']]) {
-      const r = D.refgas[el];
-      if (!r || !r.n) { out.push({ s: 'note', title: 'Reference gas, ' + gas, t: 'No ' + gas + ' reference pulse besides the designated one was exported, so the working gas was not followed.' }); continue; }
-      out.push({ s: r.trend ? 'note' : 'ok', title: 'Reference gas, ' + gas,
-        t: r.n + ' pulses that Isodat did not designate read with SD ' + this.fx(r.sd, 3) + '‰; ' + (r.fit ? (r.trend ? 'they trend with position (' : 'no trend with position (') + this.peq(r.fit.p) + ').' : 'too few to test for a trend.') });
-    }
+    for (const c of this.instChecks(M)) if (c.s !== 'info') out.push(Object.assign({}, c, { step: 'inst' }));
     const K = M.P.filter((q) => q.role === 'K');
     if (K.length) {
       const off = K.filter((q) => q.flags.some((f) => /^check /.test(f)));
@@ -1379,32 +1524,9 @@ class Component extends DCLogic {
   }
 
   vQC(M, d, sel, H) {
-    const D = this.data(), checks = this.qcChecks(M, d), charts = [], ax = this.rowAxis(M);
-    for (const [el, gas, k] of [['n', 'N2', 'pN'], ['c', 'CO2', 'pC']]) {
-      const r = D.refgas[el], col = this.col(el), pts = M.P.filter((q) => q[k] != null), title = gas + ' reference pulses';
-      if (!pts.length) { charts.push(this.none(title, col, 'No ' + gas + ' reference pulse besides the designated one was exported, so the working gas cannot be followed.')); continue; }
-      const f = r.fit, lo = ax.min + 1, hi = ax.max - 1;
-      charts.push(this.chart({
-        title, sub: 'The first pulse Isodat did not designate, ' + r.n + ' positions; SD ' + this.fx(r.sd, 3) + '‰',
-        badge: r.trend ? { text: 'Trend, ' + this.peq(f && f.p), bg: '#FBEFD6', fg: '#8A5A00' } : { text: 'No trend', bg: '#DDF2EA', fg: '#0B6E4F' }, color: col, r: 3.6,
-        x: ax, y: this.dom(pts.map((q) => q[k]), 0.1),
-        lineB: { paths: [[[ax.min, r.mean], [ax.max, r.mean]]], stroke: col, w: 1.2, dash: '5 4' },
-        lineA: r.trend && f ? { paths: [[[lo, f.intercept + f.slope * lo], [hi, f.intercept + f.slope * hi]]], stroke: col, w: 2 } : null,
-        pts: pts.map((q) => ({ x: q.r, y: q[k], kind: 'fill', sel: q.r === sel, label: q.id + ', position ' + q.r + ': ' + this.fx(q[k], 3) + '‰', pick: () => H.pick(q.r) })),
-        legend: [{ kind: 'dot', color: col, label: 'Pulse' }, { kind: 'dash', color: col, label: 'Mean ' + this.fx(r.mean, 3) + '‰' }],
-        xLabel: 'Position in the run', yLabel: this.iso(el) + ' of the pulse (‰)',
-      }));
-    }
-    const pts = M.P.filter((q) => q.bgd != null), flagged = (D.carry.flagged || []).length;
-    charts.push(pts.length ? this.chart({
-      title: 'Background under each N2 peak', sub: 'BGD 28; after an oversized sample the next one or two are watched for carryover',
-      badge: flagged ? { text: flagged + ' flagged', bg: '#FBEFD6', fg: '#8A5A00' } : { text: 'None flagged', bg: '#DDF2EA', fg: '#0B6E4F' }, color: '#3A4856', r: 3.6,
-      x: ax, y: this.dom(pts.map((q) => q.bgd), 0.1),
-      pts: pts.map((q) => ({ x: q.r, y: q.bgd, kind: q.over ? 'hollow' : 'fill', ring: q.carry, sel: q.r === sel, label: q.id + ', position ' + q.r + ': ' + this.fx(q.bgd, 1) + ' mV' + (q.over ? ', larger than the size series' : '') + (q.carry ? ', possible carryover' : ''), pick: () => H.pick(q.r) })),
-      legend: [{ kind: 'dot', color: '#3A4856', label: 'Position' }, { kind: 'hollow', color: '#3A4856', label: 'Larger than the series' }, { kind: 'ring', color: '#3A4856', label: 'Carryover flag' }],
-      xLabel: 'Position in the run', yLabel: 'BGD 28 (mV)',
-    }) : this.none('Background under each N2 peak', '#3A4856', 'No position has a sample N2 peak, so there is no background to follow.'));
-    return { ctrl: [], charts, checks };
+    const checks = this.qcChecks(M, d).map((c) => (c.step === 'inst'
+      ? Object.assign({}, c, { hasGo: true, goText: 'Step 1, ' + NAMES.inst, go: H.go('inst') }) : c));
+    return { ctrl: [], charts: [], checks };
   }
 
   methods(M, d) {
@@ -1499,7 +1621,7 @@ class Component extends DCLogic {
       pick: () => H.pick(q.r), sbg: q.r === sel ? '#E9EFF5' : '#FFFFFF',
     }));
     const filters = [['all', 'All'], ['inside', 'Inside the size series'], ['size', 'Outside the size series'], ['carry', 'Carryover']].map(([k, t]) => ({
-      t: t + ' ' + sets[k].length, pick: () => H.filter(k), bg: filt === k ? '#0E1A26' : '#FFFFFF', fg: filt === k ? '#FFFFFF' : '#3A4856', bd: filt === k ? '#0E1A26' : '#C9D2DB',
+      t: t + ' ' + sets[k].length, pick: () => H.filter(k), bg: filt === k ? '#13212B' : '#FFFFFF', fg: filt === k ? '#FFFFFF' : '#3B4A55', bd: filt === k ? '#13212B' : '#C9D2DB',
     }));
     const both = S.filter((q) => q.c.fin != null && q.n.fin != null);
     const errs = [];
@@ -1509,21 +1631,21 @@ class Component extends DCLogic {
     }
     const kt = this.num(M.settings.k);
     const chart = both.length ? this.chart({
-      title: this.iso('n') + ' against ' + this.iso('c'), sub: both.length + ' samples with U (k = ' + kt + '); hollow where a peak is outside the size series', color: '#0E1A26', r: 4.4,
+      title: this.iso('n') + ' against ' + this.iso('c'), sub: both.length + ' samples with U (k = ' + kt + '); hollow where a peak is outside the size series', color: '#13212B', r: 4.4,
       x: this.dom(both.map((q) => q.c.fin), 0.06), y: this.dom(both.map((q) => q.n.fin), 0.06), errs: { segs: errs, stroke: '#8796A5' },
       pts: both.map((q) => ({ x: q.c.fin, y: q.n.fin, kind: size(q) ? 'hollow' : 'fill', ring: q.carry, sel: q.r === sel, label: q.id + ', position ' + q.r + ': ' + this.fx(q.n.fin, 2) + ', ' + this.fx(q.c.fin, 2) + '‰', pick: () => H.pick(q.r) })),
-      legend: [{ kind: 'dot', color: '#0E1A26', label: 'Inside the size series' }, { kind: 'hollow', color: '#0E1A26', label: 'Outside it' }, { kind: 'ring', color: '#0E1A26', label: 'Carryover flag' }],
+      legend: [{ kind: 'dot', color: '#13212B', label: 'Inside the size series' }, { kind: 'hollow', color: '#13212B', label: 'Outside it' }, { kind: 'ring', color: '#13212B', label: 'Carryover flag' }],
       xLabel: this.iso('c') + ' (‰ VPDB)', yLabel: this.iso('n') + ' (‰ AIR)', H: 380,
-    }) : this.none(this.iso('n') + ' against ' + this.iso('c'), '#0E1A26', 'No sample has both a δ¹⁵N and a δ¹³C value.');
+    }) : this.none(this.iso('n') + ' against ' + this.iso('c'), '#13212B', 'No sample has both a δ¹⁵N and a δ¹³C value.');
     const busy = st.busy, lo = st.boot && st.boot.libreoffice === false;
     const item = (kind, t, sub, note, wait) => ({
       t, sub, note: busy === kind ? wait : note, pick: () => this.download(kind),
       busy: !!busy, aria: busy === kind ? 'true' : 'false', cursor: busy ? (busy === kind ? 'progress' : 'default') : 'pointer',
     });
     const downloads = [
-      item('workbook', 'Workbook', nm.workbook, lo ? 'Every step as a live formula; this service leaves the values to Excel or LibreOffice' : 'Every step as a live formula, numbers filled in', 'Building the workbook on the server; this takes a few seconds'),
-      item('csv', 'Results table', nm.csv, 'The workbook’s Results sheet as CSV: every position, at full precision', 'Building the results table on the server'),
-      item('config', 'Configuration', nm.config, 'The decisions on this run, reusable as a lab configuration', ''),
+      item('workbook', 'Workbook', nm.workbook, lo ? 'Every step as a formula; Excel or LibreOffice fills in the values when it opens the file' : 'Every step as a formula, with the values filled in', 'Building the workbook on the server; this takes a few seconds'),
+      item('csv', 'Results table', nm.csv, 'The workbook’s Results sheet as a CSV file, with every position at full precision', 'Building the results table on the server'),
+      item('config', 'Configuration', nm.config, 'Your choices for this run, saved so that you can load them as a lab configuration next time', ''),
     ];
     const pair = (a, b) => (a && b ? 'on both' : a ? 'on ' + this.iso('n') : b ? 'on ' + this.iso('c') : 'off');
     const a = this.uSrc(M, d, 'n'), b = this.uSrc(M, d, 'c');
@@ -1543,7 +1665,9 @@ class Component extends DCLogic {
     const pair = (a, b, yes, no, n, c) => (a && b ? yes + ', both' : a ? yes + ', ' + n + ' only' : b ? yes + ', ' + c + ' only' : no);
     const checks = this.qcChecks(M, d);
     const nc = checks.filter((c) => c.s === 'caution').length, nn = checks.filter((c) => c.s === 'note').length;
+    const sp = this.settleSpan(M);
     const list = [
+      ['inst', 'Instrument', sp.off ? 'Settling check off' : sp.never ? 'Background never settled' : sp.late ? 'Settled at position ' + sp.sf : 'Steady from the start'],
       ['setup', 'Setup', this.count(S.length, 'sample') + ', ' + this.count(A.length, 'anchor analysis', 'anchor analyses')],
       ['blank', 'Blank', M.blank.n.inForce || M.blank.c.inForce ? 'Subtracted' : 'Not subtracted'],
       ['lin', 'Linearity', pair(M.lin.n.inForce, M.lin.c.inForce, 'Applied', 'Not applied', this.iso('n'), this.iso('c'))],
@@ -1559,7 +1683,7 @@ class Component extends DCLogic {
       const cur = k === scr, done = ix > i;
       return {
         n: String(i + 1), t, sub, pick: H.go(k), cur: cur ? 'step' : 'false',
-        nbg: cur ? '#0E1A26' : done ? '#E3E9EF' : '#FFFFFF', nfg: cur ? '#FFFFFF' : '#0E1A26', nbd: cur ? '#0E1A26' : '#B8C3CD',
+        nbg: cur ? '#13212B' : done ? '#E3E9EF' : '#FFFFFF', nfg: cur ? '#FFFFFF' : '#13212B', nbd: cur ? '#13212B' : '#B8C3CD',
         rbg: cur ? '#FFFFFF' : 'transparent', rbd: cur ? '#D8DFE6' : 'transparent', tw: cur ? '600' : '500',
       };
     });
@@ -1572,14 +1696,15 @@ class Component extends DCLogic {
     const up = {
       busy,
       dropTitle: st.busy === 'process' ? 'Reading ' + st.pending + '…' : run ? 'Drop another export here, or choose a file' : 'Drop an export here, or choose a file',
-      dropNote: '.xls, .xlsx, .xlsm, .csv, .txt, or .tsv, as Isodat exported it. The file is processed and discarded; nothing is stored.',
-      dropBg: st.drag ? '#F2F7FB' : '#FFFFFF', dropBd: st.drag ? '#0E1A26' : '#9AA8B5', dropCursor: busy ? 'progress' : 'pointer',
+      dropNote: '.xls, .xlsx, .xlsm, .csv, .txt, or .tsv, as Isodat exported it.',
+      dropBg: st.drag ? '#F2F7FB' : '#FFFFFF', dropBd: st.drag ? '#13212B' : '#9AA8B5', dropCursor: busy ? 'progress' : 'pointer',
       choose: () => { const el = document.getElementById('dc-export'); if (el && !this.state.busy) el.click(); },
+      example: () => this.loadExample(), fresh: !run,
       picked: (e) => { const f = e.target.files && e.target.files[0]; e.target.value = ''; if (f) this.pickExport(f); },
       cfgName: cfg ? cfg.name : pkg, hasCfg: !!cfg, cfgButton: cfg ? 'Choose another configuration' : 'Choose a configuration',
       cfgNote: (cfg ? 'Its standards table, switches, and limits replace the package defaults' + (cfg.wrapped ? ' (read from its "config" field)' : '')
         + (cfg.unknown.length ? '. Fields ea_irms does not read are ignored: ' + this.andList(cfg.unknown) : '') + '.'
-        : 'A .json file in the form /api/defaults returns under "config": the standards table, the switches, and the limits.')
+        : 'A .json file with a standards table, switches, and limits, such as the Configuration file downloaded from an earlier run.')
         + (run ? ' Choosing another processes the run again.' : ''),
       chooseCfg: () => { const el = document.getElementById('dc-config'); if (el && !this.state.busy) el.click(); },
       pickedCfg: (e) => { const f = e.target.files && e.target.files[0]; e.target.value = ''; if (f) this.pickConfig(f); },
@@ -1598,13 +1723,13 @@ class Component extends DCLogic {
       { t: pc.filtered ? 'A filtered export, without the reference peaks' + (pc.active ? '; ' + this.count(run.rejected.size, 'CO2 peak that matched', 'CO2 peaks that matched') + ' the designated reference pulses ' + (run.rejected.size === 1 ? 'was' : 'were') + ' set aside' : '')
         : 'A full export, with the N2 and CO2 reference peaks', good: true },
       { t: 'All twelve columns ea_irms reads were found by name (Columns, below)', good: true },
-      { t: n + ' positions; each sample peak is found by the Is Ref flag, not by its peak number', good: true },
+      { t: n + ' positions; the sample peak in each is found by its Is Ref flag', good: true },
       { t: this.count(S.length, 'sample') + ' and ' + (n - S.length) + ' standards, blanks, and other positions, matched by identifier against the ' + (run.cfgName ? 'configuration’s' : 'package') + ' standards table', good: true },
     ];
     if (chk) {
       checks.push(chk.bad.length
-        ? { t: 'This page’s recalculation differs from the engine at ' + this.count(chk.bad.length, 'position') + ' (' + this.rowList(chk.bad) + '); the workbook and the results table hold the engine’s values', good: false }
-        : { t: 'This page’s recalculation agrees with the engine at all ' + chk.positions + ' positions (' + chk.values + ' values and every flag)', good: true });
+        ? { t: 'The values recalculated in this browser differ from the server’s at ' + this.count(chk.bad.length, 'position') + ' (' + this.rowList(chk.bad) + '); the workbook and the results table hold the server’s values', good: false }
+        : { t: 'The values recalculated in this browser match the server’s at all ' + chk.positions + ' positions (' + chk.values + ' values and every flag)', good: true });
     }
     checks.push({ t: st.runDate ? 'Run date ' + this.fdate(st.runDate) + (st.dateFrom === 'name' ? ', read from the file name' : '') : 'No run date given; the workbook leaves it blank', good: true });
     return Object.assign(up, {
@@ -1616,7 +1741,7 @@ class Component extends DCLogic {
       mapFoot: 'ea_irms reads these twelve columns by their exact names and ignores the rest. An export that lacks one is refused with the names it lacks.',
       cols: COLUMNS.map(([field, unit, col]) => ({ field, unit, col, how: 'Found' })),
       cfgShort: run.cfgName || pkg,
-      start: () => this.go(FLOW.includes(st.last) ? st.last : 'setup'),
+      start: () => this.go(FLOW.includes(st.last) ? st.last : 'inst'),
     });
   }
 
@@ -1643,8 +1768,8 @@ class Component extends DCLogic {
       },
       filter: (k) => this.setState({ filt: k }),
     };
-    const nav = [{ t: 'Correct a run', pick: () => this.go(run ? (isFlow ? scr : (FLOW.includes(st.last) ? st.last : 'setup')) : 'upload'),
-      fg: '#0E1A26', bd: '#0E1A26', fw: '600', cur: 'page' }];
+    const nav = [{ t: 'EA-IRMS', pick: () => this.go('upload'),
+      fg: '#13212B', bd: '#13212B', fw: '600', cur: 'page' }];
     const up = this.upView(st, run, M, version);
     const set = M ? M.settings : engine.settings(null);
     const text = {
@@ -1664,7 +1789,8 @@ class Component extends DCLogic {
       if (groups.length) text.anchors = this.andList(groups.map((g) => g.name));
       let view = { ctrl: [], charts: [], stats: null, effect: null, checks: [], budget: null };
       let setupRows = [];
-      if (scr === 'setup') { const v = this.vSetup(M); setupRows = v.rows; view.effect = v.effect; }
+      if (scr === 'inst') view = Object.assign(view, this.vInst(M, d, sel, H));
+      else if (scr === 'setup') { const v = this.vSetup(M); setupRows = v.rows; view.effect = v.effect; }
       else if (scr === 'blank') view = Object.assign(view, this.vBlank(M, d, sel, H));
       else if (scr === 'lin') view = Object.assign(view, this.vLin(M, d, sel, H));
       else if (scr === 'drift') view = Object.assign(view, this.vDrift(M, d, sel, H));
@@ -1674,39 +1800,38 @@ class Component extends DCLogic {
       else if (scr === 'qc') view = Object.assign(view, this.vQC(M, d, sel, H));
       else if (scr === 'results') {
         const r = this.vResults(M, d, sel, H, st.filt || 'all');
-        res = Object.assign({}, r, { charts: r.chart ? [r.chart] : [] });
+        res = Object.assign({}, r, { charts: r.chart ? [Object.assign({ num: '1' }, r.chart)] : [] });
       }
       const fi = FLOW.indexOf(scr), rows = M.P.map((q) => q.r);
       const chk = run.check;
       flow = {
-        kicker: scr === 'results' ? 'After step 8' : 'Step ' + (fi + 1) + ' of 8', file: run.name,
+        kicker: scr === 'results' ? 'After step ' + (FLOW.length - 1) : 'Step ' + (fi + 1) + ' of ' + (FLOW.length - 1), file: run.name,
         rail: this.railItems(M, d, scr, H),
         ctrl: view.ctrl, hasCtrl: view.ctrl.length > 0,
         ribbon: is.step ? this.ribbon(M, scr, sel, H) : [], legend: this.ribbonLegend(M),
         ribbonStart: 'Position ' + Math.min(...rows), ribbonEnd: String(Math.max(...rows)),
-        charts: view.charts, hasCharts: view.charts.length > 0,
+        charts: view.charts.map((c, i) => Object.assign({ num: String(i + 1) }, c)), hasCharts: view.charts.length > 0,
         stats: view.stats || { rows: [] }, hasStats: !!view.stats,
         statA: scr === 'elem' ? '%N' : this.iso('n'), statB: scr === 'elem' ? '%C' : this.iso('c'),
         effect: view.effect || { title: '', lines: [] }, hasEffect: !!view.effect,
-        checks: view.checks, hasChecks: view.checks.length > 0,
+        checks: view.checks.map((c) => Object.assign({ hasGo: false, goText: '', go: null }, c)), hasChecks: view.checks.length > 0,
         budget: view.budget || { title: '', rows: [] }, hasBudget: !!view.budget,
-        insp: this.inspect(M, sel), setupRows,
+        insp: this.inspect(M, sel, scr), setupRows,
         prev: fi > 0 ? { t: 'Back to ' + NAMES[FLOW[fi - 1]], pick: go(FLOW[fi - 1]) } : { t: 'Back to upload', pick: go('upload') },
         next: scr === 'results'
           ? { t: st.busy === 'workbook' ? 'Building the workbook…' : 'Download the workbook', pick: () => this.download('workbook'), busy: !!st.busy }
           : { t: 'Continue to ' + NAMES[FLOW[fi + 1]], pick: go(FLOW[fi + 1]), busy: false },
         stdSource: run.cfgName ? 'From ' + run.cfgName + '.' : 'Package defaults, ea_irms ' + run.version + '.',
         warn: !!(chk && chk.bad.length),
-        warnText: chk && chk.bad.length ? 'This page’s values differ from the engine’s at ' + this.count(chk.bad.length, 'position') + '; the downloads hold the engine’s.' : '',
+        warnText: chk && chk.bad.length ? 'The values in this browser differ from the server’s at ' + this.count(chk.bad.length, 'position') + '; the downloads hold the server’s.' : '',
       };
     }
     return {
       is, nav, up, flow, res, text, version,
       footer: (boot.isoharness ? 'isoharness ' + boot.isoharness + (version ? ' with ea_irms ' + version : '') + '. ' : '')
-        + 'Each upload is processed and discarded; nothing is stored. The values on these pages are recalculated in your browser by the preview port; '
-        + 'the workbook and the results table come from the engine on the server. MIT license.',
+        + 'Uploaded files are deleted as soon as they are processed, and no results are kept on the server. The values on these pages are recalculated in your browser; '
+        + 'the workbook and the results table come from the server. MIT license.',
       toast: { show: !!st.toast, t: st.toast || '', close: () => this.setState({ toast: '' }) },
-      goHome: go('upload'),
     };
   }
 }

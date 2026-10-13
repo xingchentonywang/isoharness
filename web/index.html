@@ -3,380 +3,88 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>isoharness</title>
-<meta name="description" content="Correct EA-IRMS carbon and nitrogen isotope runs with ea_irms, one step at a time. Each upload is processed and discarded; nothing is stored.">
+<title>isoharness · stable isotope data reduction</title>
+<meta name="description" content="Stable isotope data reduction, with each correction shown as a step. EA-IRMS first: δ¹⁵N, δ¹³C, %N, and %C from an Isodat export. GasBench N₂O and GasBench carbonate are planned.">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geologica:wght@300..700&amp;family=JetBrains+Mono:wght@400;500;600&amp;display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400&amp;family=Source+Sans+3:wght@400;600;700&amp;display=swap">
 <style>
-body { margin: 0; background: #EEF2F5; }
-button:disabled { opacity: 0.62; }
-.dc-wait { max-width: 1360px; margin: 0 auto; padding: 40px 24px; box-sizing: border-box; color: #4A5866; font: 15px/1.6 'Geologica', 'Segoe UI', 'Helvetica Neue', Helvetica, system-ui, sans-serif; }
+:root { --ink: #13212B; --text: #3B4A55; --muted: #4A5A66; --rule: #D9E0E5; --accent: #C2510A; }
+* { box-sizing: border-box; }
+body { margin: 0; background: #FFFFFF; color: var(--ink); font: 16px/1.55 'Source Sans 3', 'Segoe UI', 'Helvetica Neue', Helvetica, system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+.bar { max-width: 1360px; margin: 0 auto; padding: 8px 24px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 28px; }
+header { border-bottom: 1px solid var(--rule); }
+.brand { display: inline-flex; align-items: center; min-height: 44px; color: var(--ink); text-decoration: none; font-family: 'Newsreader', Georgia, serif; font-style: italic; font-size: 27px; }
+nav { flex: 1 1 auto; display: flex; flex-wrap: wrap; gap: 2px 8px; }
+nav a { display: inline-flex; align-items: center; min-height: 44px; padding: 10px 8px 8px; border-bottom: 2px solid transparent; color: var(--text); font-size: 15px; text-decoration: none; }
+nav a:hover { color: var(--ink); border-bottom-color: var(--ink); }
+.api { display: inline-flex; align-items: center; min-height: 44px; padding: 0 4px; color: var(--text); font-size: 14px; font-weight: 600; text-decoration: none; }
+.api:hover { color: var(--ink); }
+main { max-width: 1360px; margin: 0 auto; padding: 28px 24px 56px; display: flex; flex-direction: column; gap: 40px; }
+.intro { max-width: 860px; padding-top: 24px; display: flex; flex-direction: column; gap: 22px; }
+h1 { margin: 0; font-family: 'Newsreader', Georgia, serif; font-weight: 400; font-size: clamp(40px, 4.6vw, 64px); line-height: 1.04; letter-spacing: -0.015em; text-wrap: balance; }
+.lead { margin: 0; max-width: 660px; color: var(--text); font-size: 19px; line-height: 1.55; text-wrap: pretty; }
+h2 { margin: 0 0 14px; font-family: 'Newsreader', Georgia, serif; font-weight: 500; font-size: 34px; line-height: 1.15; }
+.list { list-style: none; margin: 0; padding: 0; border-top: 2px solid var(--ink); max-width: 1240px; }
+.item { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(0, 2fr) 170px; gap: 10px 36px; align-items: center; padding: 24px 0; border-bottom: 1px solid var(--rule); }
+.item > * { min-width: 0; }
+.item h3 { margin: 0; font-family: 'Newsreader', Georgia, serif; font-weight: 500; font-size: 28px; line-height: 1.2; }
+.status { display: block; margin-top: 6px; font-size: 13px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; }
+.ready .status { color: var(--accent); }
+.planned .status { color: #56646F; }
+.planned h3 { color: var(--text); }
+.item p { margin: 0; max-width: 62ch; color: var(--text); font-size: 17px; }
+.go { justify-self: end; }
+.open { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; padding: 8px 20px; border-radius: 4px; background: var(--ink); color: #FFFFFF; font-weight: 600; text-decoration: none; white-space: nowrap; }
+.open:hover { background: #000000; }
+footer { border-top: 1px solid var(--rule); }
+footer .bar { padding-block: 18px 28px; color: var(--muted); font-size: 13.5px; }
+@media (max-width: 760px) {
+  .item { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  .go { justify-self: start; }
+}
 </style>
-<!-- Preact 10.29.8 (MIT), dist/preact.min.js as published on npm; its license is in vendor/preact/LICENSE. -->
-<script defer src="vendor/preact/preact.min.js"></script>
-<!-- The preview port, port/engine.js as continuous integration checks it, served by the API. -->
-<script defer src="engine.js"></script>
-<script defer src="dc.js"></script>
-<script defer src="logic.js"></script>
 </head>
 <body>
-<div id="app"><p class="dc-wait">Loading isoharness…</p><noscript><p class="dc-wait">isoharness recalculates each correction in the browser, so it needs JavaScript. The API, documented at api/docs, works without it.</p></noscript></div>
-<!-- The approved prototype's markup (Main.dc.html), drawn by dc.js with the view model of logic.js. -->
-<template id="dc-main">
-<div style="min-height: 100vh; background: #EEF2F5; color: #0E1A26; font-family: 'Geologica', 'Segoe UI', 'Helvetica Neue', Helvetica, system-ui, sans-serif; font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased">
-
-<header style="background: #FFFFFF; border-bottom: 1px solid #D8DFE6">
-<div style="max-width: 1360px; margin: 0 auto; box-sizing: border-box; padding: 8px 24px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 28px">
-<button type="button" onClick="{{goHome}}" aria-label="isoharness, go to the upload page" style="font: inherit; display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 0; border: 0; background: none; color: #0E1A26; cursor: pointer">
-<svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true"><path d="M3 22V14M7.5 22V8M12 22V12M16.5 22V4M21 22V16" stroke="#0E1A26" stroke-width="2.4" stroke-linecap="round" fill="none"></path><path d="M3 24.5H23" stroke="#E69F00" stroke-width="2" stroke-linecap="round" fill="none"></path></svg>
-<span style="font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 16px; font-weight: 600">isoharness</span>
-</button>
-<nav aria-label="Main" style="flex: 1 1 auto; display: flex; flex-wrap: wrap; gap: 2px 8px">
-<sc-for list="{{nav}}" as="n"><button type="button" onClick="{{n.pick}}" aria-current="{{n.cur}}" style="font: inherit; font-size: 14px; font-weight: {{n.fw}}; color: {{n.fg}}; min-height: 44px; padding: 10px 8px 8px; border: 0; border-bottom: 2px solid {{n.bd}}; background: none; cursor: pointer" style-hover="color: #0E1A26">{{n.t}}</button></sc-for>
-</nav>
-<div style="display: flex; align-items: center; gap: 14px">
-<sc-if value="{{version}}"><span style="font-size: 12.5px; color: #4A5866">ea_irms {{version}}</span></sc-if>
-<a href="api/docs" style="display: inline-flex; align-items: center; min-height: 44px; padding: 0 4px; font-size: 13px; font-weight: 600; color: #3A4856; text-decoration: none" style-hover="color: #0E1A26">API</a>
-</div>
+<header>
+<div class="bar">
+<a class="brand" href="./" aria-label="isoharness, all instruments">isoharness</a>
+<nav aria-label="Main"><a href="ea-irms">EA-IRMS</a></nav>
+<a class="api" href="api/docs">API</a>
 </div>
 </header>
 
-<main style="max-width: 1360px; margin: 0 auto; box-sizing: border-box; padding: 28px 24px 56px; display: flex; flex-direction: column; gap: 24px">
-<sc-if value="{{toast.show}}">
-<div role="status" style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding: 12px 16px; border-radius: 10px; background: #0E1A26; color: #E8EEF3; font-size: 13.5px">
-<span style="flex: 1 1 320px; min-width: 0">{{toast.t}}</span>
-<button type="button" onClick="{{toast.close}}" style="font: inherit; font-size: 13px; color: #FFFFFF; min-height: 36px; padding: 4px 12px; border: 1px solid #4A5D70; border-radius: 7px; background: none; cursor: pointer">Close</button>
-</div>
-</sc-if>
-
-<sc-if value="{{is.upload}}">
-<div style="display: flex; flex-direction: column; gap: 22px; max-width: 940px">
-<div style="display: flex; flex-direction: column; gap: 6px">
-<span style="font-size: 11.5px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #5B6876">New run</span>
-<h1 style="margin: 0; font-size: clamp(28px, 3vw, 36px); line-height: 1.12; font-weight: 600; letter-spacing: -0.02em">Correct a run</h1>
-<p style="margin: 0; max-width: 680px; font-size: 15px; line-height: 1.6; color: #3A4856; text-wrap: pretty">Upload one sequence as Isodat exported it. The file is processed on the server and discarded; nothing is stored. Every correction is computed from the run’s own standards, and each choice you make on the steps that follow is recalculated in this browser.</p>
-</div>
-<button type="button" onClick="{{up.choose}}" disabled="{{up.busy}}" aria-describedby="dc-drop-note" style="font: inherit; min-height: 220px; padding: 32px 20px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; text-align: center; background: {{up.dropBg}}; border: 1.5px dashed {{up.dropBd}}; border-radius: 14px; color: #0E1A26; cursor: {{up.dropCursor}}" style-hover="border-color: #0E1A26; background: #F8FAFB">
-<svg width="40" height="40" viewBox="0 0 40 40" aria-hidden="true"><path d="M20 27V8M12 15.5l8-8 8 8M8 26v7h24v-7" fill="none" stroke="#0E1A26" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path></svg>
-<span style="font-size: 17px; font-weight: 600; overflow-wrap: anywhere">{{up.dropTitle}}</span>
-<span id="dc-drop-note" style="max-width: 560px; font-size: 13px; line-height: 1.5; color: #4A5866">{{up.dropNote}}</span>
-</button>
-<input id="dc-export" type="file" accept=".xls,.xlsx,.xlsm,.csv,.txt,.tsv" hidden onchange="{{up.picked}}">
-<section aria-label="Options" style="padding: 16px 18px; background: #FFFFFF; border: 1px solid #D8DFE6; border-radius: 12px; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: 16px 32px">
-<div style="min-width: 0; display: flex; flex-direction: column; gap: 8px">
-<div style="display: flex; flex-direction: column; gap: 2px">
-<span style="font-size: 14px; font-weight: 600">Lab configuration <span style="font-weight: 400; color: #4A5866">(optional)</span></span>
-<span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12.5px; overflow-wrap: anywhere">{{up.cfgName}}</span>
-</div>
-<div style="display: flex; flex-wrap: wrap; gap: 8px">
-<button type="button" onClick="{{up.chooseCfg}}" disabled="{{up.busy}}" style="font: inherit; font-size: 13px; font-weight: 600; min-height: 38px; padding: 7px 14px; border: 1px solid #C3CDD6; border-radius: 9px; background: #FFFFFF; color: #0E1A26; cursor: pointer" style-hover="border-color: #0E1A26">{{up.cfgButton}}</button>
-<sc-if value="{{up.hasCfg}}"><button type="button" onClick="{{up.clearCfg}}" disabled="{{up.busy}}" style="font: inherit; font-size: 13px; font-weight: 600; min-height: 38px; padding: 7px 14px; border: 1px solid #C3CDD6; border-radius: 9px; background: #FFFFFF; color: #0E1A26; cursor: pointer" style-hover="border-color: #0E1A26">Use the package defaults</button></sc-if>
-</div>
-<span style="font-size: 12.5px; line-height: 1.5; color: #4A5866">{{up.cfgNote}}</span>
-<input id="dc-config" type="file" accept=".json,application/json" hidden onchange="{{up.pickedCfg}}">
-</div>
-<label style="min-width: 0; display: flex; flex-direction: column; gap: 6px; font-size: 14px; font-weight: 600">
-<span>Run date <span style="font-weight: 400; color: #4A5866">(optional)</span></span>
-<input id="dc-date" type="date" value="{{up.dateValue}}" oninput="{{up.setDate}}" disabled="{{up.busy}}" style="font: inherit; font-size: 14px; font-weight: 400; width: 100%; max-width: 240px; min-height: 44px; padding: 8px 12px; box-sizing: border-box; border: 1px solid #C3CDD6; border-radius: 9px; background: #FFFFFF; color: #0E1A26">
-<span style="font-size: 12.5px; font-weight: 400; line-height: 1.5; color: #4A5866">{{up.dateNote}}</span>
-</label>
+<main>
+<section class="intro" aria-labelledby="title">
+<h1 id="title">Stable isotope data reduction</h1>
+<p class="lead">isoharness turns the raw output of an isotope ratio mass spectrometer into calibrated δ values, using the reference materials measured in the same run. Each correction is a separate step that shows its numbers, so you can see what it does and change it. It is meant for students learning how the corrections work and for researchers processing their own runs.</p>
 </section>
-<sc-if value="{{up.hasError}}">
-<div role="alert" style="display: flex; flex-direction: column; gap: 6px; padding: 14px 16px; background: #FDF1EC; border: 1px solid #E3B3A0; border-radius: 10px">
-<strong style="font-size: 14px; font-weight: 600; color: #A33A00; overflow-wrap: anywhere">{{up.errTitle}}</strong>
-<span data-dc="error-detail" style="font-size: 13.5px; line-height: 1.55; color: #22303D; white-space: pre-wrap; overflow-wrap: anywhere">{{up.errText}}</span>
-</div>
-</sc-if>
-<sc-if value="{{up.has}}">
-<section style="padding: 18px 20px; background: #FFFFFF; border: 1px solid #D8DFE6; border-radius: 12px; display: flex; flex-direction: column; gap: 16px">
-<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px">
-<svg width="34" height="34" viewBox="0 0 34 34" aria-hidden="true"><path d="M8 3h12l7 7v21H8z" fill="#EEF2F5" stroke="#0E1A26" stroke-width="1.6" stroke-linejoin="round"></path><path d="M20 3v7h7M12 18h10M12 22h10M12 26h6" fill="none" stroke="#0E1A26" stroke-width="1.6" stroke-linecap="round"></path></svg>
-<div style="flex: 1 1 300px; min-width: 0; display: flex; flex-direction: column">
-<span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 14px; font-weight: 600; overflow-wrap: anywhere">{{up.name}}</span>
-<span style="font-size: 13px; color: #4A5866">{{up.meta}}</span>
-</div>
-<span style="padding: 4px 11px; border-radius: 999px; background: #DDF2EA; color: #0B6E4F; font-size: 12px; font-weight: 600">{{up.badge}}</span>
-</div>
-<ul style="margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 8px">
-<sc-for list="{{up.checks}}" as="k"><li style="display: flex; gap: 10px; align-items: flex-start; font-size: 13.5px; line-height: 1.5; color: #22303D"><svg width="18" height="18" viewBox="0 0 20 20" aria-hidden="true" style="flex: 0 0 auto; margin-top: 1px"><circle cx="10" cy="10" r="8" fill="none" stroke="{{k.c}}" stroke-width="1.6"></circle><path d="{{k.d}}" fill="none" stroke="{{k.c}}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path></svg><span>{{k.t}}</span></li></sc-for>
+
+<section aria-labelledby="instruments">
+<h2 id="instruments">Instruments</h2>
+<ul class="list">
+<li class="item ready">
+<div><h3>EA-IRMS</h3><span class="status">Available</span></div>
+<p>An elemental analyzer coupled to an isotope ratio mass spectrometer, for δ¹⁵N and δ¹³C of solid samples, with %N, %C, and C:N. Reads Isodat exports.</p>
+<div class="go"><a class="open" href="ea-irms" aria-label="Open EA-IRMS">Open</a></div>
+</li>
+<li class="item planned">
+<div><h3>GasBench N₂O</h3><span class="status">Planned</span></div>
+<p>δ¹⁵N and δ¹⁸O of nitrate by the denitrifier method, and δ¹⁵N of organic nitrogen after persulfate oxidation, both measured as N₂O.</p>
+<div class="go"></div>
+</li>
+<li class="item planned">
+<div><h3>GasBench carbonate</h3><span class="status">Planned</span></div>
+<p>δ¹³C and δ¹⁸O of carbonate, measured on the CO₂ released by phosphoric acid.</p>
+<div class="go"></div>
+</li>
 </ul>
-<div style="display: flex; flex-direction: column; gap: 10px">
-<div style="display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 16px">
-<h2 style="margin: 0; font-size: 15px; font-weight: 600">Columns</h2>
-<span style="font-size: 12.5px; color: #4A5866">{{up.mapNote}}</span>
-</div>
-<div style="overflow-x: auto; border: 1px solid #D8DFE6; border-radius: 9px">
-<div role="table" aria-label="Column mapping" style="min-width: 560px; font-size: 13px">
-<div role="row" style="display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr) minmax(0, 0.9fr); gap: 10px; padding: 8px 14px; background: #F4F6F8; border-bottom: 1px solid #E6EBF0; font-size: 12px; font-weight: 600; color: #4A5866"><span role="columnheader">What ea_irms needs</span><span role="columnheader">Column in this file</span><span role="columnheader">Match</span></div>
-<sc-for list="{{up.cols}}" as="c"><div role="row" style="display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr) minmax(0, 0.9fr); gap: 10px; align-items: center; padding: 7px 14px; border-bottom: 1px solid #EEF1F4"><span role="cell">{{c.field}} <span style="color: #5B6876">{{c.unit}}</span></span><span role="cell" style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12.5px; white-space: pre">{{c.col}}</span><span role="cell" style="color: #0B6E4F; font-size: 12.5px; font-weight: 600">{{c.how}}</span></div></sc-for>
-</div>
-</div>
-<p style="margin: 0; font-size: 12.5px; line-height: 1.5; color: #4A5866">{{up.mapFoot}}</p>
-</div>
-<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: 12px">
-<div style="padding: 10px 12px; border: 1px solid #D8DFE6; border-radius: 9px; display: flex; flex-direction: column; gap: 2px"><span style="font-size: 12px; color: #5B6876">Instrument</span><span style="font-weight: 600">EA-IRMS</span></div>
-<div style="padding: 10px 12px; border: 1px solid #D8DFE6; border-radius: 9px; display: flex; flex-direction: column; gap: 2px"><span style="font-size: 12px; color: #5B6876">Starting configuration</span><span style="font-weight: 600; overflow-wrap: anywhere">{{up.cfgShort}}</span></div>
-<div style="padding: 10px 12px; border: 1px solid #D8DFE6; border-radius: 9px; display: flex; flex-direction: column; gap: 2px"><span style="font-size: 12px; color: #5B6876">Run date</span><span style="font-weight: 600">{{up.date}}</span></div>
-</div>
-<div style="display: flex; justify-content: flex-end"><button type="button" onClick="{{up.start}}" disabled="{{up.busy}}" style="font: inherit; font-size: 14px; font-weight: 600; min-height: 46px; padding: 11px 20px; border: 0; border-radius: 10px; background: #0E1A26; color: #FFFFFF; cursor: pointer" style-hover="background: #22374B">Start the corrections</button></div>
 </section>
-</sc-if>
-<p style="margin: 0; max-width: 760px; font-size: 12.5px; line-height: 1.55; color: #4A5866">The page keeps the export in this tab only, to send it again when you download the workbook or the results table. Each request is processed in a temporary folder that is removed before the answer comes back.</p>
-</div>
-</sc-if>
-
-<sc-if value="{{is.flow}}">
-<div style="display: flex; flex-wrap: wrap; align-items: flex-start; gap: 28px">
-<aside style="flex: 1 1 236px; min-width: 0; max-width: 100%; display: flex; flex-direction: column; gap: 14px">
-<div style="padding: 14px 16px; background: #FFFFFF; border: 1px solid #D8DFE6; border-radius: 12px; display: flex; flex-direction: column; gap: 4px">
-<span style="font-size: 11.5px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #5B6876">Run</span>
-<span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12.5px; font-weight: 600; overflow-wrap: anywhere">{{flow.file}}</span>
-<span style="font-size: 12.5px; color: #4A5866">{{up.positions}} positions · {{up.date}}</span>
-<sc-if value="{{flow.warn}}"><span style="margin-top: 4px; padding: 6px 8px; border-radius: 7px; background: #FADFD2; color: #A33A00; font-size: 12px; line-height: 1.4">{{flow.warnText}}</span></sc-if>
-</div>
-<nav aria-label="Correction steps">
-<ol style="margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 2px">
-<sc-for list="{{flow.rail}}" as="s"><li><button type="button" onClick="{{s.pick}}" aria-current="{{s.cur}}" style="font: inherit; width: 100%; display: flex; align-items: flex-start; gap: 12px; padding: 9px 10px; text-align: left; background: {{s.rbg}}; border: 1px solid {{s.rbd}}; border-radius: 10px; color: #0E1A26; cursor: pointer" style-hover="background: #FFFFFF"><span style="flex: 0 0 auto; box-sizing: border-box; width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; font-weight: 600; background: {{s.nbg}}; color: {{s.nfg}}; border: 1.5px solid {{s.nbd}}">{{s.n}}</span><span style="min-width: 0; display: flex; flex-direction: column; gap: 1px"><span style="font-size: 14px; font-weight: {{s.tw}}">{{s.t}}</span><span style="font-size: 12px; line-height: 1.4; color: #4A5866">{{s.sub}}</span></span></button></li></sc-for>
-</ol>
-</nav>
-</aside>
-<div style="flex: 999 1 640px; min-width: 0; display: flex; flex-direction: column; gap: 20px">
-<div style="display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 14px 24px">
-<div style="flex: 1 1 520px; min-width: 0; display: flex; flex-direction: column; gap: 8px">
-<span style="font-size: 11.5px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #5B6876">{{flow.kicker}}</span>
-<sc-if value="{{is.setup}}"><h1 style="margin: 0; font-size: clamp(28px, 3vw, 36px); line-height: 1.12; font-weight: 600; letter-spacing: -0.02em">Standards and roles</h1><p style="margin: 0; max-width: 780px; font-size: 15px; line-height: 1.6; color: #3A4856; text-wrap: pretty">Each identifier is matched against the standards table by its text, ignoring case; where two rows match, the lower one wins. Positions that match no row are samples.</p></sc-if>
-<sc-if value="{{is.blank}}"><h1 style="margin: 0; font-size: clamp(28px, 3vw, 36px); line-height: 1.12; font-weight: 600; letter-spacing: -0.02em">Blank</h1><p style="margin: 0; max-width: 780px; font-size: 15px; line-height: 1.6; color: #3A4856; text-wrap: pretty">Empty tin capsules show what the capsule and the system add to every peak. On Auto the blank is subtracted only when at least three capsules gave a peak and their δ values agree within 2‰ (1 SD). {{text.blankFlag}}</p></sc-if>
-<sc-if value="{{is.lin}}"><h1 style="margin: 0; font-size: clamp(28px, 3vw, 36px); line-height: 1.12; font-weight: 600; letter-spacing: -0.02em">Linearity</h1><p style="margin: 0; max-width: 780px; font-size: 15px; line-height: 1.6; color: #3A4856; text-wrap: pretty">{{text.linSeries}} shows whether δ depends on peak size. On Auto a slope is applied only when it differs from zero at p &lt; {{text.alpha}}. It pivots on the series’ mean peak area, so a peak of that size does not move; peaks outside the series are extrapolated and flagged.</p></sc-if>
-<sc-if value="{{is.drift}}"><h1 style="margin: 0; font-size: clamp(28px, 3vw, 36px); line-height: 1.12; font-weight: 600; letter-spacing: -0.02em">Drift</h1><p style="margin: 0; max-width: 780px; font-size: 15px; line-height: 1.6; color: #3A4856; text-wrap: pretty">{{text.monitors}} placed through the run show whether the instrument moved. On Auto a slope is applied only when it differs from zero at p &lt; {{text.alpha}}. Select a monitor on a chart to leave it out of the fit, and again to put it back.</p></sc-if>
-<sc-if value="{{is.cal}}"><h1 style="margin: 0; font-size: clamp(28px, 3vw, 36px); line-height: 1.12; font-weight: 600; letter-spacing: -0.02em">Calibration</h1><p style="margin: 0; max-width: 780px; font-size: 15px; line-height: 1.6; color: #3A4856; text-wrap: pretty">{{text.anchors}} put the run on the AIR and VPDB scales. Accepted values are regressed on measured ones and the line is applied directly, never inverted. Samples outside the anchors are extrapolated, and their uncertainty grows with the distance.</p></sc-if>
-<sc-if value="{{is.elem}}"><h1 style="margin: 0; font-size: clamp(28px, 3vw, 36px); line-height: 1.12; font-weight: 600; letter-spacing: -0.02em">Elemental content</h1><p style="margin: 0; max-width: 780px; font-size: 15px; line-height: 1.6; color: #3A4856; text-wrap: pretty">A k-factor fitted to every weighed standard turns peak area into micrograms of N and C. When sensitivity moves through a run, the drift monitors read high or low in %N and %C; the correction divides each position by the monitors’ factor there, interpolated between monitors and held flat beyond the first and last. On Auto it applies when a monitor is off by more than {{text.elemGate}}%. Select a monitor to leave it out.</p></sc-if>
-<sc-if value="{{is.unc}}"><h1 style="margin: 0; font-size: clamp(28px, 3vw, 36px); line-height: 1.12; font-weight: 600; letter-spacing: -0.02em">Uncertainty</h1><p style="margin: 0; max-width: 780px; font-size: 15px; line-height: 1.6; color: #3A4856; text-wrap: pretty">Each value carries a standard uncertainty u from the anchors’ certified values, the standard errors of their measured means, and single-analysis repeatability, propagated through the calibration line as a Kragten spreadsheet would. U = {{text.k}}u. It does not include the blank, linearity, or drift corrections, or how one run compares with another.</p></sc-if>
-<sc-if value="{{is.qc}}"><h1 style="margin: 0; font-size: clamp(28px, 3vw, 36px); line-height: 1.12; font-weight: 600; letter-spacing: -0.02em">Quality checks</h1><p style="margin: 0; max-width: 780px; font-size: 15px; line-height: 1.6; color: #3A4856; text-wrap: pretty">Checks that change no value but say how far to trust them. Caution when reversing a linearity or drift choice would move a sample by more than U, or when a monitor used for elemental content is off by more than 10%; Note for anything else worth a look.</p></sc-if>
-<sc-if value="{{is.results}}"><h1 style="margin: 0; font-size: clamp(28px, 3vw, 36px); line-height: 1.12; font-weight: 600; letter-spacing: -0.02em">Results</h1><p style="margin: 0; max-width: 780px; font-size: 15px; line-height: 1.6; color: #3A4856; text-wrap: pretty">Corrected values for every sample, with U (k = {{text.k}}), %N, %C, and C:N. Select a row or a point to see how its value was reached.</p></sc-if>
-</div>
-<div style="display: flex; flex-wrap: wrap; gap: 8px">
-<button type="button" onClick="{{flow.prev.pick}}" style="font: inherit; font-size: 14px; font-weight: 600; min-height: 44px; padding: 10px 16px; border: 1px solid #C3CDD6; border-radius: 10px; background: #FFFFFF; color: #0E1A26; cursor: pointer" style-hover="border-color: #0E1A26">{{flow.prev.t}}</button>
-<button type="button" onClick="{{flow.next.pick}}" disabled="{{flow.next.busy}}" style="font: inherit; font-size: 14px; font-weight: 600; min-height: 44px; padding: 10px 18px; border: 0; border-radius: 10px; background: #0E1A26; color: #FFFFFF; cursor: pointer" style-hover="background: #22374B">{{flow.next.t}}</button>
-</div>
-</div>
-
-<sc-if value="{{flow.hasCtrl}}">
-<section aria-label="Decisions" style="padding: 16px 18px; background: #FFFFFF; border: 1px solid #D8DFE6; border-radius: 12px; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr)); gap: 16px 32px">
-<sc-for list="{{flow.ctrl}}" as="k">
-<div style="min-width: 0; display: flex; flex-direction: column; gap: 10px">
-<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px">
-<span style="min-width: 116px; font-size: 14px; font-weight: 600">{{k.label}}</span>
-<div role="group" aria-label="{{k.label}}" style="display: inline-flex; flex-wrap: wrap; gap: 2px; padding: 3px; background: #EEF2F5; border-radius: 9px">
-<sc-for list="{{k.opts}}" as="o"><button type="button" onClick="{{o.pick}}" aria-pressed="{{o.pressed}}" style="font: inherit; font-size: 13px; font-weight: 600; min-height: 36px; padding: 7px 14px; border: 0; border-radius: 7px; background: {{o.bg}}; color: {{o.fg}}; cursor: pointer">{{o.t}}</button></sc-for>
-</div>
-</div>
-<sc-for list="{{k.lines}}" as="l"><div style="display: flex; align-items: baseline; gap: 8px; font-size: 13px; line-height: 1.5; color: #3A4856"><span style="flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: {{l.dot}}"></span><span>{{l.t}}</span></div></sc-for>
-</div>
-</sc-for>
-</section>
-</sc-if>
-
-<sc-if value="{{is.step}}">
-<section aria-label="The sequence" style="padding: 14px 18px 12px; background: #FFFFFF; border: 1px solid #D8DFE6; border-radius: 12px; display: flex; flex-direction: column; gap: 10px">
-<div style="display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 18px">
-<h2 style="margin: 0; font-size: 14px; font-weight: 600">The sequence <span style="font-weight: 400; color: #4A5866">Bar height is the N2 peak area on a log scale; select a bar to inspect it.</span></h2>
-<div style="display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: #3A4856"><sc-for list="{{flow.legend}}" as="l"><span style="display: inline-flex; align-items: center; gap: 6px"><span style="width: 9px; height: 9px; border-radius: 2px; background: {{l.bg}}"></span>{{l.t}}</span></sc-for></div>
-</div>
-<div style="display: flex; align-items: flex-end; gap: 2px; height: 64px">
-<sc-for list="{{flow.ribbon}}" as="b"><button type="button" onClick="{{b.pick}}" title="{{b.label}}" aria-label="{{b.label}}" style="flex: 1 1 0; min-width: 0; height: 64px; padding: 0; border: 0; border-radius: 3px; background: {{b.sbg}}; display: flex; align-items: flex-end; cursor: pointer" style-hover="background: #E3E9EF"><span style="display: block; width: 100%; height: {{b.h}}px; background: {{b.bg}}; opacity: {{b.op}}; border-radius: 2px 2px 0 0"></span></button></sc-for>
-</div>
-<div style="display: flex; justify-content: space-between; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 11px; color: #5B6876"><span>{{flow.ribbonStart}}</span><span>{{flow.ribbonEnd}}</span></div>
-</section>
-</sc-if>
-
-<sc-if value="{{is.setup}}">
-<section aria-label="Standards table" style="background: #FFFFFF; border: 1px solid #D8DFE6; border-radius: 12px; overflow: hidden">
-<div style="padding: 16px 18px 10px; display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 16px">
-<h2 style="margin: 0; font-size: 15px; font-weight: 600">Standards table</h2>
-<span style="font-size: 12.5px; color: #4A5866">{{flow.stdSource}} Accepted δ in ‰, u is 1 SD. Faded rows match nothing in this run.</span>
-</div>
-<div style="overflow-x: auto">
-<div role="table" style="min-width: 780px; font-size: 13px">
-<div role="row" style="display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1.2fr) repeat(4, minmax(0, 0.75fr)) minmax(0, 1fr) minmax(0, 0.8fr); gap: 10px; padding: 8px 18px; background: #F4F6F8; border-top: 1px solid #E6EBF0; border-bottom: 1px solid #E6EBF0; font-size: 12px; font-weight: 600; color: #4A5866"><span role="columnheader">Match text</span><span role="columnheader">Role</span><span role="columnheader">δ¹³C</span><span role="columnheader">δ¹⁵N</span><span role="columnheader">%C</span><span role="columnheader">%N</span><span role="columnheader">u(δ¹³C), u(δ¹⁵N)</span><span role="columnheader">Positions</span></div>
-<sc-for list="{{flow.setupRows}}" as="r"><div role="row" style="display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1.2fr) repeat(4, minmax(0, 0.75fr)) minmax(0, 1fr) minmax(0, 0.8fr); gap: 10px; padding: 8px 18px; border-bottom: 1px solid #EEF1F4; opacity: {{r.op}}"><span role="cell" style="font-weight: 500">{{r.text}}</span><span role="cell" style="display: inline-flex; align-items: center; gap: 7px"><span style="flex: 0 0 auto; width: 9px; height: 9px; border-radius: 2px; background: {{r.bg}}"></span>{{r.role}}</span><span role="cell" style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12.5px">{{r.d13}}</span><span role="cell" style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12.5px">{{r.d15}}</span><span role="cell" style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12.5px">{{r.pc}}</span><span role="cell" style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12.5px">{{r.pn}}</span><span role="cell" style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12.5px">{{r.u}}</span><span role="cell" style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12.5px; font-weight: {{r.fw}}">{{r.n}}</span></div></sc-for>
-</div>
-</div>
-</section>
-</sc-if>
-
-<sc-if value="{{flow.hasChecks}}">
-<section aria-label="Checks" style="background: #FFFFFF; border: 1px solid #D8DFE6; border-radius: 12px; padding: 4px 0">
-<sc-for list="{{flow.checks}}" as="k"><div style="display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px 16px; padding: 13px 18px; border-bottom: 1px solid #EEF1F4"><span style="flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px; min-width: 96px; box-sizing: border-box; padding: 3px 10px 3px 5px; border-radius: 999px; background: {{k.bg}}; color: {{k.fg}}; font-size: 12px; font-weight: 600"><svg width="18" height="18" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="1.6"></circle><path d="{{k.icon}}" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"></path></svg>{{k.label}}</span><div style="flex: 1 1 320px; min-width: 0; display: flex; flex-direction: column; gap: 2px"><strong style="font-size: 14px; font-weight: 600">{{k.title}}</strong><span style="font-size: 13px; line-height: 1.55; color: #3A4856">{{k.t}}</span></div></div></sc-for>
-</section>
-</sc-if>
-
-<sc-if value="{{flow.hasCharts}}">
-<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); gap: 20px">
-<sc-for list="{{flow.charts}}" as="c">
-<figure style="margin: 0; min-width: 0; background: #FFFFFF; border: 1px solid #D8DFE6; border-radius: 12px; padding: 16px 18px 14px; display: flex; flex-direction: column; gap: 10px">
-<div style="display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 6px 12px">
-<div style="flex: 1 1 240px; min-width: 0; display: flex; flex-direction: column; gap: 2px">
-<h3 style="margin: 0; font-size: 15px; font-weight: 600; line-height: 1.35">{{c.title}}</h3>
-<span style="font-size: 12.5px; line-height: 1.45; color: #5B6876">{{c.sub}}</span>
-</div>
-<sc-if value="{{c.hasBadge}}"><span style="flex: 0 0 auto; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; background: {{c.badge.bg}}; color: {{c.badge.fg}}">{{c.badge.text}}</span></sc-if>
-</div>
-<sc-if value="{{c.full}}">
-<span style="font-size: 12px; color: #3A4856">{{c.yLabel}}</span>
-<div style="position: relative; width: 100%; aspect-ratio: {{c.ar}}; margin-bottom: 18px">
-<svg viewBox="{{c.vb}}" preserveAspectRatio="none" aria-hidden="true" style="position: absolute; left: 0; top: 0; width: 100%; height: 100%; overflow: visible">
-<path d="{{c.s0.d}}" fill="{{c.s0.f}}" stroke="{{c.s0.s}}" stroke-width="{{c.s0.w}}" stroke-dasharray="{{c.s0.da}}"></path>
-<path d="{{c.s1.d}}" fill="{{c.s1.f}}" stroke="{{c.s1.s}}" stroke-width="{{c.s1.w}}" stroke-dasharray="{{c.s1.da}}"></path>
-<path d="{{c.s2.d}}" fill="{{c.s2.f}}" stroke="{{c.s2.s}}" stroke-width="{{c.s2.w}}" stroke-dasharray="{{c.s2.da}}"></path>
-<path d="{{c.s3.d}}" fill="{{c.s3.f}}" stroke="{{c.s3.s}}" stroke-width="{{c.s3.w}}" stroke-dasharray="{{c.s3.da}}"></path>
-<path d="{{c.s4.d}}" fill="{{c.s4.f}}" stroke="{{c.s4.s}}" stroke-width="{{c.s4.w}}" stroke-dasharray="{{c.s4.da}}"></path>
-<path d="{{c.s5.d}}" fill="{{c.s5.f}}" stroke="{{c.s5.s}}" stroke-width="{{c.s5.w}}" stroke-dasharray="{{c.s5.da}}"></path>
-<path d="{{c.s6.d}}" fill="{{c.s6.f}}" stroke="{{c.s6.s}}" stroke-width="{{c.s6.w}}" stroke-dasharray="{{c.s6.da}}"></path>
-<path d="{{c.s7.d}}" fill="{{c.s7.f}}" stroke="{{c.s7.s}}" stroke-width="{{c.s7.w}}" stroke-dasharray="{{c.s7.da}}"></path>
-<path d="{{c.s8.d}}" fill="{{c.s8.f}}" stroke="{{c.s8.s}}" stroke-width="{{c.s8.w}}" stroke-dasharray="{{c.s8.da}}"></path>
-<path d="{{c.s9.d}}" fill="{{c.s9.f}}" stroke="{{c.s9.s}}" stroke-width="{{c.s9.w}}" stroke-dasharray="{{c.s9.da}}"></path>
-<path d="{{c.s10.d}}" fill="{{c.s10.f}}" stroke="{{c.s10.s}}" stroke-width="{{c.s10.w}}" stroke-dasharray="{{c.s10.da}}"></path>
-<path d="{{c.s11.d}}" fill="{{c.s11.f}}" stroke="{{c.s11.s}}" stroke-width="{{c.s11.w}}" stroke-dasharray="{{c.s11.da}}"></path>
-</svg>
-<sc-for list="{{c.yl}}" as="t"><span style="position: absolute; left: {{t.x}}%; top: {{t.y}}%; transform: translate(calc(-100% - 7px), -50%); font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 11px; color: #5B6876; white-space: nowrap">{{t.t}}</span></sc-for>
-<sc-for list="{{c.xl}}" as="t"><span style="position: absolute; left: {{t.x}}%; top: {{t.y}}%; transform: translate(-50%, 6px); font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 11px; color: #5B6876; white-space: nowrap">{{t.t}}</span></sc-for>
-<sc-for list="{{c.notes}}" as="t"><span style="position: absolute; left: {{t.x}}%; top: {{t.y}}%; transform: {{t.tf}}; font-size: 11.5px; font-weight: 600; color: {{t.c}}; white-space: nowrap; pointer-events: none">{{t.t}}</span></sc-for>
-<sc-for list="{{c.hits}}" as="h"><button type="button" onClick="{{h.pick}}" title="{{h.label}}" aria-label="{{h.label}}" style="position: absolute; left: {{h.x}}%; top: {{h.y}}%; width: 28px; height: 28px; margin: -14px 0 0 -14px; padding: 0; border: 0; border-radius: 50%; background: transparent; cursor: pointer" style-hover="background: rgba(14, 26, 38, 0.08)"></button></sc-for>
-</div>
-<div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 16px">
-<div style="display: flex; flex-wrap: wrap; gap: 4px 14px"><sc-for list="{{c.legend}}" as="l"><span style="display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: #3A4856"><svg width="22" height="12" viewBox="0 0 22 12" aria-hidden="true"><path d="{{l.d}}" fill="{{l.f}}" stroke="{{l.s}}" stroke-width="{{l.w}}" stroke-dasharray="{{l.da}}"></path></svg>{{l.label}}</span></sc-for></div>
-<span style="font-size: 12px; color: #3A4856">{{c.xLabel}}</span>
-</div>
-</sc-if>
-<sc-if value="{{c.empty}}"><div style="display: grid; place-items: center; min-height: 240px; padding: 24px; border: 1px dashed #C3CDD6; border-radius: 10px; background: #F6F8FA; color: #3A4856; font-size: 13.5px; line-height: 1.55; text-align: center">{{c.emptyText}}</div></sc-if>
-</figure>
-</sc-for>
-</div>
-</sc-if>
-
-<sc-if value="{{is.results}}">
-<div style="display: flex; flex-wrap: wrap; gap: 8px"><sc-for list="{{res.chips}}" as="k"><span style="padding: 5px 11px; border-radius: 999px; background: #FFFFFF; border: 1px solid #D8DFE6; font-size: 12.5px; color: #22303D">{{k.t}}</span></sc-for></div>
-<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(460px, 100%), 1fr)); align-items: start; gap: 20px">
-<sc-for list="{{res.charts}}" as="c">
-<figure style="margin: 0; min-width: 0; background: #FFFFFF; border: 1px solid #D8DFE6; border-radius: 12px; padding: 16px 18px 14px; display: flex; flex-direction: column; gap: 10px">
-<div style="display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 6px 12px">
-<div style="flex: 1 1 240px; min-width: 0; display: flex; flex-direction: column; gap: 2px">
-<h3 style="margin: 0; font-size: 15px; font-weight: 600; line-height: 1.35">{{c.title}}</h3>
-<span style="font-size: 12.5px; line-height: 1.45; color: #5B6876">{{c.sub}}</span>
-</div>
-<sc-if value="{{c.hasBadge}}"><span style="flex: 0 0 auto; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; background: {{c.badge.bg}}; color: {{c.badge.fg}}">{{c.badge.text}}</span></sc-if>
-</div>
-<sc-if value="{{c.full}}">
-<span style="font-size: 12px; color: #3A4856">{{c.yLabel}}</span>
-<div style="position: relative; width: 100%; aspect-ratio: {{c.ar}}; margin-bottom: 18px">
-<svg viewBox="{{c.vb}}" preserveAspectRatio="none" aria-hidden="true" style="position: absolute; left: 0; top: 0; width: 100%; height: 100%; overflow: visible">
-<path d="{{c.s0.d}}" fill="{{c.s0.f}}" stroke="{{c.s0.s}}" stroke-width="{{c.s0.w}}" stroke-dasharray="{{c.s0.da}}"></path>
-<path d="{{c.s1.d}}" fill="{{c.s1.f}}" stroke="{{c.s1.s}}" stroke-width="{{c.s1.w}}" stroke-dasharray="{{c.s1.da}}"></path>
-<path d="{{c.s2.d}}" fill="{{c.s2.f}}" stroke="{{c.s2.s}}" stroke-width="{{c.s2.w}}" stroke-dasharray="{{c.s2.da}}"></path>
-<path d="{{c.s3.d}}" fill="{{c.s3.f}}" stroke="{{c.s3.s}}" stroke-width="{{c.s3.w}}" stroke-dasharray="{{c.s3.da}}"></path>
-<path d="{{c.s4.d}}" fill="{{c.s4.f}}" stroke="{{c.s4.s}}" stroke-width="{{c.s4.w}}" stroke-dasharray="{{c.s4.da}}"></path>
-<path d="{{c.s5.d}}" fill="{{c.s5.f}}" stroke="{{c.s5.s}}" stroke-width="{{c.s5.w}}" stroke-dasharray="{{c.s5.da}}"></path>
-<path d="{{c.s6.d}}" fill="{{c.s6.f}}" stroke="{{c.s6.s}}" stroke-width="{{c.s6.w}}" stroke-dasharray="{{c.s6.da}}"></path>
-<path d="{{c.s7.d}}" fill="{{c.s7.f}}" stroke="{{c.s7.s}}" stroke-width="{{c.s7.w}}" stroke-dasharray="{{c.s7.da}}"></path>
-<path d="{{c.s8.d}}" fill="{{c.s8.f}}" stroke="{{c.s8.s}}" stroke-width="{{c.s8.w}}" stroke-dasharray="{{c.s8.da}}"></path>
-<path d="{{c.s9.d}}" fill="{{c.s9.f}}" stroke="{{c.s9.s}}" stroke-width="{{c.s9.w}}" stroke-dasharray="{{c.s9.da}}"></path>
-<path d="{{c.s10.d}}" fill="{{c.s10.f}}" stroke="{{c.s10.s}}" stroke-width="{{c.s10.w}}" stroke-dasharray="{{c.s10.da}}"></path>
-<path d="{{c.s11.d}}" fill="{{c.s11.f}}" stroke="{{c.s11.s}}" stroke-width="{{c.s11.w}}" stroke-dasharray="{{c.s11.da}}"></path>
-</svg>
-<sc-for list="{{c.yl}}" as="t"><span style="position: absolute; left: {{t.x}}%; top: {{t.y}}%; transform: translate(calc(-100% - 7px), -50%); font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 11px; color: #5B6876; white-space: nowrap">{{t.t}}</span></sc-for>
-<sc-for list="{{c.xl}}" as="t"><span style="position: absolute; left: {{t.x}}%; top: {{t.y}}%; transform: translate(-50%, 6px); font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 11px; color: #5B6876; white-space: nowrap">{{t.t}}</span></sc-for>
-<sc-for list="{{c.notes}}" as="t"><span style="position: absolute; left: {{t.x}}%; top: {{t.y}}%; transform: {{t.tf}}; font-size: 11.5px; font-weight: 600; color: {{t.c}}; white-space: nowrap; pointer-events: none">{{t.t}}</span></sc-for>
-<sc-for list="{{c.hits}}" as="h"><button type="button" onClick="{{h.pick}}" title="{{h.label}}" aria-label="{{h.label}}" style="position: absolute; left: {{h.x}}%; top: {{h.y}}%; width: 28px; height: 28px; margin: -14px 0 0 -14px; padding: 0; border: 0; border-radius: 50%; background: transparent; cursor: pointer" style-hover="background: rgba(14, 26, 38, 0.08)"></button></sc-for>
-</div>
-<div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 16px">
-<div style="display: flex; flex-wrap: wrap; gap: 4px 14px"><sc-for list="{{c.legend}}" as="l"><span style="display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: #3A4856"><svg width="22" height="12" viewBox="0 0 22 12" aria-hidden="true"><path d="{{l.d}}" fill="{{l.f}}" stroke="{{l.s}}" stroke-width="{{l.w}}" stroke-dasharray="{{l.da}}"></path></svg>{{l.label}}</span></sc-for></div>
-<span style="font-size: 12px; color: #3A4856">{{c.xLabel}}</span>
-</div>
-</sc-if>
-<sc-if value="{{c.empty}}"><div style="display: grid; place-items: center; min-height: 240px; padding: 24px; border: 1px dashed #C3CDD6; border-radius: 10px; background: #F6F8FA; color: #3A4856; font-size: 13.5px; line-height: 1.55; text-align: center">{{c.emptyText}}</div></sc-if>
-</figure>
-</sc-for>
-<section aria-label="Files and methods" style="min-width: 0; padding: 16px 18px; background: #FFFFFF; border: 1px solid #D8DFE6; border-radius: 12px; display: flex; flex-direction: column; gap: 14px">
-<h2 style="margin: 0; font-size: 15px; font-weight: 600">Take it with you</h2>
-<div style="display: flex; flex-direction: column; gap: 8px">
-<sc-for list="{{res.downloads}}" as="x"><button type="button" onClick="{{x.pick}}" disabled="{{x.busy}}" aria-busy="{{x.aria}}" style="font: inherit; display: flex; align-items: center; gap: 12px; padding: 10px 12px; text-align: left; background: #FFFFFF; border: 1px solid #D8DFE6; border-radius: 10px; color: #0E1A26; cursor: {{x.cursor}}" style-hover="border-color: #0E1A26"><svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true" style="flex: 0 0 auto"><path d="M10 3v10M5.5 9l4.5 4.5L14.5 9M4 16.5h12" fill="none" stroke="#0E1A26" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"></path></svg><span style="min-width: 0; display: flex; flex-direction: column"><span style="font-size: 14px; font-weight: 600">{{x.t}}</span><span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 11.5px; color: #4A5866; overflow-wrap: anywhere">{{x.sub}}</span><span style="font-size: 12px; color: #5B6876">{{x.note}}</span></span></button></sc-for>
-</div>
-<div style="display: flex; flex-direction: column; gap: 6px">
-<h3 style="margin: 0; font-size: 13.5px; font-weight: 600">Methods paragraph, written from the choices above</h3>
-<p style="margin: 0; padding: 12px 14px; background: #F6F8FA; border: 1px solid #E6EBF0; border-radius: 9px; font-size: 13px; line-height: 1.6; color: #22303D">{{res.methods}}</p>
-</div>
-</section>
-</div>
-<section aria-label="Samples" style="background: #FFFFFF; border: 1px solid #D8DFE6; border-radius: 12px; overflow: hidden">
-<div style="padding: 14px 18px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px">
-<h2 style="margin: 0; font-size: 15px; font-weight: 600">Samples</h2>
-<div role="group" aria-label="Filter the samples" style="display: flex; flex-wrap: wrap; gap: 6px"><sc-for list="{{res.filters}}" as="f"><button type="button" onClick="{{f.pick}}" style="font: inherit; font-size: 12.5px; font-weight: 600; min-height: 34px; padding: 5px 12px; border: 1px solid {{f.bd}}; border-radius: 999px; background: {{f.bg}}; color: {{f.fg}}; cursor: pointer">{{f.t}}</button></sc-for></div>
-</div>
-<div style="overflow-x: auto">
-<div role="table" style="min-width: 1020px; font-size: 13px">
-<div role="row" style="display: grid; grid-template-columns: 48px minmax(0, 1.2fr) repeat(9, minmax(0, 0.7fr)) minmax(0, 2fr); gap: 8px; padding: 8px 18px; background: #F4F6F8; border-top: 1px solid #E6EBF0; border-bottom: 1px solid #E6EBF0; font-size: 12px; font-weight: 600; color: #4A5866"><span role="columnheader">Pos.</span><span role="columnheader">Sample</span><span role="columnheader">mg</span><span role="columnheader">N2, Vs</span><span role="columnheader">δ¹⁵N</span><span role="columnheader">U</span><span role="columnheader">δ¹³C</span><span role="columnheader">U</span><span role="columnheader">%N</span><span role="columnheader">%C</span><span role="columnheader">C:N</span><span role="columnheader">Flags</span></div>
-<sc-for list="{{res.rows}}" as="r"><button type="button" onClick="{{r.pick}}" style="font: inherit; width: 100%; display: grid; grid-template-columns: 48px minmax(0, 1.2fr) repeat(9, minmax(0, 0.7fr)) minmax(0, 2fr); gap: 8px; align-items: center; padding: 7px 18px; text-align: left; background: {{r.sbg}}; border: 0; border-bottom: 1px solid #EEF1F4; color: #0E1A26; cursor: pointer" style-hover="background: #F2F6F9"><span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; color: #4A5866">{{r.r}}</span><span style="font-weight: 600">{{r.id}}</span><span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12.5px">{{r.amt}}</span><span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12.5px">{{r.aN}}</span><span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12.5px; font-weight: 600; color: #005A8C">{{r.dN}}</span><span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; color: #4A5866">{{r.UN}}</span><span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12.5px; font-weight: 600; color: #A84600">{{r.dC}}</span><span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; color: #4A5866">{{r.UC}}</span><span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12.5px">{{r.pN}}</span><span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12.5px">{{r.pC}}</span><span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12.5px">{{r.cn}}</span><span style="display: flex; flex-wrap: wrap; gap: 4px"><sc-for list="{{r.chips}}" as="k"><span title="{{k.title}}" style="padding: 1px 7px; border-radius: 5px; background: #EEF2F5; color: #3A4856; font-size: 11.5px; white-space: nowrap">{{k.t}}</span></sc-for></span></button></sc-for>
-</div>
-</div>
-</section>
-</sc-if>
-
-<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(330px, 100%), 1fr)); align-items: start; gap: 20px">
-<sc-if value="{{flow.hasStats}}">
-<section aria-label="The numbers" style="min-width: 0; padding: 16px 18px; background: #FFFFFF; border: 1px solid #D8DFE6; border-radius: 12px; display: flex; flex-direction: column; gap: 8px">
-<h2 style="margin: 0; font-size: 15px; font-weight: 600">The numbers</h2>
-<div role="table" style="display: flex; flex-direction: column; font-size: 13px">
-<div role="row" style="display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) minmax(0, 1fr); gap: 10px; padding: 6px 0; border-bottom: 1px solid #D8DFE6; font-size: 12px; font-weight: 600; color: #4A5866"><span role="columnheader"></span><span role="columnheader">{{flow.statA}}</span><span role="columnheader">{{flow.statB}}</span></div>
-<sc-for list="{{flow.stats.rows}}" as="r"><div role="row" style="display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) minmax(0, 1fr); gap: 10px; padding: 7px 0; border-bottom: 1px solid #EEF1F4"><span role="rowheader" style="color: #3A4856">{{r.k}}</span><span role="cell" style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12.5px; overflow-wrap: anywhere">{{r.a}}</span><span role="cell" style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12.5px; overflow-wrap: anywhere">{{r.b}}</span></div></sc-for>
-</div>
-</section>
-</sc-if>
-<sc-if value="{{flow.hasEffect}}">
-<section aria-label="{{flow.effect.title}}" style="min-width: 0; padding: 16px 18px; background: #FFFFFF; border: 1px solid #D8DFE6; border-radius: 12px; display: flex; flex-direction: column; gap: 10px">
-<h2 style="margin: 0; font-size: 15px; font-weight: 600">{{flow.effect.title}}</h2>
-<sc-for list="{{flow.effect.lines}}" as="l"><p style="margin: 0; font-size: 13.5px; line-height: 1.6; color: #22303D">{{l.t}}</p></sc-for>
-</section>
-</sc-if>
-<sc-if value="{{flow.hasBudget}}">
-<section aria-label="Where U comes from" style="min-width: 0; padding: 16px 18px; background: #FFFFFF; border: 1px solid #D8DFE6; border-radius: 12px; display: flex; flex-direction: column; gap: 10px">
-<h2 style="margin: 0; font-size: 15px; font-weight: 600">Where U comes from <span style="font-weight: 400; color: #4A5866">{{flow.budget.title}}, share of u²</span></h2>
-<sc-for list="{{flow.budget.rows}}" as="r"><div style="display: flex; flex-direction: column; gap: 5px; padding: 6px 0; border-bottom: 1px solid #EEF1F4"><span style="font-size: 13px; color: #22303D">{{r.k}}</span><div style="display: grid; grid-template-columns: 44px minmax(0, 1fr) 40px; align-items: center; gap: 8px; font-size: 12px; color: #4A5866"><span>δ¹⁵N</span><span style="height: 8px; border-radius: 4px; background: #E6EBF0; overflow: hidden"><span style="display: block; height: 100%; width: {{r.wn}}; background: #0072B2"></span></span><span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace">{{r.n}}</span></div><div style="display: grid; grid-template-columns: 44px minmax(0, 1fr) 40px; align-items: center; gap: 8px; font-size: 12px; color: #4A5866"><span>δ¹³C</span><span style="height: 8px; border-radius: 4px; background: #E6EBF0; overflow: hidden"><span style="display: block; height: 100%; width: {{r.wc}}; background: #D55E00"></span></span><span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace">{{r.c}}</span></div></div></sc-for>
-</section>
-</sc-if>
-<section aria-label="Selected position" style="min-width: 0; padding: 16px 18px; background: #FFFFFF; border: 1px solid #D8DFE6; border-radius: 12px; display: flex; flex-direction: column; gap: 12px">
-<div style="display: flex; flex-direction: column; gap: 2px">
-<span style="font-size: 11.5px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #5B6876">Selected</span>
-<h2 style="margin: 0; font-size: 19px; font-weight: 600; letter-spacing: -0.01em">{{flow.insp.title}}</h2>
-<span style="font-size: 12.5px; color: #4A5866">{{flow.insp.sub}}</span>
-</div>
-<dl style="margin: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 14px; font-size: 13px">
-<sc-for list="{{flow.insp.facts}}" as="f"><dt style="color: #4A5866">{{f.k}}</dt><dd style="margin: 0; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12.5px">{{f.v}}</dd></sc-for>
-</dl>
-<div role="table" aria-label="Correction chain" style="display: flex; flex-direction: column; font-size: 12.5px">
-<div role="row" style="display: grid; grid-template-columns: minmax(0, 1.5fr) repeat(4, minmax(min-content, 0.8fr)); gap: 6px; padding: 5px 0; border-bottom: 1px solid #D8DFE6; font-size: 11.5px; font-weight: 600; color: #4A5866"><span role="columnheader">Step</span><span role="columnheader">δ¹⁵N</span><span role="columnheader">change</span><span role="columnheader">δ¹³C</span><span role="columnheader">change</span></div>
-<sc-for list="{{flow.insp.chain}}" as="r"><div role="row" style="display: grid; grid-template-columns: minmax(0, 1.5fr) repeat(4, minmax(min-content, 0.8fr)); gap: 6px; padding: 5px 0; border-bottom: 1px solid #EEF1F4"><span role="rowheader" style="color: #3A4856">{{r.stage}}</span><span role="cell" style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; color: #005A8C">{{r.n}}</span><span role="cell" style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; color: #5B6876">{{r.dn}}</span><span role="cell" style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; color: #A84600">{{r.c}}</span><span role="cell" style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; color: #5B6876">{{r.dc}}</span></div></sc-for>
-</div>
-<dl style="margin: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 14px; font-size: 13px">
-<sc-for list="{{flow.insp.tail}}" as="f"><dt style="color: #4A5866">{{f.k}}</dt><dd style="margin: 0; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12.5px">{{f.v}}</dd></sc-for>
-</dl>
-<sc-if value="{{flow.insp.hasFlags}}"><div style="display: flex; flex-wrap: wrap; gap: 6px"><sc-for list="{{flow.insp.flags}}" as="g"><span style="padding: 3px 9px; border-radius: 6px; background: #FBEFD6; color: #6E4700; font-size: 12px">{{g.t}}</span></sc-for></div></sc-if>
-<sc-if value="{{flow.insp.noFlags}}"><span style="font-size: 12.5px; color: #4A5866">No flags at this position.</span></sc-if>
-</section>
-</div>
-
-<div style="display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; padding-top: 14px; border-top: 1px solid #D8DFE6">
-<button type="button" onClick="{{flow.prev.pick}}" style="font: inherit; font-size: 14px; font-weight: 600; min-height: 44px; padding: 10px 16px; border: 1px solid #C3CDD6; border-radius: 10px; background: #FFFFFF; color: #0E1A26; cursor: pointer" style-hover="border-color: #0E1A26">{{flow.prev.t}}</button>
-<button type="button" onClick="{{flow.next.pick}}" disabled="{{flow.next.busy}}" style="font: inherit; font-size: 14px; font-weight: 600; min-height: 44px; padding: 10px 18px; border: 0; border-radius: 10px; background: #0E1A26; color: #FFFFFF; cursor: pointer" style-hover="background: #22374B">{{flow.next.t}}</button>
-</div>
-</div>
-</div>
-</sc-if>
-
 </main>
-<footer style="max-width: 1360px; margin: 0 auto; box-sizing: border-box; padding: 0 24px 40px; font-size: 12px; line-height: 1.5; color: #4A5866">{{footer}}</footer>
-</div>
-</template>
+
+<footer>
+<div class="bar">isoharness. Uploaded files are deleted as soon as they are processed, and no results are kept on the server. MIT license.</div>
+</footer>
 </body>
 </html>
