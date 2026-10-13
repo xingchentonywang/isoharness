@@ -122,9 +122,8 @@ CONFIGS = {
     "off": config_from_dict({"elemental_correction": "Off", "balance_u_mg": 0.001}),
     "k3_excluded": config_from_dict({"coverage_k": 3.0, "exclude_elemental": [18, 55]}),
 }
-RESULTS = {"U(%C)": "U_pct_c", "U(%N)": "U_pct_n", "U(C:N molar)": "U_cn_molar", "U(C:N mass)": "U_cn_mass",
-           "u(%C)": "u_pct_c", "u(%N)": "u_pct_n", "u(C:N molar)": "u_cn_molar", "u(C:N mass)": "u_cn_mass",
-           "U(d13C)": "U_d13c", "U(d15N)": "U_d15n", "%N": "pct_n_reported", "C:N mass": "cn_mass_reported"}
+RESULTS = {"1σ(%C)": "u_pct_c", "1σ(%N)": "u_pct_n", "1σ(C:N molar)": "u_cn_molar", "1σ(C:N mass)": "u_cn_mass",
+           "1σ(d13C)": "u_d13c", "1σ(d15N)": "u_d15n", "%N": "pct_n_reported", "C:N mass": "cn_mass_reported"}
 FITS = {"n": range(303, 312), "c": range(316, 325)}
 TERMS = ("n_monitors", "s_rep", "weighing_monitors", "s_inst", "cert_scale", "n_anchors", "anchor_rms",
          "anchor_cert", "trueness")
@@ -161,10 +160,12 @@ def test_workbook_agrees_with_engine(computed, name):
     rs, ft, qc = wb["Results"], wb["Fits"], wb["QC"]
     head = {str(rs.cell(4, c).value).split(",")[0]: c for c in range(1, rs.max_column + 1)}
     k = CONFIGS[name].coverage_k
-    assert rs.cell(4, head["U(%N)"]).value == f"U(%N), k={k:.1f}"
     order = [str(rs.cell(4, c).value).split(",")[0] for c in range(5, 17)]
-    assert order == ["%C", "U(%C)", "%N", "U(%N)", "C:N molar", "U(C:N molar)", "C:N mass", "U(C:N mass)",
-                     "d13C (permil)", "U(d13C)", "d15N (permil)", "U(d15N)"]
+    assert order == ["%C", "1σ(%C)", "%N", "1σ(%N)", "C:N molar", "1σ(C:N molar)", "C:N mass", "1σ(C:N mass)",
+                     "d13C (permil)", "1σ(d13C)", "d15N (permil)", "1σ(d15N)"]
+    assert [rs.cell(4, c).value for c in range(21, 25)] == ["Elemental drift factor N", "Elemental drift factor C",
+                                                            "%C as measured", "%N as measured"]
+    assert rs.cell(4, 25).value is None                       # 1.4.5: no block of u columns after these
     compared = 0
     for p in positions:
         for h, attr in RESULTS.items():
@@ -184,6 +185,7 @@ def test_workbook_agrees_with_engine(computed, name):
                  and abs(p.pct_n_reported - p.pct_n) <= p.U_pct_n)
     total = sum(1 for p in positions if p.role == "Anchor" and p.U_pct_n is not None)
     assert qc["B155"].value == f"{within} of {total}"
+    assert qc["A155"].value == f"Anchors within {k:g}σ, %N"
     errors = [c.coordinate for s in (rs, ft, qc) for row in s.iter_rows() for c in row
               if isinstance(c.value, str) and c.value.startswith("#") and c.value[1:4].isupper()]
     assert not errors, errors[:5]

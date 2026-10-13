@@ -70,13 +70,14 @@ TITLES = {"inst": "Instrument performance", "setup": "Standards and roles", "bla
 # The step names the Back and Continue buttons use, where they differ from the headings.
 BUTTONS = dict(TITLES, inst="Instrument", setup="Setup")
 # Results screen column -> results table column, and the decimals the page shows.
-SHOWN = {"amt": ("Mass (mg)", 3), "dN": ("d15N (permil)", 2), "UN": ("U(d15N), k=2.0", 2),
-         "dC": ("d13C (permil)", 2), "UC": ("U(d13C), k=2.0", 2), "pN": ("%N", 2), "pC": ("%C", 2),
+SHOWN = {"amt": ("Mass (mg)", 3), "dN": ("d15N (permil)", 2), "UN": ("1sigma(d15N)", 2),
+         "dC": ("d13C (permil)", 2), "UC": ("1sigma(d13C)", 2), "pN": ("%N", 2), "pC": ("%C", 2),
          "cn": ("C:N molar", 1)}
 # Workbook Results sheet column -> results table column (as scripts/smoke.py reads it).
-BOOK = {5: "%C", 6: "U(%C), k=2.0", 7: "%N", 8: "U(%N), k=2.0", 9: "C:N molar", 10: "U(C:N molar), k=2.0",
-        13: "d13C (permil)", 14: "U(d13C), k=2.0", 15: "d15N (permil)", 16: "U(d15N), k=2.0",
-        21: "u(%C)", 22: "u(%N)", 25: "u(d13C)", 26: "u(d15N)"}
+BOOK = {5: "%C", 6: "1sigma(%C)", 7: "%N", 8: "1sigma(%N)", 9: "C:N molar", 10: "1sigma(C:N molar)",
+        11: "C:N mass", 12: "1sigma(C:N mass)", 13: "d13C (permil)", 14: "1sigma(d13C)", 15: "d15N (permil)",
+        16: "1sigma(d15N)", 21: "Elemental drift factor N", 22: "Elemental drift factor C", 23: "%C as measured",
+        24: "%N as measured"}
 # The decisions the test makes, and the drift monitors it leaves out.
 EXCL_N, EXCL_E = 18, 55
 
@@ -283,7 +284,7 @@ def main(argv=None):
             # ---- a lab configuration loaded after the upload is processed on the server again
             lab = work / "lab-config.json"
             lab.write_text(json.dumps({"blank_correction": "On", "coverage_k": 3.0}))
-            # (k = 3 on the results screen can only come from the server, through the port block's settings)
+            # (k = 3 on the uncertainty step can only come from the server, through the port block's settings)
             with page.expect_request(lambda r: r.url.endswith("/api/process") and r.method == "POST"):
                 page.set_input_files("#dc-config", str(lab))
             expect(page.get_by_text("The run was processed again with lab-config.json")).to_be_visible(timeout=30000)
@@ -295,9 +296,12 @@ def main(argv=None):
             page.locator("nav[aria-label='Correction steps'] button", has_text="Blank").click()
             heading("blank")
             expect(page.get_by_role("group", name="Blank correction").get_by_role("button", name="On")).to_have_attribute("aria-pressed", "true")
+            page.locator("nav[aria-label='Correction steps'] button", has_text="Uncertainty").click()
+            heading("unc")
+            expect(page.get_by_text("by more than their uncertainty, it uses 3σ")).to_be_visible()
             page.locator("nav[aria-label='Correction steps'] button", has_text="Results").click()
             heading("results")
-            expect(page.get_by_text("with U (k = 3), %N, %C, and C:N")).to_be_visible()
+            expect(page.get_by_text("with 1σ, %N, %C, and C:N")).to_be_visible()
             page.get_by_role("navigation", name="Main").get_by_role("button", name="EA-IRMS").click()
             with page.expect_request(lambda r: r.url.endswith("/api/process") and r.method == "POST"):
                 page.get_by_role("button", name="Use the package defaults").click()

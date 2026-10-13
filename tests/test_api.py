@@ -121,14 +121,17 @@ def test_results_csv_matches_the_engine(engine):
     for row, p in zip(rows, positions):
         assert int(row["Row"]) == p.row and row["Identifier"] == p.identifier
         for col, attr in (("d15N (permil)", "d15n_final"), ("d13C (permil)", "d13c_final"),
-                          ("U(d15N), k=2.0", "U_d15n"), ("%N", "pct_n_reported"),
-                          ("U(%N), k=2.0", "U_pct_n"), ("U(%C), k=2.0", "U_pct_c"),
-                          ("U(C:N molar), k=2.0", "U_cn_molar"), ("u(C:N mass)", "u_cn_mass")):
+                          ("1sigma(d15N)", "u_d15n"), ("%N", "pct_n_reported"),
+                          ("1sigma(%N)", "u_pct_n"), ("1sigma(%C)", "u_pct_c"),
+                          ("1sigma(C:N molar)", "u_cn_molar"), ("1sigma(C:N mass)", "u_cn_mass")):
             v = getattr(p, attr)
             assert (row[col] == "") == (v is None)
             if v is not None:
                 assert float(row[col]) == v
         assert row["Flags"] == "; ".join(p.flags)
+    assert list(rows[0])[16:] == ["Flags", "Rerun", "Why", "Suggested mass (mg)", "Elemental drift factor N",
+                                  "Elemental drift factor C", "%C as measured", "%N as measured"]
+    assert r.text.splitlines()[0].isascii()       # Excel reads a CSV without a byte-order mark as ANSI
 
 
 @pytest.mark.skipif(not SOFFICE, reason="needs LibreOffice")
@@ -144,9 +147,9 @@ def test_workbook_values_equal_the_engine(engine):
     compared = 0
     for p in positions:
         for col, attr in ((head["d13C (permil)"], "d13c_final"), (head["d15N (permil)"], "d15n_final"),
-                          (head["U(d13C), k=2.0"], "U_d13c"), (head["U(d15N), k=2.0"], "U_d15n"),
+                          (head["1σ(d13C)"], "u_d13c"), (head["1σ(d15N)"], "u_d15n"),
                           (head["%C"], "pct_c_reported"), (head["%N"], "pct_n_reported"),
-                          (head["U(%N), k=2.0"], "U_pct_n"), (head["U(C:N molar), k=2.0"], "U_cn_molar")):
+                          (head["1σ(%N)"], "u_pct_n"), (head["1σ(C:N molar)"], "u_cn_molar")):
             mine, theirs = getattr(p, attr), rs.cell(4 + p.row, col).value
             theirs = theirs if isinstance(theirs, (int, float)) else None
             assert (mine is None) == (theirs is None), (p.row, attr, mine, theirs)

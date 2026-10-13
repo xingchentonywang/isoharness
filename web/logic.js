@@ -440,8 +440,11 @@ class Component extends DCLogic {
 
   samples(M) { return M.P.filter((q) => q.role === 'S'); }
 
+  // 1.4.5: every uncertainty shown is 1σ (u); the checks count against k × 1σ (U), named kσ
+  kSig(M) { return this.num(M.settings.k) + 'σ'; }
+
   uSpan(S, el, d) {
-    const u = S.map((q) => q[el].U).filter((v) => v != null);
+    const u = S.map((q) => q[el].u).filter((v) => v != null);
     return u.length ? this.span(Math.min(...u), Math.max(...u), d) : 'none';
   }
 
@@ -796,7 +799,7 @@ class Component extends DCLogic {
 
   inspect(M, row, scr) {
     const q = M.P.find((p) => p.r === row) || M.P[0];
-    const R = this.roles(), k = this.num(M.settings.k);
+    const R = this.roles();
     const st = [['Raw, as exported', 'raw'], ['After blank', 'blank'], ['After linearity', 'lin'], ['After drift', 'drift'], ['Calibrated', 'fin']];
     const chain = st.map(([label, key], i) => {
       const pk = i ? st[i - 1][1] : null;
@@ -819,8 +822,8 @@ class Component extends DCLogic {
         { k: 'CO2 reference peak', v: q.raC != null ? this.fx(q.raC, 2) + ' Vs' : 'none' });
     }
     const tail = [
-      { k: 'U (k = ' + k + '), δ¹⁵N', v: q.n.U != null ? this.fx(q.n.U, 3) + '‰' : '' },
-      { k: 'U (k = ' + k + '), δ¹³C', v: q.c.U != null ? this.fx(q.c.U, 3) + '‰' : '' },
+      { k: '1σ, δ¹⁵N', v: q.n.u != null ? this.fx(q.n.u, 3) + '‰' : '' },
+      { k: '1σ, δ¹³C', v: q.c.u != null ? this.fx(q.c.u, 3) + '‰' : '' },
       { k: '%N measured, reported', v: q.pctNm != null ? this.fx(q.pctNm, 3) + ', ' + this.fx(q.pctN, 3) : '' },
       { k: '%C measured, reported', v: q.pctCm != null ? this.fx(q.pctCm, 2) + ', ' + this.fx(q.pctC, 2) : '' },
       { k: 'C:N, molar', v: q.cn != null ? this.fx(q.cn, 2) : '' },
@@ -1084,7 +1087,7 @@ class Component extends DCLogic {
       const sh = this.shift(M, Ma, el);
       if (!sh.n) continue;
       const ak = el === 'n' ? 'aN' : 'aC';
-      lines.push({ t: (Ma.blank[el].inForce ? 'Subtracting the blank' : 'Leaving the blank in') + ' would move sample ' + this.iso(el) + ' by ' + this.span(sh.lo, sh.hi, 2, true) + '‰, ' + sh.beyond + ' of ' + sh.n + ' by more than U.' });
+      lines.push({ t: (Ma.blank[el].inForce ? 'Subtracting the blank' : 'Leaving the blank in') + ' would move sample ' + this.iso(el) + ' by ' + this.span(sh.lo, sh.hi, 2, true) + '‰, ' + sh.beyond + ' of ' + sh.n + ' by more than ' + this.kSig(M) + '.' });
       const big = sh.big;
       if (big && Math.abs(big.d) > 0.5) {
         lines.push({ t: 'The largest change is ' + this.who(big.q) + ' (' + this.fs(big.d, 2) + '‰), whose ' + (el === 'n' ? 'N2' : 'CO2') + ' peak is '
@@ -1155,7 +1158,7 @@ class Component extends DCLogic {
       if (Ma.lin[el].inForce === on) continue;
       const sh = this.shift(M, Ma, el);
       if (!sh.n) continue;
-      lines.push({ t: (on ? 'Switching the ' + this.iso(el) + ' correction off' : 'Forcing the ' + this.iso(el) + ' correction on') + ' would move sample ' + this.iso(el) + ' by ' + this.span(sh.lo, sh.hi, 2, true) + '‰, ' + sh.beyond + ' of ' + sh.n + ' by more than U.' });
+      lines.push({ t: (on ? 'Switching the ' + this.iso(el) + ' correction off' : 'Forcing the ' + this.iso(el) + ' correction on') + ' would move sample ' + this.iso(el) + ' by ' + this.span(sh.lo, sh.hi, 2, true) + '‰, ' + sh.beyond + ' of ' + sh.n + ' by more than ' + this.kSig(M) + '.' });
     }
     if (!lines.length) lines.push({ t: lin.length < 3 ? 'With fewer than three size standards, no slope can be applied, so the switches change nothing.' : 'The switches change no sample in this run.' });
     return { ctrl, charts, stats, effect: { title: 'Effect of this choice', lines } };
@@ -1224,7 +1227,7 @@ class Component extends DCLogic {
       if (Ma.drift[el].inForce === Dr[el].inForce) continue;
       const sh = this.shift(M, Ma, el);
       if (!sh.n) continue;
-      lines.push({ t: (alt === 'On' ? 'Forcing drift on' : 'Switching drift off') + ' would move sample ' + this.iso(el) + ' by ' + this.span(sh.lo, sh.hi, 2, true) + '‰, ' + sh.beyond + ' of ' + sh.n + ' by more than U.' });
+      lines.push({ t: (alt === 'On' ? 'Forcing drift on' : 'Switching drift off') + ' would move sample ' + this.iso(el) + ' by ' + this.span(sh.lo, sh.hi, 2, true) + '‰, ' + sh.beyond + ' of ' + sh.n + ' by more than ' + this.kSig(M) + '.' });
     }
     if (Dr.n.outliers.length || Dr.c.outliers.length) lines.push({ t: 'With ' + this.words(mons.length) + ' monitors, leaving one out can make another look like an outlier. Leave a monitor out only when there is a known problem with its capsule or its weighing.' });
     if (!lines.length) lines.push({ t: Math.max(Dr.n.n, Dr.c.n) < 3 ? 'Fewer than three monitors are in the fit, so no drift slope can be applied.' : 'Reversing the switch changes no sample in this run.' });
@@ -1370,14 +1373,14 @@ class Component extends DCLogic {
   }
 
   vUnc(M, d, sel, H) {
-    const U = M.unc, run = this.state.run, k = M.settings.k, kt = this.num(k), S = this.samples(M), A = M.P.filter((q) => q.role === 'A');
+    const U = M.unc, run = this.state.run, S = this.samples(M), A = M.P.filter((q) => q.role === 'A');
     const src = (el) => {
       const b = U[el], want = el === 'n' ? d.uSrcN : d.uSrcC, now = this.uSrc(M, d, el);
       if (!b.ok) return { t: 'No uncertainty: the calibration has fewer than three anchor analyses', on: false };
       if (b.uS == null) return { t: 'No repeatability estimate: no anchor was analyzed more than once', on: false };
       const what = now === 'monitors' ? 'SD of the drift monitors in the fit' : now === 'config' ? 'set in the configuration'
         : 'pooled SD of the anchor replicates, ' + b.df + ' df' + (want === 'monitors' ? ', since fewer than two monitors are left in the drift fit' : '');
-      return { t: 'u = ' + this.fx(b.uS, 3) + '‰, ' + what, on: true };
+      return { t: '1σ = ' + this.fx(b.uS, 3) + '‰, ' + what, on: true };
     };
     const opts = (el) => [{ t: 'Pooled anchors', v: 'pooled' }, { t: 'Drift monitors', v: 'monitors' }]
       .concat(run.uCfg[el] != null ? [{ t: 'Configuration', v: 'config' }] : []);
@@ -1387,19 +1390,19 @@ class Component extends DCLogic {
     ];
     const charts = [];
     for (const el of ['n', 'c']) {
-      const b = U[el], f = M.cal[el], col = this.col(el), title = 'U of ' + this.iso(el) + ' across the scale';
-      const Us = S.map((q) => q[el].U).filter((v) => v != null);
+      const b = U[el], f = M.cal[el], col = this.col(el), title = '1σ of ' + this.iso(el) + ' across the scale';
+      const Us = S.map((q) => q[el].u).filter((v) => v != null);
       const xm = S.concat(A).map((q) => q[el].drift).filter((v) => v != null);
       if (!b.ok || b.uS == null || !Us.length || !xm.length) {
         charts.push(this.none(title, col, !b.ok ? 'The calibration has fewer than three anchor analyses, so it carries no uncertainty.'
-          : b.uS == null ? 'No anchor was analyzed more than once and the configuration sets no repeatability, so U cannot be computed.'
+          : b.uS == null ? 'No anchor was analyzed more than once and the configuration sets no repeatability, so 1σ cannot be computed.'
             : 'No sample has a ' + this.iso(el) + ' value.'));
         continue;
       }
       const lo = Math.min(...xm), hi = Math.max(...xm), curve = [];
       for (let i = 0; i <= 60; i++) {
         const x = lo + (hi - lo) * i / 60;
-        curve.push([f.slope * x + f.intercept, k * b.at(x).u]);
+        curve.push([f.slope * x + f.intercept, b.at(x).u]);
       }
       const fin = S.map((q) => q[el].fin);
       const xd = this.dom(fin.concat([f.accMin, f.accMax]), 0.05);
@@ -1407,15 +1410,15 @@ class Component extends DCLogic {
       const name = (acc) => { const q = A.find((p) => (el === 'n' ? p.acc15 : p.acc13) === acc); return q ? q.id : ''; };
       charts.push(this.chart({
         title, sub: 'Samples ' + this.span(Math.min(...Us), Math.max(...Us), 3) + '‰; least near the anchors’ mean',
-        badge: this.badge(true, 'k = ' + kt), color: col, x: xd, y: yd,
+        badge: this.badge(true, '1σ'), color: col, x: xd, y: yd,
         lineA: { paths: [curve], stroke: col, w: 1.8 },
         lineB: { paths: [[[f.accMin, 0], [f.accMin, yd.max]], [[f.accMax, 0], [f.accMax, yd.max]]], stroke: '#56646F', w: 1, dash: '3 4' },
-        pts: S.map((q) => ({ x: q[el].fin, y: q[el].U, kind: 'fill', sel: q.r === sel, label: q.id + ', position ' + q.r + ': ' + this.fx(q[el].fin, 2) + ' ± ' + this.fx(q[el].U, 3) + '‰', pick: () => H.pick(q.r) })),
+        pts: S.map((q) => ({ x: q[el].fin, y: q[el].u, kind: 'fill', sel: q.r === sel, label: q.id + ', position ' + q.r + ': ' + this.fx(q[el].fin, 2) + ' ± ' + this.fx(q[el].u, 3) + '‰ (1σ)', pick: () => H.pick(q.r) })),
         // the anchors' names, one lower than the other when the anchors sit close on the axis
         notes: [{ x: f.accMin, y: yd.max * 0.94, t: name(f.accMin), at: 'right', c: '#3B4A55' },
           { x: f.accMax, y: yd.max * ((f.accMax - f.accMin) / (xd.max - xd.min) < 0.3 ? 0.82 : 0.94), t: name(f.accMax), at: 'left', c: '#3B4A55' }],
-        legend: [{ kind: 'dot', color: col, label: 'Sample' }, { kind: 'line', color: col, label: 'U along the line' }, { kind: 'dash', color: '#56646F', label: 'Anchor values' }],
-        xLabel: this.iso(el) + ' calibrated (‰)', yLabel: 'U, k = ' + kt + ' (‰)',
+        legend: [{ kind: 'dot', color: col, label: 'Sample' }, { kind: 'line', color: col, label: '1σ along the line' }, { kind: 'dash', color: '#56646F', label: 'Anchor values' }],
+        xLabel: this.iso(el) + ' calibrated (‰)', yLabel: '1σ (‰)',
       }));
     }
     const q = M.P.find((p) => p.r === sel) || S[0] || A[0] || M.P[0];
@@ -1440,23 +1443,23 @@ class Component extends DCLogic {
       return vs.length ? vs.map((v) => this.fx(v, 2)).join(', ') : 'none';
     };
     const rows = [
-      { k: 'Repeatability u (‰)', a: this.fx(U.n.uS, 3), b: this.fx(U.c.uS, 3) },
+      { k: 'Repeatability, 1σ (‰)', a: this.fx(U.n.uS, 3), b: this.fx(U.c.uS, 3) },
       { k: 'Pooled anchor SD (‰)', a: this.fx(U.n.pooled, 3), b: this.fx(U.c.pooled, 3) },
       { k: 'Drift monitor SD (‰)', a: this.fx(M.monSD.n, 3), b: this.fx(M.monSD.c, 3) },
     ];
     if (run.uCfg.n != null || run.uCfg.c != null) rows.push({ k: 'Configuration value (‰)', a: this.fx(run.uCfg.n, 3), b: this.fx(run.uCfg.c, 3) });
-    rows.push({ k: 'Anchor certificates, 1 SD (‰)', a: certs('n'), b: certs('c') }, { k: 'U of the samples (‰)', a: this.uSpan(S, 'n', 3), b: this.uSpan(S, 'c', 3) });
+    rows.push({ k: 'Anchor certificates, 1σ (‰)', a: certs('n'), b: certs('c') }, { k: '1σ of the samples (‰)', a: this.uSpan(S, 'n', 3), b: this.uSpan(S, 'c', 3) });
     const lines = [];
     for (const el of ['n', 'c']) {
       const key = el === 'n' ? 'uSrcN' : 'uSrcC', now = this.uSrc(M, d, el), alt = now === 'monitors' ? 'pooled' : 'monitors';
       const dAlt = Object.assign({}, d, { [key]: alt }), Ma = this.model(dAlt);
       if (this.uSrc(Ma, dAlt, el) !== alt) continue;
-      const a = this.samples(Ma).map((p) => p[el].U).filter((v) => v != null), b = S.map((p) => p[el].U).filter((v) => v != null);
+      const a = this.samples(Ma).map((p) => p[el].u).filter((v) => v != null), b = S.map((p) => p[el].u).filter((v) => v != null);
       if (!a.length || !b.length) continue;
       lines.push({ t: 'With the ' + (alt === 'monitors' ? 'drift monitors’ SD (' + this.fx(M.monSD[el], 3) + '‰)' : 'pooled anchor SD (' + this.fx(U[el].pooled, 3) + '‰)')
-        + ', U(' + this.iso(el) + ') would be ' + this.span(Math.min(...a), Math.max(...a), 3) + '‰ instead of ' + this.span(Math.min(...b), Math.max(...b), 3) + '‰.' });
+        + ', 1σ(' + this.iso(el) + ') would be ' + this.span(Math.min(...a), Math.max(...a), 3) + '‰ instead of ' + this.span(Math.min(...b), Math.max(...b), 3) + '‰.' });
     }
-    lines.push({ t: 'U does not include the blank, linearity, or drift corrections, or differences between runs.' });
+    lines.push({ t: '1σ does not include the blank, linearity, or drift corrections, or differences between runs.' });
     return { ctrl, charts, stats: { rows }, effect: { title: 'Effect of this choice', lines }, budget: pn || pc ? budget : null };
   }
 
@@ -1471,7 +1474,7 @@ class Component extends DCLogic {
       }
       const hit = rev.filter((r) => r.sh.beyond > 0);
       out.push({ s: hit.length ? 'caution' : 'ok', title: 'Effect of the choices',
-        t: 'If each choice were reversed, ' + rev.map((r, i) => (i === rev.length - 1 ? 'and ' : '') + this.iso(r.el) + ' ' + r.lab + ' (' + (r.on ? 'applied' : 'not applied') + ') would move ' + r.sh.beyond + (i ? '' : ' of ' + r.sh.n + ' samples')).join(', ') + ' by more than U.' });
+        t: 'If each choice were reversed, ' + rev.map((r, i) => (i === rev.length - 1 ? 'and ' : '') + this.iso(r.el) + ' ' + r.lab + ' (' + (r.on ? 'applied' : 'not applied') + ') would move ' + r.sh.beyond + (i ? '' : ' of ' + r.sh.n + ' samples')).join(', ') + ' by more than ' + this.kSig(M) + '.' });
     }
     const E = M.elem, mons = M.P.filter((q) => q.role === 'D');
     let worst = 0, at = null, el0 = 'n';
@@ -1601,7 +1604,7 @@ class Component extends DCLogic {
       const sN = this.uSrc(M, d, 'n'), sC = this.uSrc(M, d, 'c');
       const rep = sN === sC ? srcName(sN) + ', ' + this.fx(U.n.uS, 3) + '‰ for δ¹⁵N and ' + this.fx(U.c.uS, 3) + '‰ for δ¹³C'
         : srcName(sN) + ' for δ¹⁵N, ' + this.fx(U.n.uS, 3) + '‰, and ' + srcName(sC) + ' for δ¹³C, ' + this.fx(U.c.uS, 3) + '‰';
-      s.push('Uncertainties are expanded (U, k = ' + this.num(set.k) + ') and combine the anchors’ certified uncertainties, the standard errors of their measured means, and single-analysis repeatability (' + rep + '), propagated through the calibration; they do not include the blank, peak-size, or drift corrections.');
+      s.push('Uncertainties are one standard deviation (1σ) and combine the anchors’ certified uncertainties, the standard errors of their measured means, and single-analysis repeatability (' + rep + '), propagated through the calibration; they do not include the blank, peak-size, or drift corrections.');
     } else {
       s.push('No uncertainty is reported, since the calibration has fewer than three anchor analyses or no repeatability estimate.');
     }
@@ -1615,7 +1618,7 @@ class Component extends DCLogic {
     const list = sets[filt] || S;
     const rows = list.map((q) => ({
       r: String(q.r), id: q.id, amt: this.fx(q.amt, 3), aN: this.fx(q.aN, 1),
-      dN: this.fx(q.n.fin, 2), UN: this.fx(q.n.U, 2), dC: this.fx(q.c.fin, 2), UC: this.fx(q.c.U, 2),
+      dN: this.fx(q.n.fin, 2), UN: this.fx(q.n.u, 2), dC: this.fx(q.c.fin, 2), UC: this.fx(q.c.u, 2),
       pN: this.fx(q.pctN, 2), pC: this.fx(q.pctC, 2), cn: this.fx(q.cn, 1),
       chips: q.flags.map((f) => ({ t: this.chip(f), title: this.ftext(f) })),
       pick: () => H.pick(q.r), sbg: q.r === sel ? '#E9EFF5' : '#FFFFFF',
@@ -1626,12 +1629,11 @@ class Component extends DCLogic {
     const both = S.filter((q) => q.c.fin != null && q.n.fin != null);
     const errs = [];
     for (const q of both) {
-      if (q.c.U != null) errs.push([q.c.fin - q.c.U, q.n.fin, q.c.fin + q.c.U, q.n.fin]);
-      if (q.n.U != null) errs.push([q.c.fin, q.n.fin - q.n.U, q.c.fin, q.n.fin + q.n.U]);
+      if (q.c.u != null) errs.push([q.c.fin - q.c.u, q.n.fin, q.c.fin + q.c.u, q.n.fin]);
+      if (q.n.u != null) errs.push([q.c.fin, q.n.fin - q.n.u, q.c.fin, q.n.fin + q.n.u]);
     }
-    const kt = this.num(M.settings.k);
     const chart = both.length ? this.chart({
-      title: this.iso('n') + ' against ' + this.iso('c'), sub: both.length + ' samples with U (k = ' + kt + '); hollow where a peak is outside the size series', color: '#13212B', r: 4.4,
+      title: this.iso('n') + ' against ' + this.iso('c'), sub: both.length + ' samples, error bars 1σ; hollow where a peak is outside the size series', color: '#13212B', r: 4.4,
       x: this.dom(both.map((q) => q.c.fin), 0.06), y: this.dom(both.map((q) => q.n.fin), 0.06), errs: { segs: errs, stroke: '#8796A5' },
       pts: both.map((q) => ({ x: q.c.fin, y: q.n.fin, kind: size(q) ? 'hollow' : 'fill', ring: q.carry, sel: q.r === sel, label: q.id + ', position ' + q.r + ': ' + this.fx(q.n.fin, 2) + ', ' + this.fx(q.c.fin, 2) + '‰', pick: () => H.pick(q.r) })),
       legend: [{ kind: 'dot', color: '#13212B', label: 'Inside the size series' }, { kind: 'hollow', color: '#13212B', label: 'Outside it' }, { kind: 'ring', color: '#13212B', label: 'Carryover flag' }],
@@ -1674,7 +1676,7 @@ class Component extends DCLogic {
       ['drift', 'Drift', pair(M.drift.n.inForce, M.drift.c.inForce, 'Applied', 'Not applied', this.iso('n'), this.iso('c'))],
       ['cal', 'Calibration', M.cal.n.slope != null && M.cal.c.slope != null ? 'Slopes ' + this.fx(M.cal.n.slope, 3) + ' and ' + this.fx(M.cal.c.slope, 3) : 'Not calibrated'],
       ['elem', 'Elemental content', pair(M.elem.n.inForce, M.elem.c.inForce, 'Corrected', 'Not corrected', '%N', '%C')],
-      ['unc', 'Uncertainty', 'U(' + this.iso('n') + ') ' + this.uSpan(S, 'n', 2) + (this.uSpan(S, 'n', 2) === 'none' ? '' : '‰')],
+      ['unc', 'Uncertainty', '1σ(' + this.iso('n') + ') ' + this.uSpan(S, 'n', 2) + (this.uSpan(S, 'n', 2) === 'none' ? '' : '‰')],
       ['qc', 'Quality checks', (nc ? nc + ' caution' + (nc > 1 ? 's' : '') + ', ' : '') + nn + ' note' + (nn === 1 ? '' : 's')],
       ['results', 'Results', this.count(S.length, 'sample')],
     ];

@@ -20,12 +20,13 @@ from pathlib import Path
 
 import openpyxl
 
-# Results columns of ea_irms 1.4.4: each value followed by its U, Flags in Q, the rerun mark, its
-# reason and the suggested mass in R to T (text), then the u columns.
-RESULTS = {5: "pct_c_reported", 6: "U_pct_c", 7: "pct_n_reported", 8: "U_pct_n", 9: "cn_molar_reported",
-           10: "U_cn_molar", 11: "cn_mass_reported", 12: "U_cn_mass", 13: "d13c_final", 14: "U_d13c",
-           15: "d15n_final", 16: "U_d15n", 21: "u_pct_c", 22: "u_pct_n", 23: "u_cn_molar",
-           24: "u_cn_mass", 25: "u_d13c", 26: "u_d15n"}
+# Results columns of ea_irms 1.4.5: each value followed by its 1 sigma, Flags in Q, the rerun mark,
+# its reason and the suggested mass in R to T (text), then the elemental drift factors and %C and %N
+# as measured in U to X.
+RESULTS = {5: "pct_c_reported", 6: "u_pct_c", 7: "pct_n_reported", 8: "u_pct_n", 9: "cn_molar_reported",
+           10: "u_cn_molar", 11: "cn_mass_reported", 12: "u_cn_mass", 13: "d13c_final", 14: "u_d13c",
+           15: "d15n_final", 16: "u_d15n", 21: "elem_factor_n", 22: "elem_factor_c", 23: "pct_c_measured",
+           24: "pct_n_measured"}
 FLAGS = 17
 TEXT = {18: "rerun", 19: "rerun_why", 20: "rerun_mass"}
 

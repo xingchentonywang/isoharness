@@ -230,7 +230,7 @@ def test_workbook_agrees_with_engine_on_the_new_columns(tmp_path):
     for p in positions:
         for col, attr in ((rhead["%N"], "pct_n_reported"), (rhead["%C"], "pct_c_reported"),
                           (rhead["Elemental drift factor N"], "elem_factor_n"), (rhead["%N as measured"], "pct_n_measured"),
-                          (rhead["U(%N), k=2.0"], "U_pct_n"), (rhead["U(C:N molar), k=2.0"], "U_cn_molar")):
+                          (rhead["1σ(%N)"], "u_pct_n"), (rhead["1σ(C:N molar)"], "u_cn_molar")):
             mine, theirs = getattr(p, attr), rs.cell(4 + p.row, col).value
             theirs = theirs if isinstance(theirs, (int, float)) else None
             assert (mine is None) == (theirs is None) and (mine is None or abs(mine - theirs) < 1e-9 * max(1.0, abs(mine)))

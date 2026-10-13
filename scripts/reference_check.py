@@ -25,7 +25,8 @@ read from the delivered workbook's Setup sheet, and checks three things:
    earlier ea_irms version differs by design where that version changed the
    layout (1.4.3 moved the Results columns and added the uncertainty of %N, %C
    and C:N; 1.4.4 added the rerun mark, its reason and a suggested mass after
-   Flags), so compare against workbooks built by the same version.
+   Flags; 1.4.5 put each value's 1 sigma beside it and dropped the u columns),
+   so compare against workbooks built by the same version.
 
 Exits 1 on any mismatch.
 """
@@ -58,12 +59,11 @@ WORK_BY_HEADER = {"elem_bias_n": "elem bias N", "elem_bias_c": "elem bias C",
                   "pct_n_reported": "%N corrected", "pct_c_reported": "%C corrected",
                   "cn_molar_reported": "C:N molar corrected", "cn_mass_reported": "C:N mass corrected",
                   "pulse_ampl_c": "pulse ampl", "ampl_c": "Ampl 44"}
-# Results columns of ea_irms 1.4.4: each value followed by its U, Flags in Q, the rerun mark in R to T,
-# then the u columns.
-RESULTS = {"pct_c_reported": 5, "U_pct_c": 6, "pct_n_reported": 7, "U_pct_n": 8, "cn_molar_reported": 9,
-           "U_cn_molar": 10, "cn_mass_reported": 11, "U_cn_mass": 12, "u_pct_c": 21, "u_pct_n": 22,
-           "u_cn_molar": 23, "u_cn_mass": 24, "elem_factor_n": 27, "elem_factor_c": 28,
-           "pct_c_measured": 29, "pct_n_measured": 30}
+# Results columns of ea_irms 1.4.5: each value followed by its 1 sigma, Flags in Q, the rerun mark in R to T,
+# then the elemental drift factors and %C and %N as measured in U to X.
+RESULTS = {"pct_c_reported": 5, "u_pct_c": 6, "pct_n_reported": 7, "u_pct_n": 8, "cn_molar_reported": 9,
+           "u_cn_molar": 10, "cn_mass_reported": 11, "u_cn_mass": 12, "elem_factor_n": 21, "elem_factor_c": 22,
+           "pct_c_measured": 23, "pct_n_measured": 24}
 FLAGS_COL = "Q"
 FITS = {"B20": ("lin_n", "applied"), "B95": ("lin_n", "fit", "p"), "B96": ("lin_n", "in_force"),
         "B28": ("lin_c", "applied"), "B102": ("lin_c", "fit", "p"), "B103": ("lin_c", "in_force"),

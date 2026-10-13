@@ -120,7 +120,7 @@ def test_problems_of_the_whole_run():
     assert F["rerun"]["run_level"][0] == "check standard off by more than 0.05 permil at positions 2, 3, 19"
     _, F = process(parse_export(RUN), config_from_dict({"coverage_k": 0.5, "ref_gas_sd_limit": 0.05}))
     items = F["rerun"]["run_level"]
-    assert any(t.startswith("anchors outside U, %N: ") for t in items)
+    assert any(t.startswith("anchors outside 0.5σ, %N: ") for t in items)
     assert any(t.startswith("N2 reference pulses SD ") and t.endswith("at or above 0.05") for t in items)
     _, F = process(parse_export(RUN), config_from_dict({"ref_gas_sd_limit": None}))
     assert F["rerun"]["run_level_text"] == "none found"
@@ -195,7 +195,7 @@ def test_workbook_agrees_with_engine(computed, name):
         assert flags == set(p.flags), (name, p.row, flags ^ set(p.flags))
         for h, attr in (("Rerun", "rerun"), ("Why", "rerun_why"), ("Suggested mass (mg)", "rerun_mass")):
             assert (getattr(p, attr) or "") == (rs.cell(i, head[h]).value or ""), (name, p.row, h)
-        for h, attr in (("U(%N)", "U_pct_n"), ("u(d15N)", "u_d15n"), ("%N as measured", "pct_n_measured")):
+        for h, attr in (("1σ(%N)", "u_pct_n"), ("1σ(d15N)", "u_d15n"), ("%N as measured", "pct_n_measured")):
             assert _close(getattr(p, attr), rs.cell(i, head[h]).value), (name, p.row, h)
     marked = [p for p in positions if p.rerun]
     assert [rr.cell(8 + k, 1).value for k in range(len(marked))] == [p.row for p in marked]

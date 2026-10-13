@@ -105,7 +105,7 @@ class Config:
     carryover_mv: float | None = 2.0    # background rise that flags possible carryover; None = off
     u_sample_n: float | None = None     # single-analysis repeatability, 1 SD; None = pooled anchors
     u_sample_c: float | None = None
-    coverage_k: float = 2.0
+    coverage_k: float = 2.0             # the checks compare against k x 1 sigma (1.4.5)
     # 1.4.3: standard uncertainty of one weighing, mg; None = not given, counted as 0
     balance_u_mg: float | None = None
     # 1.4.2: %N and %C drift, read from the drift monitors' own elemental content
@@ -448,6 +448,11 @@ _PLAIN = ("no N peak", "no C peak", "CO2 peak rejected as a reference pulse",
           "ran before the background settled", "possible carryover from an oversized sample")
 
 
+def _k_sigma(k):
+    """k x 1 sigma as the checks name it: '2σ' for the default k = 2 (1.4.5)."""
+    return f"{k:.15g}σ"
+
+
 def _median(values):
     vals = sorted(values)
     m = len(vals) // 2
@@ -548,7 +553,7 @@ def _rerun_marks(positions, F, config):
                 and cert(p) is not None]
         within = sum(1 for p in used if abs(getattr(p, val) - cert(p)) <= getattr(p, big_u))
         if used and within < len(used):
-            items.append(f"anchors outside U, {name}: {len(used) - within} of {len(used)}")
+            items.append(f"anchors outside {_k_sigma(config.coverage_k)}, {name}: {len(used) - within} of {len(used)}")
     if config.ref_gas_sd_limit is not None:
         for el, name in (("n", "N2"), ("c", "CO2")):
             g = F[f"ref_gas_{el}"]

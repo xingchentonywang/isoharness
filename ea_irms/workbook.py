@@ -21,7 +21,7 @@ from openpyxl.formatting.rule import FormulaRule
 from .parse import _read_rows
 from .pipeline import DEFAULT_STANDARDS, MAX_STANDARDS, MIN_OUTLIER_MONITORS, Config
 
-VERSION = "1.4.4"
+VERSION = "1.4.5"
 NSTD = MAX_STANDARDS      # rows in the Setup standards table (16 from 1.4.2, 13 before)
 
 
@@ -198,8 +198,10 @@ def build_workbook(export_path, out_path, config: Config | None = None,
               'B16 or B17 and that element\'s fit leaves it out.')
     r += 1
     r = rd(r, 'Uncertainty', F_H1)
-    r = rd(r, 'Results carries a standard uncertainty u for every calibrated value and U = k x u with k from Setup '
-              'B32. The budget follows section 6.5 of the guide: the 1-sigma certificate uncertainty of each anchor '
+    r = rd(r, 'Results gives every calibrated value with its uncertainty beside it as one standard deviation, 1σ '
+              '(from 1.4.5; earlier versions put U = k x 1σ there). The checks on QC and on the Rerun sheet compare '
+              'a standard\'s deviation from its accepted value with k x 1σ, k from Setup B32 (2 by default). '
+              'The budget follows section 6.5 of the guide: the 1σ certificate uncertainty of each anchor '
               'material (Setup columns H and I), the scatter of its replicates in this run, and the repeatability of '
               'one sample analysis (Setup B30 and B31, or the pooled anchor scatter when those are empty), each '
               'propagated through the calibration line as a Kragten spreadsheet would. It leaves out the blank, '
@@ -208,18 +210,18 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     r = rd(r, 'Elemental content comes from a regression of peak area on micrograms of C or N across every standard '
               'with both a known mass and a known composition. The intercept of that line is the area blank and is '
               'subtracted, so the k-factor is not forced through the origin.')
-    r = rd(r, 'From 1.4.3 Results also carries u and U for %N, %C, and C:N, each from five terms combined in '
+    r = rd(r, 'From 1.4.3 Results also carries the 1σ of %N, %C, and C:N, each from five terms combined in '
               'quadrature (Fits row 300 onwards): the instrument\'s repeatability, from the drift monitors\' measured '
               'over certified ratios by successive differences in position, less the part their own weighing '
-              'explains; the position\'s weighing, the balance\'s u in Setup B33 over its mass; the calibration, the '
+              'explains; the position\'s weighing, the balance\'s 1σ in Setup B33 over its mass; the calibration, the '
               'interpolated elemental drift factor when that correction is in force and the k-factor line at the '
               'position\'s micrograms when it is not; the certificate uncertainty of the material that sets the scale, '
               'from Setup columns J and K; and trueness, the anchors\' RMS deviation from their certified values with '
               'their certificate uncertainty, as in the Nordtest TR 537 handbook. C:N takes the same terms without '
               'the weighing, which cancels in a ratio. Empty inputs count as 0. Entering the certificates raises every '
-              'U; entering the balance raises U for positions lighter than the drift monitors and lowers it '
+              '1σ; entering the balance raises 1σ for positions lighter than the drift monitors and lowers it '
               'slightly for heavier ones, because the monitors\' own weighing then comes out of the repeatability. '
-              'QC lists how many anchors and linearity standards fall within their U.')
+              'QC lists how many anchors and linearity standards fall within k x 1σ of their certified values.')
     r += 1
     r = rd(r, 'Elemental drift (1.4.2)', F_H1)
     r = rd(r, 'That k-factor is one line for the whole run. When the sensitivity of the detector moves during the '
@@ -254,7 +256,7 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     r = rd(r, 'The suggested mass puts each peak inside the linearity range and above the blank multiple, read from '
               'this analysis\'s own peak area per mg. When no one mass does that for both N and C, the two '
               'elements need two capsules and both ranges are given. Problems of the whole run, a check standard '
-              'off, anchors outside U, or a reference-gas SD at or above Setup B68 (the FIRMS guide\'s '
+              'off, anchors outside k x 1σ, or a reference-gas SD at or above Setup B68 (the FIRMS guide\'s '
               'zero-enrichment limit, section 4.3.2), are listed once at the top of Rerun and not on every sample. '
               'Replicates are not compared yet: that needs a sample sheet saying which positions hold the same '
               'sample.')
@@ -419,14 +421,16 @@ def build_workbook(export_path, out_path, config: Config | None = None,
 
     lab(st, 29, 'Uncertainty', F_H1)
     UNC = [
-        ('Sample repeatability, d15N (1 SD, permil)', _CFG.u_sample_n or '',
+        ('Sample repeatability, d15N (1σ, permil)', _CFG.u_sample_n or '',
                                                'One analysis of one sample. Leave empty to use the pooled scatter '
                                                'of the anchor replicates in this run; better is the long-term SD '
                                                'of a matrix-matched in-house standard.'),
-        ('Sample repeatability, d13C (1 SD, permil)', _CFG.u_sample_c or '', ''),
-        ('Coverage factor k', _CFG.coverage_k,
-                                               'Expanded uncertainty U = k x u. k = 2 is about 95 percent only when '
-                                               'the replicates behind u are many; with a handful, take k from '
+        ('Sample repeatability, d13C (1σ, permil)', _CFG.u_sample_c or '', ''),
+        ('Multiple of 1σ for the checks (k)', _CFG.coverage_k,
+                                               'Results gives 1σ. The checks compare a standard\'s deviation from '
+                                               'its accepted value with k x 1σ: the anchors and linearity standards '
+                                               'on QC, the anchors on Rerun. k = 2 is about 95 percent only when the '
+                                               'replicates behind 1σ are many; with a handful, take k from '
                                                'Student\'s t.'),
     ]
     for i, (k, v, note) in enumerate(UNC):
@@ -434,9 +438,9 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     st.cell(30, 2).number_format = '0.000'; st.cell(31, 2).number_format = '0.000'
     st.cell(32, 2).number_format = '0.0'
     # 1.4.3: the balance, for the weighing term of %N and %C
-    lab(st, 33, 'Balance, standard uncertainty of one weighing (mg)', F_SM)
+    lab(st, 33, 'Balance, 1σ of one weighing (mg)', F_SM)
     inp(st, 33, 2, '' if _CFG.balance_u_mg is None else _CFG.balance_u_mg, '0.0000')
-    lab(st, 33, 'From the balance\'s certificate (its repeatability, 1 SD). Leave empty to leave the weighing '
+    lab(st, 33, 'From the balance\'s certificate (its repeatability, 1σ). Leave empty to leave the weighing '
                 'term out of the uncertainty of %N and %C; Fits says so.', F_NOTE, 7)
 
     # 1.4.2: elemental drift from the drift monitors, and the reference-pulse
@@ -466,11 +470,11 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     inp(st, 40, 2, _CFG.ref_pulse_d13c_window, '0.00')
 
     lab(st, 42, 'Standards', F_H1)
-    st.cell(43, 1, 'Accepted values below are the published USGS values as of 2026-09-16, and u is the '
-                   '1-sigma uncertainty the producer lists. Check both against your certificates. u(%C) and '
-                   'u(%N) (1.4.3) are left empty for your certificates; empty counts as 0.').font = F_NOTE
+    st.cell(43, 1, 'Accepted values below are the published USGS values as of 2026-09-16, and 1σ is the '
+                   'uncertainty the producer lists, one standard deviation. Check both against your certificates. '
+                   '1σ(%C) and 1σ(%N) (1.4.3) are left empty for your certificates; empty counts as 0.').font = F_NOTE
     SHDR = ['Match text in Identifier 1', 'Role', 'Accepted d13C', 'Accepted d15N', '%C', '%N', 'Material',
-            'u(d13C)', 'u(d15N)', 'u(%C)', 'u(%N)']
+            '1σ(d13C)', '1σ(d15N)', '1σ(%C)', '1σ(%N)']
     for j, h in enumerate(SHDR, start=1):
         c = st.cell(44, j, h); c.font = F_HDR; c.fill = FILL_HDR
         c.alignment = Alignment(horizontal='center', wrap_text=True)
@@ -633,23 +637,31 @@ def build_workbook(export_path, out_path, config: Config | None = None,
               ('AB','AF','carbon corrections'),('AG','AL','elemental content'),
               ('AM','BH','fit inputs and helpers, ignore'),('BI','BJ','instrument settling'),
               ('BK','BR','fit inputs and helpers, ignore'),('BS','BW','reference pulses'),
-              ('BX','CK','fit inputs and helpers, ignore'),('CL','CO','uncertainty, 1 SD and k x SD'),
+              ('BX','CK','fit inputs and helpers, ignore'),('CL','CO','uncertainty: 1σ, and k x 1σ for the checks'),
               ('CP','DE','fit inputs and helpers, ignore'),(CH['ch pos'],CH['ch carry'],'chart feeds, ignore'),
               (HX['pos used'],HX['settle start'],'carryover and settling helpers, ignore'),
               (EX['desig x'],EX['elem factor C'],'reference-pulse and elemental drift helpers, ignore'),
               (EX['%N corrected'],EX['C:N mass corrected'],'elemental content, drift-corrected'),
               (UX['u%N cert'],UX['urel CN'],'uncertainty of %N, %C, and C:N: helpers, ignore'),
-              (UX['u %N'],UX['U CN mass'],'uncertainty of %N, %C, and C:N, 1 SD and k x SD'),
-              (UX['inU N'],UX['inU CN'],'within U, for QC'),
+              (UX['u %N'],UX['U CN mass'],'uncertainty of %N, %C, and C:N: 1σ, and k x 1σ for the checks'),
+              (UX['inU N'],UX['inU CN'],'within k x 1σ, for QC'),
               (RX['pdev N'],RX['rr check'],'rerun marks: helpers, ignore'),
               (RX['rerun'],RX['suggested mass'],'rerun marks'),
               (RX['rerun rank'],RX['rerun rank'],'helper')]
     for a, b, t in GROUPS:
         wk.cell(4, wk[a + '1'].column, t).font = F_GRP
         wk.cell(4, wk[a + '1'].column).fill = FILL_GRP
+    # 1.4.5: uncertainty columns are headed 1σ (u in the code) and kσ (U in the code, k x 1σ)
+    SHOWN_AS = {'u d15N': '1σ d15N', 'U d15N': 'kσ d15N', 'u d13C': '1σ d13C', 'U d13C': 'kσ d13C',
+                'u%N cert': '1σ %N cert', 'u%C cert': '1σ %C cert',
+                'urel N': '1σ rel N', 'urel C': '1σ rel C', 'urel CN': '1σ rel CN',
+                'u %N': '1σ %N', 'U %N': 'kσ %N', 'u %C': '1σ %C', 'U %C': 'kσ %C',
+                'u CN molar': '1σ CN molar', 'U CN molar': 'kσ CN molar',
+                'u CN mass': '1σ CN mass', 'U CN mass': 'kσ CN mass',
+                'inU N': 'in kσ N', 'inU C': 'in kσ C', 'inU CN': 'in kσ CN'}
     for name, col, width, kind in COLS:
         j = wk[col + '1'].column
-        c = wk.cell(5, j, name); c.font = F_HDR; c.fill = FILL_HDR
+        c = wk.cell(5, j, SHOWN_AS.get(name, name)); c.font = F_HDR; c.fill = FILL_HDR
         c.alignment = Alignment(horizontal='center', wrap_text=True, vertical='bottom')
         wk.column_dimensions[col].width = width
     wk.cell(1, 1, 'Work').font = F_TITLE
@@ -1294,8 +1306,8 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     # ---- calibration statistics and the uncertainty budget ---------------
     def caltable(r0, hdr, xcol, onecol, devcol, rescol, sqcol, ucol_setup):
         sec(r0 - 1, hdr)
-        heads = ['Material', 'n', 'sum x', 'sum x^2', 'mean measured', 'SD', 'u(mean)',
-                 'S1', 'S2', 'u(accepted)']
+        heads = ['Material', 'n', 'sum x', 'sum x^2', 'mean measured', 'SD', '1σ(mean)',
+                 'S1', 'S2', '1σ(accepted)']
         for j, h in enumerate(heads, start=1):
             c = ft.cell(r0, j, h); c.font = F_HDR; c.fill = FILL_HDR
             c.alignment = Alignment(horizontal='center', wrap_text=True)
@@ -1318,7 +1330,7 @@ def build_workbook(export_path, out_path, config: Config | None = None,
                 c.number_format = '0' if j == 2 else '0.0000'
         ft.cell(r0 + NSTD + 1, 1, 'One row per line of the standards table. n, mean and SD are of the anchor '
                             'replicates after drift correction; S1 and S2 are the sums the uncertainty '
-                            'weights need; u(accepted) is the 1-sigma certificate value from Setup.').font = F_NOTE
+                            'weights need; 1σ(accepted) is the certificate value from Setup.').font = F_NOTE
 
     sec(132, 'Calibration, nitrogen: statistics behind the uncertainty')
     fit(133, 'mean measured, all anchors', f'=IFERROR(AVERAGE({W("AU")}),"")', '0.0000')
@@ -1418,8 +1430,8 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     fit(250, 'positions left out', f'=IF({S_EXE}="","none",{S_EXE})', '@')
 
     # 1.4.3: u of %N, %C, and C:N. Fractions of the value, 1 SD.
-    sec(300, 'Uncertainty of %N, %C, and C:N (1.4.3), as fractions of the value, 1 SD')
-    fit(301, 'balance, standard uncertainty of one weighing (mg)', f'=IF({S_BAL}="","",{S_BAL})', '0.0000',
+    sec(300, 'Uncertainty of %N, %C, and C:N (1.4.3), as fractions of the value, 1σ')
+    fit(301, 'balance, 1σ of one weighing (mg)', f'=IF({S_BAL}="","",{S_BAL})', '0.0000',
         'Setup B33. Empty: the weighing term is left out, here and in the monitors\' repeatability.')
     for base, el, name, X_, ug, area in ((303, 'N', 'nitrogen', EX['elem x N'], 'AY', 'AZ'),
                                          (316, 'C', 'carbon', EX['elem x C'], 'BA', 'BB')):
@@ -1431,14 +1443,14 @@ def build_workbook(export_path, out_path, config: Config | None = None,
             'Measured over certified, by successive differences in position: sqrt(sum d^2 / (2 (n - 1))), '
             'so a drift slow next to the monitors\' spacing is not counted as scatter.' if el == 'N' else '')
         fit(b + 2, f'monitors\' own weighing, {name}', f'=IF($B${b}=0,0,SQRT(SUM({W(UX[f"w2 {el}"])})/$B${b}))',
-            '0.00000', 'RMS of the balance u over each monitor\'s mass.' if el == 'N' else '')
+            '0.00000', 'RMS of the balance\'s 1σ over each monitor\'s mass.' if el == 'N' else '')
         fit(b + 3, f'instrument repeatability, {name}',
             f'=IF($B${b+1}="","",SQRT(MAX(0,$B${b+1}^2-$B${b+2}^2)))', '0.00000',
             'The repeatability less the monitors\' own weighing, so a sample\'s weighing is not counted twice.'
             if el == 'N' else '')
         fit(b + 4, f'certificate, material setting the scale, {name}',
             f'=IF(COUNT({W(UX[f"scale2 {el}"])})=0,0,SQRT(AVERAGE({W(UX[f"scale2 {el}"])})))', '0.00000',
-            'RMS of u(%N)/%N from Setup over the monitors when the correction is in force, otherwise over the '
+            'RMS of 1σ(%N)/%N from Setup over the monitors when the correction is in force, otherwise over the '
             'weighed standards of the k-factor.' if el == 'N' else '')
         fit(b + 5, f'anchor analyses, {name}', f'=COUNT({W(UX[f"adev {el}"])})', '0')
         fit(b + 6, f'anchors\' RMS deviation from certified, {name}',
@@ -1492,9 +1504,9 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     for name, inu in (('%N', 'inU N'), ('%C', 'inU C'), ('C:N', 'inU CN')):
         within = f'COUNTIFS({W("D")},"Anchor",{W(UX[inu])},1)'
         total = f'COUNTIFS({W("D")},"Anchor",{W(UX[inu])},">=0")'
-        parts.append(f'IF(AND({total}>0,{within}<{total}),"anchors outside U, {name}: "'
+        parts.append(f'IF(AND({total}>0,{within}<{total}),"anchors outside "&{S_K}&"σ, {name}: "'
                      f'&TEXT({total}-{within},"0")&" of "&TEXT({total},"0")&"; ","")')
-    fit(354, 'whole run: anchors outside U', '=' + '&'.join(parts), '@')
+    fit(354, 'whole run: anchors outside kσ', '=' + '&'.join(parts), '@')
     fit(355, 'whole run: reference gas',
         '=' + '&'.join(f'IF(AND({S_RGSD}<>"",$B${b}>=3,ISNUMBER($B${b+2})),IF($B${b+2}>={S_RGSD},'
                        f'"{nm} reference pulses SD "&TEXT($B${b+2},"0.00")&" permil, at or above "'
@@ -1511,20 +1523,20 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     # ================================================================ Results
     rs = wb.create_sheet('Results')
     RHDR = [('Row', 6), ('Identifier', 18), ('Type', 10), ('Mass (mg)', 10),
-            ('%C', 8), ('U(%C)', 8), ('%N', 8), ('U(%N)', 8),
-            ('C:N molar', 10), ('U(C:N molar)', 10), ('C:N mass', 10), ('U(C:N mass)', 10),
-            ('d13C (permil)', 12), ('U(d13C)', 9), ('d15N (permil)', 12), ('U(d15N)', 9), ('Flags', 54),
+            ('%C', 8), ('1σ(%C)', 8), ('%N', 8), ('1σ(%N)', 8),
+            ('C:N molar', 10), ('1σ(C:N molar)', 10), ('C:N mass', 10), ('1σ(C:N mass)', 10),
+            ('d13C (permil)', 12), ('1σ(d13C)', 9), ('d15N (permil)', 12), ('1σ(d15N)', 9), ('Flags', 54),
             ('Rerun', 9), ('Why', 46), ('Suggested mass (mg)', 24),
-            ('u(%C)', 8), ('u(%N)', 8), ('u(C:N molar)', 10), ('u(C:N mass)', 10), ('u(d13C)', 9), ('u(d15N)', 9),
             ('Elemental drift factor N', 10), ('Elemental drift factor C', 10),
             ('%C as measured', 9), ('%N as measured', 9)]
     rs.cell(1, 1, 'Results').font = F_TITLE
     rs.cell(2, 1, 'Read QC before using these. Isotope values are on the scale set by the anchor standards '
                   'in Setup; %C, %N and C:N need a mass in Work column F or G, and from 1.4.2 they carry the '
                   'elemental drift correction when it is in force (Fits row 243 onwards), with the factors and '
-                  'the values as measured in the last four columns. Each value is followed by U = k x u, k from '
-                  'Setup B32. Flags is followed by the rerun mark (1.4.4), its reason, and a suggested mass, which '
-                  'the Rerun sheet lists, and then by the u columns. For the isotope values u comes from the scale '
+                  'the values as measured in the last four columns. Each value is followed by its 1σ, one standard '
+                  'deviation (1.4.5); the checks on QC and Rerun use k x 1σ, k from Setup B32. Flags is followed by '
+                  'the rerun mark (1.4.4), its reason, and a suggested mass, which the Rerun sheet lists. For the '
+                  'isotope values 1σ comes from the scale '
                   'calibration and the sample repeatability (Fits rows 132 onwards) and leaves out the blank, '
                   'linearity and drift corrections and day-to-day reproducibility; for %C, %N and C:N it has five '
                   'terms (Fits rows 300 onwards), and stays incomplete until Setup B33 and Setup columns J and K '
@@ -1533,9 +1545,6 @@ def build_workbook(export_path, out_path, config: Config | None = None,
         c = rs.cell(4, j, h); c.font = F_HDR; c.fill = FILL_HDR
         c.alignment = Alignment(horizontal='center', wrap_text=True)
         rs.column_dimensions[gcl(j)].width = w_
-    for col_, lab_ in ((6, 'U(%C)'), (8, 'U(%N)'), (10, 'U(C:N molar)'), (12, 'U(C:N mass)'),
-                       (14, 'U(d13C)'), (16, 'U(d15N)')):
-        rs.cell(4, col_, f'="{lab_}, k="&TEXT({S_K},"0.0")').font = F_HDR
     for n in range(NSAMP):
         i, k = 5 + n, R0 + n
         PCc, PNc = EX['%C corrected'], EX['%N corrected']
@@ -1543,9 +1552,9 @@ def build_workbook(export_path, out_path, config: Config | None = None,
         pull = lambda col: f'=IF(Work!${col}{k}="","",Work!${col}{k})'      # noqa: E731
         vals = [f'=IF(Work!$B{k}="","",Work!$A{k})', f'=IF(Work!$B{k}="","",Work!$B{k})',
                 f'=IF(Work!$B{k}="","",Work!$D{k})', f'=IF(Work!$G{k}="","",Work!$G{k})',
-                pull(PCc), pull(UX['U %C']), pull(PNc), pull(UX['U %N']),
-                pull(CNm), pull(UX['U CN molar']), pull(CNw), pull(UX['U CN mass']),
-                f'=IF(Work!$AF{k}="","",Work!$AF{k})', pull('CO'), f'=IF(Work!$AA{k}="","",Work!$AA{k})', pull('CM'),
+                pull(PCc), pull(UX['u %C']), pull(PNc), pull(UX['u %N']),
+                pull(CNm), pull(UX['u CN molar']), pull(CNw), pull(UX['u CN mass']),
+                f'=IF(Work!$AF{k}="","",Work!$AF{k})', pull('CN'), f'=IF(Work!$AA{k}="","",Work!$AA{k})', pull('CL'),
                 (f'=IF(Work!$B{k}="","",'
                  f'Work!${RX["fl noN"]}{k}&Work!${RX["fl noC"]}{k}&Work!${RX["fl rejC"]}{k}'
                  f'&Work!${RX["fl sizeN"]}{k}&Work!${RX["fl sizeC"]}{k}'
@@ -1564,18 +1573,16 @@ def build_workbook(export_path, out_path, config: Config | None = None,
                  f'&Work!${RX["fl pulseN"]}{k}&Work!${RX["fl pulseC"]}{k})'),
                 f'=IF(Work!$B{k}="","",Work!${RX["rerun"]}{k})', f'=IF(Work!$B{k}="","",Work!${RX["why"]}{k})',
                 f'=IF(Work!$B{k}="","",Work!${RX["suggested mass"]}{k})',
-                pull(UX['u %C']), pull(UX['u %N']), pull(UX['u CN molar']), pull(UX['u CN mass']),
-                pull('CN'), pull('CL'),
                 f'=IF(Work!$B{k}="","",Work!${EX["elem factor N"]}{k})',
                 f'=IF(Work!$B{k}="","",Work!${EX["elem factor C"]}{k})',
                 f'=IF(Work!$AJ{k}="","",Work!$AJ{k})', f'=IF(Work!$AI{k}="","",Work!$AI{k})']
         for j, v in enumerate(vals, start=1):
             c = rs.cell(i, j, v); c.font = F_SM
-            if j in (5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 29, 30): c.number_format = '0.00'
+            if j in (5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 23, 24): c.number_format = '0.00'
             if j == 4: c.number_format = '0.000'
-            if j in (14, 16, 21, 22, 23, 24, 25, 26): c.number_format = '0.000'
-            if j in (27, 28): c.number_format = '0.0000'
-            if 5 <= j <= 16 or 21 <= j <= 26: c.fill = FILL_OUT
+            if j in (14, 16): c.number_format = '0.000'
+            if j in (21, 22): c.number_format = '0.0000'
+            if 5 <= j <= 16: c.fill = FILL_OUT
     rs.freeze_panes = 'A5'
     RLAST = gcl(len(RHDR))
     rs.conditional_formatting.add(f'A5:{RLAST}{5+NSAMP-1}', FormulaRule(formula=['$R5="Check"'], fill=FILL_CHECK))
@@ -1763,12 +1770,12 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     qsec(Q, 'Uncertainty')
     qline(Q + 1, 'Sample repeatability in use, d15N (permil)', '=Fits!$B$136', '0.000', '=Fits!$B$137')
     qline(Q + 2, 'Sample repeatability in use, d13C (permil)', '=Fits!$B$156', '0.000', '=Fits!$B$157')
-    qline(Q + 3, 'Coverage factor k', f'={S_K}', '0.0')
-    qline(Q + 4, 'Typical u(d15N) of the unknowns (permil)',
+    qline(Q + 3, 'Multiple of 1σ for the checks (k)', f'={S_K}', '0.0')
+    qline(Q + 4, 'Typical 1σ(d15N) of the unknowns (permil)',
           f'=IFERROR(AVERAGEIFS({W("CL")},{WD_},"Sample"),"")')
-    qline(Q + 5, 'Typical u(d13C) of the unknowns (permil)',
+    qline(Q + 5, 'Typical 1σ(d13C) of the unknowns (permil)',
           f'=IFERROR(AVERAGEIFS({W("CN")},{WD_},"Sample"),"")')
-    qc.cell(Q + 6, 1, 'u combines the certificate uncertainty of each anchor, the scatter of its replicates, and '
+    qc.cell(Q + 6, 1, '1σ combines the certificate uncertainty of each anchor, the scatter of its replicates, and '
                       'the sample repeatability, through the fitted line, as a Kragten spreadsheet would. It '
                       'leaves out the blank, linearity and drift corrections and the day-to-day reproducibility '
                       'a control chart would give, so it is a floor, not the whole budget.').font = F_NOTE
@@ -1885,33 +1892,35 @@ def build_workbook(export_path, out_path, config: Config | None = None,
           'no C peak and says why in Flags"))')
     # 1.4.3
     qsec(150, 'Uncertainty of %N, %C, and C:N')
-    qc.cell(151, 1, 'U on Results has five terms (Fits row 300 onwards). Empty inputs count as 0, so U is incomplete '
-                    'until the balance (Setup B33) and the certificates (Setup columns J and K) are filled in. '
-                    'The anchors and the linearity standards have known values, so how many fall within their U '
-                    'is a check on the budget.').font = F_NOTE
-    qline(152, 'Balance, u of one weighing (mg)', '=Fits!$B$301', '0.0000',
-          '=IF(Fits!$B$301="","not given in Setup B33: the weighing term is left out, so U is too small for '
+    qc.cell(151, 1, '1σ on Results has five terms (Fits row 300 onwards). Empty inputs count as 0, so 1σ is '
+                    'incomplete until the balance (Setup B33) and the certificates (Setup columns J and K) are '
+                    'filled in. The anchors and the linearity standards have known values, so how many fall within '
+                    'k x 1σ of them (k in Setup B32) is a check on the budget.').font = F_NOTE
+    qline(152, 'Balance, 1σ of one weighing (mg)', '=Fits!$B$301', '0.0000',
+          '=IF(Fits!$B$301="","not given in Setup B33: the weighing term is left out, so 1σ is too small for '
           'light samples","ok")')
     for r_, el, name, nrow, rep, true, inu in ((153, 'N', '%N', 303, 304, 311, 'inU N'),
                                                 (157, 'C', '%C', 316, 317, 324, 'inU C')):
-        qline(r_, f'Repeatability of {name} (percent, 1 SD)', f'=IF(Fits!$B${rep}="","",Fits!$B${rep}*100)', '0.00',
-              f'=IF(Fits!$B${nrow}<3,"fewer than three drift monitors: no u for {name}","ok")')
+        qline(r_, f'Repeatability of {name} (percent, 1σ)', f'=IF(Fits!$B${rep}="","",Fits!$B${rep}*100)', '0.00',
+              f'=IF(Fits!$B${nrow}<3,"fewer than three drift monitors: no 1σ for {name}","ok")')
         qline(r_ + 1, f'Trueness of {name} from the anchors (percent)', f'=IF(Fits!$B${true}="","",Fits!$B${true}*100)',
               '0.00', f'=IF(Fits!$B${true}="","fewer than two anchor analyses: no trueness term","ok")')
         for k_, rl, word in ((2, 'Anchor', 'Anchors'), (3, 'Linearity', 'Linearity standards')):
             within = f'COUNTIFS({WD_},"{rl}",{W(UX[inu])},1)'
             total = f'COUNTIFS({WD_},"{rl}",{W(UX[inu])},">=0")'
-            qline(r_ + k_, f'{word} within U, {name}', f'={within}&" of "&{total}', '@',
-                  f'=IF({total}=0,"",IF({within}<{total},"CHECK: "&TEXT({total}-{within},"0")&" outside U","ok"))')
-    qline(161, 'Repeatability of C:N (percent, 1 SD)', '=IF(Fits!$B$330="","",Fits!$B$330*100)', '0.00',
-          '=IF(Fits!$B$329<3,"fewer than three drift monitors: no u for C:N","ok")')
+            qline(r_ + k_, f'="{word} within "&{S_K}&"σ, {name}"', f'={within}&" of "&{total}', '@',
+                  f'=IF({total}=0,"",IF({within}<{total},"CHECK: "&TEXT({total}-{within},"0")'
+                  f'&" outside "&{S_K}&"σ","ok"))')
+    qline(161, 'Repeatability of C:N (percent, 1σ)', '=IF(Fits!$B$330="","",Fits!$B$330*100)', '0.00',
+          '=IF(Fits!$B$329<3,"fewer than three drift monitors: no 1σ for C:N","ok")')
     qline(162, 'Trueness of C:N from the anchors (percent)', '=IF(Fits!$B$335="","",Fits!$B$335*100)', '0.00',
           '=IF(Fits!$B$335="","fewer than two anchor analyses: no trueness term","ok")')
     for r_, rl, word in ((163, 'Anchor', 'Anchors'), (164, 'Linearity', 'Linearity standards')):
         within = f'COUNTIFS({WD_},"{rl}",{W(UX["inU CN"])},1)'
         total = f'COUNTIFS({WD_},"{rl}",{W(UX["inU CN"])},">=0")'
-        qline(r_, f'{word} within U, C:N', f'={within}&" of "&{total}', '@',
-              f'=IF({total}=0,"",IF({within}<{total},"CHECK: "&TEXT({total}-{within},"0")&" outside U","ok"))')
+        qline(r_, f'="{word} within "&{S_K}&"σ, C:N"', f'={within}&" of "&{total}', '@',
+              f'=IF({total}=0,"",IF({within}<{total},"CHECK: "&TEXT({total}-{within},"0")'
+              f'&" outside "&{S_K}&"σ","ok"))')
 
     # 1.4.4
     qsec(166, 'Rerun marks')

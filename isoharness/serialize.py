@@ -113,19 +113,21 @@ def port_input(positions, fits, config: Config, file_name: str, size: int,
 
 
 def results_csv(positions, config: Config) -> str:
-    """The workbook's Results sheet as CSV, at full precision, same columns and order."""
-    k = f"{config.coverage_k:.1f}"
-    header = ["Row", "Identifier", "Type", "Mass (mg)", "%C", f"U(%C), k={k}", "%N", f"U(%N), k={k}",
-              "C:N molar", f"U(C:N molar), k={k}", "C:N mass", f"U(C:N mass), k={k}",
-              "d13C (permil)", f"U(d13C), k={k}", "d15N (permil)", f"U(d15N), k={k}", "Flags",
+    """The workbook's Results sheet as CSV, at full precision, same columns and order.
+
+    Each value is followed by its 1 sigma (ea_irms 1.4.5). The workbook heads those columns
+    1σ(...); here they read 1sigma(...), since Excel misreads a Greek letter in a CSV file
+    that has no byte-order mark.
+    """
+    header = ["Row", "Identifier", "Type", "Mass (mg)", "%C", "1sigma(%C)", "%N", "1sigma(%N)",
+              "C:N molar", "1sigma(C:N molar)", "C:N mass", "1sigma(C:N mass)",
+              "d13C (permil)", "1sigma(d13C)", "d15N (permil)", "1sigma(d15N)", "Flags",
               "Rerun", "Why", "Suggested mass (mg)",
-              "u(%C)", "u(%N)", "u(C:N molar)", "u(C:N mass)", "u(d13C)", "u(d15N)",
               "Elemental drift factor N", "Elemental drift factor C", "%C as measured", "%N as measured"]
-    attrs = ["row", "identifier", "role", "amount", "pct_c_reported", "U_pct_c", "pct_n_reported", "U_pct_n",
-             "cn_molar_reported", "U_cn_molar", "cn_mass_reported", "U_cn_mass",
-             "d13c_final", "U_d13c", "d15n_final", "U_d15n", None,
+    attrs = ["row", "identifier", "role", "amount", "pct_c_reported", "u_pct_c", "pct_n_reported", "u_pct_n",
+             "cn_molar_reported", "u_cn_molar", "cn_mass_reported", "u_cn_mass",
+             "d13c_final", "u_d13c", "d15n_final", "u_d15n", None,
              "rerun", "rerun_why", "rerun_mass",
-             "u_pct_c", "u_pct_n", "u_cn_molar", "u_cn_mass", "u_d13c", "u_d15n",
              "elem_factor_n", "elem_factor_c", "pct_c_measured", "pct_n_measured"]
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\n")
