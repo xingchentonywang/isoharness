@@ -21,7 +21,7 @@ from openpyxl.formatting.rule import FormulaRule
 from .parse import _read_rows
 from .pipeline import DEFAULT_STANDARDS, MAX_STANDARDS, MIN_OUTLIER_MONITORS, Config
 
-VERSION = "1.4.5"
+VERSION = "1.4.6"
 NSTD = MAX_STANDARDS      # rows in the Setup standards table (16 from 1.4.2, 13 before)
 
 

@@ -255,6 +255,25 @@ class Component extends DCLogic {
   async pickConfig(file) {
     if (this.state.busy) return;
     const fail = (detail) => this.setState({ error: { title: file.name + ' is not a configuration', detail } });
+    if (/\.xlsx$/i.test(file.name)) {
+      // The Excel lab configuration (ea_irms 1.4.6) is read by the service, which names any cell it cannot use.
+      const form = new FormData();
+      form.append('file', file, file.name);
+      let resp;
+      try {
+        resp = await fetch('api/config/read', { method: 'POST', body: form });
+      } catch (err) {
+        fail('The service could not be reached to read it (' + err.message + ').');
+        return;
+      }
+      const body = await this.answer(resp);
+      if (!resp.ok || !body || !body.config) {
+        fail(resp.ok ? 'The service sent an answer this page cannot read.' : this.detail(resp, body));
+        return;
+      }
+      this.useConfig({ name: file.name, data: body.config, unknown: [], wrapped: false, notes: body.notes || [] });
+      return;
+    }
     let data;
     try {
       data = JSON.parse(await file.text());
@@ -280,9 +299,22 @@ class Component extends DCLogic {
         + '); a configuration has fields such as standards and blank_correction.');
       return;
     }
-    const cfg = { name: file.name, data, unknown, wrapped };
+    this.useConfig({ name: file.name, data, unknown, wrapped, notes: [] });
+  }
+
+  useConfig(cfg) {
     if (this.state.run) this.process(this.state.run.file, cfg, 'config');
     else this.setState({ cfg, error: null });
+  }
+
+  async downloadTemplate() {
+    try {
+      const resp = await fetch('api/config-template', { cache: 'no-store' });
+      if (!resp.ok) throw new Error('the service answered ' + resp.status);
+      this.save(await resp.blob(), this.fileName(resp.headers.get('Content-Disposition')) || 'lab_configuration.xlsx');
+    } catch (err) {
+      this.setState({ error: { title: 'The template was not downloaded', detail: String(err && err.message ? err.message : err) } });
+    }
   }
 
   clearConfig() {
@@ -296,8 +328,17 @@ class Component extends DCLogic {
     if (!run || st.busy) return;
     const config = this.configFor(st.dec);
     if (kind === 'config') {
-      const text = JSON.stringify(config, null, 2) + '\n';
-      this.save(new Blob([text], { type: 'application/json' }), this.stem(run.name) + '_config.json');
+      this.setState({ busy: kind, toast: '' });
+      let toast = '';
+      try {
+        const resp = await fetch('api/config.xlsx', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ config, name: this.stem(run.name) }) });
+        if (!resp.ok) toast = 'The configuration was not written: ' + this.detail(resp, await this.answer(resp));
+        else this.save(await resp.blob(), this.fileName(resp.headers.get('Content-Disposition')) || this.names(run).config);
+      } catch (err) {
+        toast = 'The configuration could not be saved (' + err.message + ').';
+      }
+      this.setState({ busy: '', toast });
       return;
     }
     this.setState({ busy: kind, toast: '' });
@@ -362,7 +403,7 @@ class Component extends DCLogic {
 
   names(run) {
     const s = this.stem(run.name), v = run.version;
-    return { workbook: s + '_ea_irms_v' + v + '.xlsx', csv: s + '_results_ea_irms_v' + v + '.csv', config: s + '_config.json' };
+    return { workbook: s + '_ea_irms_v' + v + '.xlsx', csv: s + '_results_ea_irms_v' + v + '.csv', config: s + '_config.xlsx' };
   }
 
   // A run date in the file name, when it can be read one way only: YYYYMMDD,
@@ -1647,7 +1688,7 @@ class Component extends DCLogic {
     const downloads = [
       item('workbook', 'Workbook', nm.workbook, lo ? 'Every step as a formula; Excel or LibreOffice fills in the values when it opens the file' : 'Every step as a formula, with the values filled in', 'Building the workbook on the server; this takes a few seconds'),
       item('csv', 'Results table', nm.csv, 'The workbook’s Results sheet as a CSV file, with every position at full precision', 'Building the results table on the server'),
-      item('config', 'Configuration', nm.config, 'Your choices for this run, saved so that you can load them as a lab configuration next time', ''),
+      item('config', 'Configuration', nm.config, 'Your choices for this run as an Excel lab configuration, to edit and load next time', 'Writing the configuration on the server'),
     ];
     const pair = (a, b) => (a && b ? 'on both' : a ? 'on ' + this.iso('n') : b ? 'on ' + this.iso('c') : 'off');
     const a = this.uSrc(M, d, 'n'), b = this.uSrc(M, d, 'c');
@@ -1706,11 +1747,13 @@ class Component extends DCLogic {
       cfgName: cfg ? cfg.name : pkg, hasCfg: !!cfg, cfgButton: cfg ? 'Choose another configuration' : 'Choose a configuration',
       cfgNote: (cfg ? 'Its standards table, switches, and limits replace the package defaults' + (cfg.wrapped ? ' (read from its "config" field)' : '')
         + (cfg.unknown.length ? '. Fields ea_irms does not read are ignored: ' + this.andList(cfg.unknown) : '') + '.'
-        : 'A .json file with a standards table, switches, and limits, such as the Configuration file downloaded from an earlier run.')
+        + (cfg.notes && cfg.notes.length ? ' Note: ' + cfg.notes.join('; ') + '.' : '')
+        : 'An Excel file with a standards table, switches, and limits: download the template, fill in its yellow cells, and choose it here. A .json configuration from an earlier run also works.')
         + (run ? ' Choosing another processes the run again.' : ''),
       chooseCfg: () => { const el = document.getElementById('dc-config'); if (el && !this.state.busy) el.click(); },
       pickedCfg: (e) => { const f = e.target.files && e.target.files[0]; e.target.value = ''; if (f) this.pickConfig(f); },
       clearCfg: () => this.clearConfig(),
+      template: () => this.downloadTemplate(),
       dateValue: st.runDate || '',
       setDate: (e) => this.setState({ runDate: e.target.value, dateFrom: e.target.value ? 'you' : '' }),
       dateNote: st.dateFrom === 'name' && st.runDate ? 'Read from the file name; change it if it is wrong. It is printed on the workbook’s Setup sheet.'

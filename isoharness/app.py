@@ -31,6 +31,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+from ea_irms.labconfig import LabConfigError, config_to_xlsx, read_lab_config
 from ea_irms.parse import ExportFormatError, parse_export
 from ea_irms.pipeline import Config, config_from_dict, config_to_dict, process
 from ea_irms.workbook import VERSION, bake_values, build_workbook
@@ -54,7 +55,7 @@ PORT_ENGINE = ROOT / "port" / "engine.js"
 # warmup/, where the Dockerfile copies it; in the repository, in tests/data/.
 EXAMPLE = next((p for p in (ROOT / "warmup" / "20260915_raw.csv",
                             ROOT / "tests" / "data" / "20260915_raw.csv") if p.is_file()), None)
-LIMITED = ("/api/process", "/api/workbook", "/api/results.csv")
+LIMITED = ("/api/process", "/api/workbook", "/api/results.csv", "/api/config/read")
 WINDOW_S = 3600.0
 # The page's own scripts and styles, Google Fonts, and calls back to this address.
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' "
@@ -304,6 +305,60 @@ def results(file: UploadFile = File(...), config: str | None = Form(None)):
         name = f"{path.stem}_results_ea_irms_v{VERSION}.csv"
     return Response(text, media_type="text/csv", headers={
         "Content-Disposition": f'attachment; filename="{name}"'})
+
+
+def _xlsx_name(name, suffix: str) -> str:
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", str(name or "")).strip("._")[:100] or "lab"
+    return f"{stem}{suffix}"
+
+
+@app.get("/api/config-template")
+def config_template():
+    """The lab configuration as an Excel template, filled with the package defaults (ea_irms 1.4.6)."""
+    name = f"lab_configuration_ea_irms_v{VERSION}.xlsx"
+    return Response(config_to_xlsx(Config()), media_type=XLSX, headers={
+        "Content-Disposition": f'attachment; filename="{name}"', "Cache-Control": "no-cache"})
+
+
+@app.post("/api/config.xlsx")
+async def config_xlsx(request: Request):
+    """A configuration sent as JSON, ``{"config": {...}, "name": "run"}``, written as an Excel
+    lab configuration; missing fields take the package defaults, as /api/process does."""
+    try:
+        body = await request.json()
+    except ValueError as exc:
+        raise HTTPException(422, "send a JSON object with the configuration in its config field") from exc
+    if not isinstance(body, dict) or not isinstance(body.get("config", {}), dict):
+        raise HTTPException(422, "send a JSON object with the configuration in its config field")
+    cfg = _config(json.dumps(body.get("config") or {}))
+    name = _xlsx_name(body.get("name"), "_config.xlsx")
+    return Response(config_to_xlsx(cfg), media_type=XLSX, headers={
+        "Content-Disposition": f'attachment; filename="{name}"'})
+
+
+@app.post("/api/config/read")
+def config_read(file: UploadFile = File(...)):
+    """Read a lab configuration, the Excel template (.xlsx) or JSON, into the form /api/process
+    accepts. Returns the configuration and notes on anything filled from the defaults or left out."""
+    name = Path(file.filename or "").name
+    suffix = Path(name).suffix.lower()
+    if suffix not in (".xlsx", ".json"):
+        raise HTTPException(415, f"{name or 'the file'} is not a lab configuration; use the Excel template "
+                                 "(.xlsx) or a .json file")
+    limit = max_upload_bytes()
+    data = file.file.read(limit + 1)
+    if len(data) > limit:
+        raise HTTPException(413, f"{name} is larger than the {limit // (1024 * 1024)} MB this service accepts")
+    if not data:
+        raise HTTPException(422, f"{name} is empty")
+    if suffix == ".json":
+        cfg, notes = _config(data.decode("utf-8", "replace")), []
+    else:
+        try:
+            cfg, notes = read_lab_config(data)
+        except LabConfigError as exc:
+            raise HTTPException(422, f"{name} could not be read: {exc}") from exc
+    return {"name": name, "ea_irms": VERSION, "config": config_to_dict(cfg), "notes": notes}
 
 
 @app.get("/api/example")

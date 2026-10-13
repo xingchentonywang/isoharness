@@ -1,6 +1,6 @@
 # isoharness
 
-isoharness is a website for stable isotope data reduction, one instrument at a time. EA-IRMS comes first: it corrects Thermo EA-IRMS carbon and nitrogen runs, with numbers from ea_irms, the Python engine behind the lab's EA-IRMS correction workbook, which this repository carries at version 1.4.5. GasBench N₂O (nitrate by the denitrifier method, and organic nitrogen after persulfate oxidation) and GasBench carbonate are planned.
+isoharness is a website for stable isotope data reduction, one instrument at a time. EA-IRMS comes first: it corrects Thermo EA-IRMS carbon and nitrogen runs, with numbers from ea_irms, the Python engine behind the lab's EA-IRMS correction workbook, which this repository carries at version 1.4.6. GasBench N₂O (nitrate by the denitrifier method, and organic nitrogen after persulfate oxidation) and GasBench carbonate are planned.
 
 ## Where it stands
 
@@ -10,7 +10,7 @@ Phase one put the engine behind a web API, LibreOffice in the container image to
 
 | Path | What it is |
 | --- | --- |
-| `ea_irms/` | The engine, 1.4.5 (parsing, the corrections, the workbook, and the Postgres store that phase three will use); 1.4.3 adds the uncertainty of %N, %C, and C:N and puts each value's uncertainty beside it on the Results sheet, 1.4.4 marks the samples to measure again, and 1.4.5 reports every uncertainty as 1σ |
+| `ea_irms/` | The engine, 1.4.6 (parsing, the corrections, the workbook, and the Postgres store that phase three will use); 1.4.3 adds the uncertainty of %N, %C, and C:N and puts each value's uncertainty beside it on the Results sheet, 1.4.4 marks the samples to measure again, 1.4.5 reports every uncertainty as 1σ, and 1.4.6 reads and writes the lab configuration as an Excel file |
 | `isoharness/` | The web API (FastAPI) |
 | `web/` | The pages the API serves: `index.html`, the home page at `/`, which lists the instruments; `ea-irms.html`, the EA-IRMS page at `/ea-irms` (the approved prototype's markup, as a template); `dc.js` (draws the template), `logic.js` (the views), and Preact 10.29.8 in `vendor/preact/` with its MIT license |
 | `port/` | The preview port (the steps that depend on a user's choices, in JavaScript) and its test |
@@ -44,6 +44,9 @@ These endpoints serve the EA-IRMS page. An instrument added later gets endpoints
 | `POST /api/process` | Every position's values and flags, the fitted steps, and the block the preview port recomputes from |
 | `POST /api/workbook` | The correction workbook (.xlsx), with its formulas computed by LibreOffice unless `values=false` |
 | `POST /api/results.csv` | The workbook's Results sheet as CSV, at full precision: each value followed by its 1σ (headed 1sigma), then Flags, the rerun mark with its reason and a suggested mass, the elemental drift factors, and %C and %N as measured |
+| `GET /api/config-template` | The lab configuration as an Excel template, filled with the package defaults |
+| `POST /api/config.xlsx` | A configuration sent as JSON, `{"config": {...}, "name": "run"}`, written as an Excel lab configuration; missing fields take the package defaults |
+| `POST /api/config/read` | A lab configuration file, the Excel template or JSON, read into the form the other POST endpoints accept, with notes on anything filled from the defaults or left out |
 
 Each POST takes a multipart form with `file`, an export as .xls, .xlsx, .xlsm, .csv, .txt, or .tsv of at most 10 MB (`ISOHARNESS_MAX_UPLOAD_MB` changes the limit), and optionally `config`, a lab configuration as JSON in the form `/api/defaults` returns. `/api/workbook` also takes `run_name` and `run_date` for its Setup sheet. A file ea_irms cannot read is refused with a message that names the problem, such as the columns it lacks.
 
@@ -56,6 +59,10 @@ Each %N, %C, and C:N carries a 1σ. For %N and %C, 1σ combines five terms, each
 ## Uncertainty as 1σ (ea_irms 1.4.5)
 
 Every uncertainty that the workbook, the results table, and the page report is one standard deviation, 1σ, the combined standard uncertainty; up to 1.4.4 the workbook put the expanded uncertainty U = k·u beside each value and the u columns after Flags, and from 1.4.5 it puts 1σ beside each value and drops the separate block, so the elemental drift factors and the values as measured move from AA to AD to U to X. The checks still compare against k × 1σ, with k (`coverage_k`, Setup B32) 2 by default: the anchors and linearity standards within it on QC, the anchors outside it among the problems of the whole run on the Rerun sheet, and the page's counts of samples that reversing a correction would move by more than it. The results table heads its columns 1sigma(...) rather than 1σ(...), since Excel misreads a Greek letter in a CSV file that has no byte-order mark. The engine and the API keep their names, `u_*` for 1σ and `U_*` for k × 1σ.
+
+## The lab configuration as an Excel file (ea_irms 1.4.6)
+
+A lab configuration can be an Excel file as well as JSON. `ea_irms/labconfig.py` writes it with three sheets: README; Settings, one row per setting with its value, what it means, and a grey Key column that is how the file is read; and Standards, the standards table in the column order of the workbook's Setup sheet, at most 16 rows. The page offers the template, filled with the package defaults, on the upload screen, and reads a chosen .xlsx file through `/api/config/read`; the Configuration download after a run is the same Excel file with that run's choices, and a .json configuration still works. On the command line, `python -m ea_irms --write-config lab.xlsx` writes the template and `--config lab.xlsx` reads one. An empty cell means off or not given where the setting allows that, as on the Setup sheet; where it does not, an empty cell is refused rather than replaced by a default. Every cell that cannot be used is named in one message, such as `Settings B6 (blank_correction) is 'maybe'; it needs one of On, Off, Auto`. A row missing from the file, as in one written by an older version, takes the package default, and a key this version does not read is left out; both are reported as notes. The last rows of Settings (the first drift position and the positions left out) belong to one run. An Excel file keeps 16 significant digits, so a value computed to more digits, such as the drift monitors' SD saved as the sample repeatability, comes back changed in the 16th or 17th digit; over 200,000 random values the largest relative change was 5.6e-16.
 
 ## Rerun marks (ea_irms 1.4.4)
 

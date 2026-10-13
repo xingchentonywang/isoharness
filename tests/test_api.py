@@ -19,7 +19,7 @@ from ea_irms.parse import parse_export
 from ea_irms.pipeline import Config, config_from_dict, config_to_dict, process
 from ea_irms.workbook import VERSION
 from isoharness import __version__
-from isoharness.app import app
+from isoharness.app import XLSX, app
 from isoharness.serialize import position_record
 
 DATA = Path(__file__).resolve().parent / "data"
@@ -266,3 +266,43 @@ def test_upload_limiter_window():
     assert lim.wait_seconds("a", 2, now=3600.0) is None     # it has left
     assert lim.wait_seconds("a", 2, now=3601.0) == 10       # the one at 10.0 leaves at 3610
 
+
+
+def test_lab_configuration_template_and_round_trip():
+    """ea_irms 1.4.6: the Excel template, a configuration written as Excel, and reading one back."""
+    from ea_irms.labconfig import read_lab_config
+    t = client.get("/api/config-template")
+    assert t.status_code == 200 and t.headers["content-type"] == XLSX
+    assert f'filename="lab_configuration_ea_irms_v{VERSION}.xlsx"' in t.headers["content-disposition"]
+    assert config_to_dict(read_lab_config(t.content)[0]) == config_to_dict(Config())
+
+    mine = {"blank_correction": "On", "coverage_k": 3.0, "exclude_drift_n": [18], "u_sample_n": 0.181}
+    w = client.post("/api/config.xlsx", json={"config": mine, "name": "20260915 raw"})
+    assert w.status_code == 200 and w.headers["content-type"] == XLSX
+    assert 'filename="20260915_raw_config.xlsx"' in w.headers["content-disposition"]
+    want = json.loads(json.dumps(config_to_dict(config_from_dict(mine))))
+    r = post("/api/config/read", name="lab.xlsx", content=w.content)
+    assert r.status_code == 200, r.text
+    assert r.json()["config"] == want and r.json()["notes"] == []
+    # the configuration read back gives the same results table as the JSON it came from
+    a = post("/api/results.csv", config=json.dumps(mine)).text
+    b = post("/api/results.csv", config=json.dumps(r.json()["config"])).text
+    assert a == b
+
+    j = post("/api/config/read", name="lab.json", content=json.dumps(mine).encode())
+    assert j.status_code == 200 and j.json()["config"] == want
+    assert post("/api/config/read", name="lab.txt", content=b"x").status_code == 415
+    assert client.post("/api/config.xlsx", content=b"[1, 2]",
+                       headers={"Content-Type": "application/json"}).status_code == 422
+
+
+def test_lab_configuration_problems_are_named():
+    wb = openpyxl.load_workbook(io.BytesIO(client.get("/api/config-template").content))
+    st = wb["Settings"]
+    row = next(r for r in range(1, st.max_row + 1) if st.cell(r, 4).value == "drift_model")
+    st.cell(row, 2).value = "Linear"
+    buf = io.BytesIO()
+    wb.save(buf)
+    r = post("/api/config/read", name="lab.xlsx", content=buf.getvalue())
+    assert r.status_code == 422
+    assert f"Settings B{row} (drift_model) is 'Linear'; it needs one of Row, Background, Auto" in r.json()["detail"]

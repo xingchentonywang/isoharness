@@ -13,21 +13,24 @@ already running there (the container image, say), opens the page in Chromium
    service's message for each, word for word;
 2. uploads tests/data/20260915_raw.csv and checks the upload screen (the twelve
    columns found, the positions, the page's agreement with the engine);
-3. loads a lab configuration after the upload, checks that the run is processed
+3. downloads the Excel template of the lab configuration and checks that it reads
+   as the package defaults; loads a lab configuration after the upload, as JSON and
+   then as the Excel file the service writes for it, checks that the run is processed
    again with it and the decisions start from it, then goes back to the defaults;
 4. visits all ten step screens, checking the instrument screen's charts and its
    settling line and the quality-check summary's links back to it, and changing
    decisions on the way: the blank switch,
    a drift monitor left out of the d15N fit, the drift model, a monitor left out of
    the elemental correction, and the d15N repeatability (the drift monitors' SD);
-5. checks that every value the results screen shows (mass, d15N, U, d13C, U, %N,
+5. checks that every value the results screen shows (mass, d15N, 1σ, d13C, 1σ, %N,
    %C, C:N, and the flags) equals, to the shown precision, the results table the
    service returns for the same decisions, built here from the processed
    configuration without the page;
 6. downloads the workbook, the results table and the configuration, checks their
-   names (from Content-Disposition), the configuration's fields, the table, and the
-   workbook's computed Results sheet, and posts the downloaded configuration back to
-   /api/results.csv to check that it reproduces the page's values;
+   names (from Content-Disposition), the configuration's fields (the Excel file read
+   back by the service), the table, and the workbook's computed Results sheet, and
+   posts the downloaded configuration back to /api/results.csv to check that it
+   reproduces the page's values;
 7. saves a screenshot of every screen at 1440 by 1000 (full page) and of the upload
    and results screens at 400 px wide;
 8. loads the page afresh, checks the landing page at 400 px and 1440 px wide, follows
@@ -113,6 +116,53 @@ def post(base, path, file: Path, fields=None, name=None):
             return r.status, dict(r.headers), r.read()
     except urllib.error.HTTPError as e:
         return e.code, dict(e.headers), e.read()
+
+
+def get(base, path):
+    """GET; returns (status, headers, body bytes)."""
+    try:
+        with urllib.request.urlopen(base + path, timeout=60) as r:
+            return r.status, dict(r.headers), r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, dict(e.headers), e.read()
+
+
+def post_json(base, path, obj):
+    """POST a JSON body; returns (status, headers, body bytes)."""
+    req = urllib.request.Request(base + path, data=json.dumps(obj).encode(), method="POST",
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            return r.status, dict(r.headers), r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, dict(e.headers), e.read()
+
+
+def table_diff(a_text, b_text, rel=1e-12):
+    """Cells of two results tables that differ, text exactly and numbers by more than rel, and the
+    largest relative difference between numbers. An Excel file keeps 16 significant digits, so a
+    configuration read back from one may carry a value computed to more digits a few 1e-16 apart."""
+    a, b = list(csv.reader(io.StringIO(a_text))), list(csv.reader(io.StringIO(b_text)))
+    if len(a) != len(b):
+        return [f"{len(a)} rows against {len(b)}"], 0.0
+    out, worst = [], 0.0
+    for i, (ra, rb) in enumerate(zip(a, b)):
+        if len(ra) != len(rb):
+            out.append(f"row {i}: {len(ra)} cells against {len(rb)}")
+            continue
+        for j, (x, y) in enumerate(zip(ra, rb)):
+            if x == y:
+                continue
+            try:
+                fx, fy = float(x), float(y)
+            except ValueError:
+                out.append(f"row {i}, column {j}: {x!r} against {y!r}")
+                continue
+            d = abs(fx - fy) / max(abs(fx), 1e-300)
+            worst = max(worst, d)
+            if abs(fx - fy) > rel * max(1.0, abs(fx)):
+                out.append(f"row {i}, column {j}: {x} against {y}")
+    return out, worst
 
 
 def rows_of(text):
@@ -281,18 +331,37 @@ def main(argv=None):
             check("Run date 15 Sep 2026, read from the file name" in body_text, "the run date was not read from the file name")
             shot("1440-03-upload.png")
 
-            # ---- a lab configuration loaded after the upload is processed on the server again
+            # ---- the Excel template of the lab configuration (ea_irms 1.4.6), as the package defaults
+            with page.expect_download(timeout=30000) as dl:
+                page.get_by_role("button", name="Download the template").click()
+            template = work / dl.value.suggested_filename
+            dl.value.save_as(str(template))
+            check(template.name == f"lab_configuration_ea_irms_v{ver}.xlsx", f"template named {template.name}")
+            status, _, body = post(base, "/api/config/read", template)
+            check(status == 200, f"/api/config/read answered {status} for the template")
+            status, _, dflt = get(base, "/api/defaults")
+            check(json.loads(body)["config"] == json.loads(dflt)["config"], "the template is not the package defaults")
+
+            # ---- a lab configuration loaded after the upload is processed on the server again,
+            # first as JSON, then as the Excel file the service writes for the same settings
             lab = work / "lab-config.json"
             lab.write_text(json.dumps({"blank_correction": "On", "coverage_k": 3.0}))
-            # (k = 3 on the uncertainty step can only come from the server, through the port block's settings)
             with page.expect_request(lambda r: r.url.endswith("/api/process") and r.method == "POST"):
                 page.set_input_files("#dc-config", str(lab))
             expect(page.get_by_text("The run was processed again with lab-config.json")).to_be_visible(timeout=30000)
+            status, _, body = post_json(base, "/api/config.xlsx", {"config": json.loads(lab.read_text()), "name": "lab"})
+            check(status == 200, f"/api/config.xlsx answered {status}")
+            lab = work / "lab-config.xlsx"
+            lab.write_bytes(body)
+            # (k = 3 on the uncertainty step can only come from the server, through the port block's settings)
+            with page.expect_request(lambda r: r.url.endswith("/api/process") and r.method == "POST"):
+                page.set_input_files("#dc-config", str(lab))
+            expect(page.get_by_text("The run was processed again with lab-config.xlsx")).to_be_visible(timeout=30000)
             page.get_by_role("button", name="Start the corrections").click()
             heading("inst")
             page.locator("nav[aria-label='Correction steps'] button", has_text="Setup").click()
             heading("setup")
-            expect(page.get_by_text("From lab-config.json.")).to_be_visible()
+            expect(page.get_by_text("From lab-config.xlsx.")).to_be_visible()
             page.locator("nav[aria-label='Correction steps'] button", has_text="Blank").click()
             heading("blank")
             expect(page.get_by_role("group", name="Blank correction").get_by_role("button", name="On")).to_have_attribute("aria-pressed", "true")
@@ -397,12 +466,16 @@ def main(argv=None):
                 expect(files.get_by_role("button", name=re.compile("^" + label))).to_be_enabled(timeout=timeout)
             check(got["Workbook"].name == f"20260915_raw_ea_irms_v{ver}.xlsx", f"workbook named {got['Workbook'].name}")
             check(got["Results table"].name == f"20260915_raw_results_ea_irms_v{ver}.csv", f"table named {got['Results table'].name}")
-            check(got["Configuration"].name == "20260915_raw_config.json", f"configuration named {got['Configuration'].name}")
+            check(got["Configuration"].name == "20260915_raw_config.xlsx", f"configuration named {got['Configuration'].name}")
             check(page.locator("[role=status]").count() == 0, "a download left a message: " + (
                 page.locator("[role=status]").first.inner_text() if page.locator("[role=status]").count() else ""))
 
-            # the configuration: the decisions in their fields, every other field as processed
-            cfg = json.loads(got["Configuration"].read_text())
+            # the configuration, read back by the service: the decisions in their fields, every other field
+            # as processed
+            status, _, body = post(base, "/api/config/read", got["Configuration"])
+            check(status == 200, f"/api/config/read answered {status} for the downloaded configuration")
+            check(json.loads(body)["notes"] == [], f"reading the configuration left notes: {json.loads(body)['notes']}")
+            cfg = json.loads(body)["config"]
             want = dict(processed, blank_correction="On", linearity_correction="Auto", linearity_correction_c="Auto",
                         drift_correction="Auto", drift_model="Background", exclude_drift_n=[EXCL_N], exclude_drift_c=[],
                         elemental_correction="Auto", exclude_elemental=[EXCL_E], u_sample_c=None)
@@ -414,9 +487,11 @@ def main(argv=None):
                   f"u_sample_n is {cfg['u_sample_n']}, the monitors' SD is {mine['u_sample_n']}")
 
             # the downloaded configuration posted back reproduces the page and the downloaded table
-            status, _, body = post(base, "/api/results.csv", RUN, {"config": got["Configuration"].read_text()})
+            status, _, body = post(base, "/api/results.csv", RUN, {"config": json.dumps(cfg)})
             check(status == 200, f"/api/results.csv answered {status} for the downloaded configuration")
-            check(body.decode() == got["Results table"].read_text(), "the downloaded table differs from the one its configuration gives")
+            diff, worst = table_diff(body.decode(), got["Results table"].read_text())
+            check(not diff, "the downloaded table differs from the one its configuration gives: " + "; ".join(diff[:3]))
+            stats["round trip"] = worst
             round_trip = rows_of(body.decode())
             compare(page_rows, round_trip, "results screen against the downloaded configuration")
             compare(page_rows, rows_of(got["Results table"].read_text()), "results screen against the downloaded table")
@@ -498,7 +573,8 @@ def main(argv=None):
     print(f"e2e_web: passed. {len(SCREENS) + 1} screens and the home page; {n} samples on the results screen equal the service's table for the "
           f"same decisions ({values} values and {n} flag lists, {exact} formatted identically; {stats['moved']} "
           f"d15N values moved by the decisions); workbook, table and configuration downloaded, {stats['book']} "
-          f"workbook values checked, configuration round trip exact; 2 refused uploads shown as written; "
+          f"workbook values checked, configuration round trip within {stats['round trip']:.1e} relative; "
+          f"2 refused uploads shown as written; "
           f"0 console errors, 0 failed requests; screenshots in {shots}")
     return 0
 

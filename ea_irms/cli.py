@@ -1,6 +1,6 @@
 """Turn one Isodat export into a correction workbook.
 
-    python -m ea_irms run.xls -o run_corrected.xlsx [--config lab.json]
+    python -m ea_irms run.xls -o run_corrected.xlsx [--config lab.xlsx or lab.json]
 """
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 from .parse import ExportFormatError, parse_export
+from .labconfig import LabConfigError, config_from_xlsx, config_to_xlsx
 from .pipeline import Config, config_from_dict, config_to_dict, process
 from .workbook import VERSION, build_workbook
 
@@ -18,8 +19,9 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="ea_irms", description=__doc__)
     ap.add_argument("export", nargs="?", help="Isodat export (.xls, .xlsx or .csv)")
     ap.add_argument("-o", "--out", help="workbook to write (default: alongside the export)")
-    ap.add_argument("--config", help="lab configuration JSON")
-    ap.add_argument("--write-config", help="write the default configuration and stop")
+    ap.add_argument("--config", help="lab configuration, an Excel file (.xlsx) or JSON")
+    ap.add_argument("--write-config", help="write the default configuration and stop; an .xlsx name "
+                                           "writes the Excel template, any other name JSON")
     ap.add_argument("--no-recalc", action="store_true",
                     help="skip computing the formulas with LibreOffice; the workbook then shows "
                          "values only once Excel opens it")
@@ -27,7 +29,10 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     if args.write_config:
-        Path(args.write_config).write_text(json.dumps(config_to_dict(Config()), indent=2))
+        if args.write_config.lower().endswith(".xlsx"):
+            config_to_xlsx(Config(), args.write_config)
+        else:
+            Path(args.write_config).write_text(json.dumps(config_to_dict(Config()), indent=2))
         print(f"wrote {args.write_config}")
         return 0
 
@@ -37,8 +42,11 @@ def main(argv=None):
     config = Config()
     if args.config:
         try:
-            config = config_from_dict(json.loads(Path(args.config).read_text()))
-        except (OSError, ValueError) as exc:
+            if args.config.lower().endswith(".xlsx"):
+                config = config_from_xlsx(args.config)
+            else:
+                config = config_from_dict(json.loads(Path(args.config).read_text()))
+        except (OSError, ValueError, LabConfigError) as exc:
             print(f"cannot read the configuration {args.config}: {exc}", file=sys.stderr)
             return 2
     export = Path(args.export)

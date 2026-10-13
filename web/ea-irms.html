@@ -99,9 +99,10 @@ button:disabled { opacity: 0.62; }
 <div style="display: flex; flex-wrap: wrap; gap: 8px">
 <button type="button" onClick="{{up.chooseCfg}}" disabled="{{up.busy}}" style="font: inherit; font-size: 14px; font-weight: 600; min-height: 38px; padding: 7px 14px; border: 1px solid #B9C4CC; border-radius: 4px; background: #FFFFFF; color: #13212B; cursor: pointer" style-hover="border-color: #13212B">{{up.cfgButton}}</button>
 <sc-if value="{{up.hasCfg}}"><button type="button" onClick="{{up.clearCfg}}" disabled="{{up.busy}}" style="font: inherit; font-size: 14px; font-weight: 600; min-height: 38px; padding: 7px 14px; border: 1px solid #B9C4CC; border-radius: 4px; background: #FFFFFF; color: #13212B; cursor: pointer" style-hover="border-color: #13212B">Use the package defaults</button></sc-if>
+<button type="button" onClick="{{up.template}}" style="font: inherit; font-size: 14px; font-weight: 600; min-height: 38px; padding: 7px 14px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: #0B5E8E; text-decoration: underline; text-underline-offset: 3px; cursor: pointer" style-hover="color: #13212B">Download the template</button>
 </div>
 <span style="font-size: 13.5px; line-height: 1.5; color: #4A5A66">{{up.cfgNote}}</span>
-<input id="dc-config" type="file" accept=".json,application/json" hidden onchange="{{up.pickedCfg}}">
+<input id="dc-config" type="file" accept=".xlsx,.json,application/json" hidden onchange="{{up.pickedCfg}}">
 </div>
 <label style="min-width: 0; display: flex; flex-direction: column; gap: 6px; font-size: 15px; font-weight: 600">
 <span>Run date <span style="font-weight: 400; color: #4A5A66">(optional)</span></span>
