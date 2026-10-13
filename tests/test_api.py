@@ -242,7 +242,7 @@ def test_preview_port_is_the_checked_file():
 
 def test_upload_limit_per_address(monkeypatch):
     from isoharness.app import limiter
-    monkeypatch.setenv("ISOHARNESS_UPLOADS_PER_HOUR", "2")
+    monkeypatch.setenv("ISOHARNESS_READS_PER_HOUR", "2")
     limiter.reset()
     try:
         assert post("/api/results.csv").status_code == 200
@@ -253,6 +253,21 @@ def test_upload_limit_per_address(monkeypatch):
         assert int(r.headers["retry-after"]) > 0
         assert client.get("/api/health").status_code == 200      # only uploads count
         assert limiter.wait_seconds("another address", 2) is None
+    finally:
+        limiter.reset()
+
+
+def test_workbooks_have_a_limit_of_their_own(monkeypatch):
+    from isoharness.app import limiter
+    monkeypatch.setenv("ISOHARNESS_READS_PER_HOUR", "1")
+    monkeypatch.setenv("ISOHARNESS_UPLOADS_PER_HOUR", "1")
+    limiter.reset()
+    try:
+        assert post("/api/process").status_code == 200
+        assert post("/api/workbook", values="false").status_code == 200     # counted apart from the reads
+        r = post("/api/workbook", values="false")
+        assert r.status_code == 429 and "1 workbook requests in the last hour" in r.json()["detail"]
+        assert post("/api/process").status_code == 429
     finally:
         limiter.reset()
 

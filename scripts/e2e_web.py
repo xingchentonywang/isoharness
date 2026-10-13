@@ -31,9 +31,14 @@ already running there (the container image, say), opens the page in Chromium
    back by the service), the table, and the workbook's computed Results sheet, and
    posts the downloaded configuration back to /api/results.csv to check that it
    reproduces the page's values;
-7. saves a screenshot of every screen at 1440 by 1000 (full page) and of the upload
+7. adds two more runs at once (isoharness 0.2.0), copies of the test run with each
+   sample named by its position, the second with each sample's N2 peak 0.5 permil
+   higher; checks the batch list, that the first run kept its decisions when shown
+   again, the samples measured in more than one run, and the combined results and
+   table, each run's rows against the service's table for that run; removes a run;
+8. saves a screenshot of every screen at 1440 by 1000 (full page) and of the upload
    and results screens at 400 px wide;
-8. loads the page afresh, checks the landing page at 400 px and 1440 px wide, follows
+9. loads the page afresh, checks the landing page at 400 px and 1440 px wide, follows
    the brand back to the home page and checks it at 400 px, and reads the example run
    through its button.
 
@@ -169,6 +174,50 @@ def rows_of(text):
     return {int(r["Row"]): r for r in csv.DictReader(io.StringIO(text))}
 
 
+def variant(path: Path, samples: set, shift=0.0) -> bytes:
+    """The test run with each sample (its positions in samples) named S<position> and its N2 peak's
+    d15N moved by shift, as tests/test_batch.py builds it: the sample peak is the position's last
+    mass-28 peak."""
+    rows = list(csv.reader(io.StringIO(path.read_text(encoding="utf-8"))))
+    h = rows[0]
+    col = {k: h.index(k) for k in ("Row", "Identifier 1", "Ampl  28", "Is Ref _", "d 15N/14N")}
+    last28 = {r[col["Row"]].strip(): i for i, r in enumerate(rows[1:], start=1)
+              if len(r) > col["Ampl  28"] and r[col["Ampl  28"]].strip()}
+    for i, r in enumerate(rows[1:], start=1):
+        row = r[col["Row"]].strip() if r else ""
+        if row in samples:
+            r[col["Identifier 1"]] = f"S{row}"
+            if shift and last28.get(row) == i and r[col["Is Ref _"]].strip() != "1":
+                r[col["d 15N/14N"]] = repr(float(r[col["d 15N/14N"]]) + shift)
+    buf = io.StringIO()
+    csv.writer(buf, lineterminator="\n").writerows(rows)
+    return buf.getvalue().encode("utf-8")
+
+
+def sheet_diff(rows, text, rel=1e-15):
+    """Rows of an Excel sheet (values) against a results table's rows (CSV text, header left out):
+    the cells that differ, and the largest relative difference between numbers."""
+    table = list(csv.reader(io.StringIO(text)))[1:]
+    if len(rows) != len(table):
+        return [f"{len(rows)} rows against {len(table)}"], 0.0
+    out, worst = [], 0.0
+    for i, (ra, rb) in enumerate(zip(rows, table)):
+        for j, (a, b) in enumerate(zip(ra, rb)):
+            if b == "":
+                if a not in (None, ""):
+                    out.append(f"row {i}, column {j}: {a!r} against empty")
+                continue
+            if isinstance(a, str) or a is None:
+                if a != b:
+                    out.append(f"row {i}, column {j}: {a!r} against {b!r}")
+                continue
+            d = abs(a - float(b))
+            worst = max(worst, d / max(abs(float(b)), 1e-300))
+            if d > rel * max(1.0, abs(float(b))):
+                out.append(f"row {i}, column {j}: {a!r} against {b}")
+    return out, worst
+
+
 def ftext(flag):
     """The page's wording of an engine flag (logic.js ftext)."""
     return re.sub(r"(\d)x the blank", r"\1× the blank", flag.replace("d15N", "δ¹⁵N").replace("d13C", "δ¹³C"), count=1)
@@ -292,8 +341,8 @@ def main(argv=None):
             page.wait_for_url(re.compile(r"/ea-irms$"))
 
             # ---- the landing page
-            expect(page.get_by_text("Drop an export here, or choose a file")).to_be_visible()
-            check("deletes the file before it sends its reply" in page.inner_text("body"),
+            expect(page.get_by_text("Drop exports here, or choose files")).to_be_visible()
+            check("deletes each file before it sends its reply" in page.inner_text("body"),
                   "the upload screen does not say that the file is deleted")
             no_prototype()
             shot("1440-01-upload-empty.png")
@@ -523,11 +572,102 @@ def main(argv=None):
             page.unroute("**/api/results.csv")
             expect(files.get_by_role("button", name=re.compile("^Results table"))).to_be_enabled(timeout=60000)
 
+            # ---- several runs at once (isoharness 0.2.0)
+            before = page.locator('section[aria-label="Samples"]').inner_text()
+            run_a, run_b = work / "20260916_run_a.csv", work / "20260917_run_b.csv"
+            status, _, body = post(base, "/api/process", RUN)
+            samples = {str(q["row"]) for q in json.loads(body)["positions"] if q["role"] == "Sample"}
+            run_a.write_bytes(variant(RUN, samples))
+            run_b.write_bytes(variant(RUN, samples, 0.5))
+            page.get_by_role("navigation", name="Main").get_by_role("button", name="EA-IRMS").click()
+            page.set_input_files("#dc-export", [str(run_a), str(run_b)])
+            expect(page.get_by_text("Batch of 3 runs")).to_be_visible(timeout=60000)
+            expect(page.get_by_role("heading", level=1, name="Correct 3 runs")).to_be_visible()
+            listed = page.locator('section[aria-label="Runs in this batch"] li')
+            check(listed.count() == 3, f"the batch lists {listed.count()} runs, not 3")
+            dated = (("20260915_raw.csv", "15 Sep 2026"), ("20260916_run_a.csv", "16 Sep 2026"),
+                     ("20260917_run_b.csv", "17 Sep 2026"))
+            for k, (name, date) in enumerate(dated):
+                text = listed.nth(k).inner_text()
+                check(name in text and "run of " + date in text and "Read without errors" in text,
+                      f"batch row {k + 1} reads {text!r}")
+            check(listed.nth(2).get_attribute("aria-current") == "true", "the last run added is not the one shown")
+            shot("1440-batch-upload.png")
+            page.get_by_role("button", name="Show 20260915_raw.csv").click()
+            page.get_by_role("button", name="Start the corrections").click()
+            heading("results")
+            expect(page.get_by_text("Run 1 of 3")).to_be_visible()
+            check(page.locator('section[aria-label="Samples"]').inner_text() == before,
+                  "the first run's results changed when two runs were added and it was shown again")
+            reps = page.locator('[aria-label="Samples measured in more than one run"] [role=row]')
+            status, _, body = post(base, "/api/process", run_a)
+            slope = json.loads(body)["fits"]["cal_n"]["slope"]
+            check(reps.count() - 1 == 26, f"{reps.count() - 1} samples measured in more than one run, not 26")
+            ranges = {reps.nth(i).locator("[role=cell]").nth(5).inner_text() for i in range(1, reps.count())}
+            want = js_fixed(0.5 * slope, 2)
+            check(ranges == {want}, f"the d15N ranges read {ranges}, not {want}")
+            shot("1440-batch-results.png")
+            # the combined results: each run's rows equal the service's table for that run, run 1 with its decisions
+            files = page.locator('section[aria-label="Files and methods"]')
+            combined = {}
+            for label, key in (("Combined results, all 3 runs", "xlsx"), ("Combined results table", "csv")):
+                with page.expect_download(timeout=120000) as dl:
+                    files.get_by_role("button", name=re.compile("^" + label)).click()
+                d = dl.value
+                combined[key] = work / d.suggested_filename
+                d.save_as(str(combined[key]))
+                expect(files.get_by_role("button", name=re.compile("^" + label))).to_be_enabled(timeout=120000)
+            for key in ("xlsx", "csv"):
+                check(combined[key].name == f"combined_3_runs_results_ea_irms_v{ver}.{key}",
+                      f"the combined {key} file is named {combined[key].name}")
+            book = openpyxl.load_workbook(combined["xlsx"])
+            check(book.sheetnames == ["README", "Results", "Runs", "Repeats"], f"combined sheets {book.sheetnames}")
+            rows = list(book["Results"].iter_rows(min_row=2, values_only=True))
+            check(len(rows) == 168, f"the combined Results sheet has {len(rows)} rows, not 168")
+            lines = combined["csv"].read_text().splitlines()
+            check(len(lines) == 169 and lines[0].startswith("Run,Row,Identifier"),
+                  f"the combined table has {len(lines)} lines, the first {lines[0][:40]!r}")
+            tables = [got["Results table"].read_text()]
+            for f in (run_a, run_b):
+                status, _, body = post(base, "/api/results.csv", f)
+                check(status == 200, f"/api/results.csv answered {status} for {f.name}")
+                tables.append(body.decode())
+            worst = 0.0
+            for k, (label, table) in enumerate(zip(("20260915_raw", "20260916_run_a", "20260917_run_b"), tables)):
+                part = rows[56 * k:56 * (k + 1)]
+                check({r[0] for r in part} == {label},
+                      f"combined rows {56 * k + 1} to {56 * (k + 1)} are not all {label}")
+                diff, w = sheet_diff([r[1:] for r in part], table)
+                check(not diff, f"combined results, {label}: " + "; ".join(diff[:3]))
+                worst = max(worst, w)
+                own = [ln.split(",", 1)[1] for ln in lines[1 + 56 * k:1 + 56 * (k + 1)]]
+                check(own == table.splitlines()[1:], f"combined table, {label}: not the run's own table")
+            runs = list(book["Runs"].iter_rows(min_row=2, values_only=True))
+            check([r[2] for r in runs] == ["2026-09-15", "2026-09-16", "2026-09-17"],
+                  f"run dates {[r[2] for r in runs]}")
+            status, _, body = post(base, "/api/process", RUN, {"config": json.dumps(mine)})
+            fits = json.loads(body)["fits"]
+            n_on, c_on = fits["blank_n"]["in_force"], fits["blank_c"]["in_force"]
+            blank = "N and C" if n_on and c_on else "N only" if n_on else "C only" if c_on else "no"
+            check(runs[0][7] == blank and blank != "no",
+                  f"the first run's blank reads {runs[0][7]!r} on the Runs sheet, not {blank!r}")
+            rep = list(book["Repeats"].iter_rows(values_only=True))
+            ix = {h: i for i, h in enumerate(rep[0])}
+            off = [r for r in rep[1:] if r[ix["d15N minus mean"]] is not None
+                   and abs(abs(r[ix["d15N minus mean"]]) - 0.25 * slope) > 1e-9]
+            check(len(rep) - 1 == 52 and not off, f"Repeats: {len(rep) - 1} rows, {len(off)} off by more than 1e-9")
+            stats["batch"] = (len(rows), worst, len(rep) - 1)
+            page.get_by_role("navigation", name="Main").get_by_role("button", name="EA-IRMS").click()
+            page.get_by_role("button", name="Remove 20260917_run_b.csv").click()
+            expect(page.get_by_text("Batch of 2 runs")).to_be_visible()
+            page.get_by_role("button", name="Start the corrections").click()
+            heading("results")
+
             # ---- 400 px wide
             page.set_viewport_size({"width": 400, "height": 1000})
             shot("400-results.png")
             page.get_by_role("navigation", name="Main").get_by_role("button", name="EA-IRMS").click()
-            expect(page.get_by_text("Read without errors")).to_be_visible()
+            expect(page.get_by_text("Read without errors").first).to_be_visible()
             shot("400-upload.png")
             wide = page.evaluate("document.documentElement.scrollWidth")
             check(wide <= 400, f"the upload screen is {wide} px wide at a 400 px viewport")
@@ -574,7 +714,8 @@ def main(argv=None):
           f"same decisions ({values} values and {n} flag lists, {exact} formatted identically; {stats['moved']} "
           f"d15N values moved by the decisions); workbook, table and configuration downloaded, {stats['book']} "
           f"workbook values checked, configuration round trip within {stats['round trip']:.1e} relative; "
-          f"2 refused uploads shown as written; "
+          f"2 refused uploads shown as written; a batch of 3 runs, {stats['batch'][0]} combined rows equal to each "
+          f"run's own table within {stats['batch'][1]:.1e} relative, {stats['batch'][2]} repeat analyses; "
           f"0 console errors, 0 failed requests; screenshots in {shots}")
     return 0
 

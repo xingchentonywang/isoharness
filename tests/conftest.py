@@ -13,5 +13,6 @@ ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "tests" / "data"
 sys.path.insert(0, str(ROOT))
 os.environ.setdefault("EA_TEMPLATE", str(DATA / "EA-IRMS_Correction_Template_v2.xlsx"))
-# The upload limit is tested on its own (test_api.py); every other test runs without it.
+# The upload limits are tested on their own (test_api.py); every other test runs without them.
 os.environ.setdefault("ISOHARNESS_UPLOADS_PER_HOUR", "0")
+os.environ.setdefault("ISOHARNESS_READS_PER_HOUR", "0")

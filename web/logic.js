@@ -5,10 +5,15 @@
 // ea_irms). The page calls engine.runModel on each choice; the workbook, the results
 // table and the processed configuration come from the engine on the server.
 //
-// The upload screen posts the export, and a lab configuration if one is chosen, to
+// The upload screen posts each export, and a lab configuration if one is chosen, to
 // /api/process. Its "port" block and configuration drive the instrument check, the eight
 // steps and the results. The downloads post the same export again, kept in this tab only, with the
 // configuration built from the decisions (configFor).
+//
+// Several exports make a batch (isoharness 0.2.0): each run is processed and corrected on its own,
+// with the one lab configuration, and keeps its own decisions. The run on screen holds its working
+// state (dec, sel, filt, runDate, dateFrom, last) in this.state; the others keep theirs in run.saved.
+// The combined results post every run with its own configuration to /api/batch/results.xlsx.
 'use strict';
 
 const FLOW = ['inst', 'setup', 'blank', 'lin', 'drift', 'cal', 'elem', 'unc', 'qc', 'results'];
@@ -28,13 +33,16 @@ const WORDS = ['no', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eig
 // about ten pulses; Tony chose on 2026-10-12 to hold each run's pulses to it.
 const REF_SD_LIMIT = 0.1;
 const OK_ICON = { c: '#0B6E4F', d: 'M6 10.5l2.6 2.6L14 7.6' };
+// The most runs in one batch, as the service combines them (ISOHARNESS_MAX_BATCH_RUNS, default 20).
+const MAX_RUNS = 20;
 const WARN_ICON = { c: '#A33A00', d: 'M10 5.5v5.5M10 14v.1' };
 
 class Component extends DCLogic {
   constructor(props) {
     super(props);
-    this.state = { screen: 'upload', boot: null, run: null, cfg: null, runDate: '', dateFrom: '', busy: '',
-      pending: '', error: null, toast: '', drag: false, dec: null, sel: {}, filt: 'all', last: 'inst' };
+    this.state = { screen: 'upload', boot: null, run: null, runs: [], active: -1, cfg: null, runDate: '', dateFrom: '',
+      busy: '', pending: '', error: null, toast: '', drag: false, dec: null, sel: {}, filt: 'all', last: 'inst' };
+    this._mcs = new Map();
     this._runs = 0;
     this._depth = 0;
   }
@@ -58,9 +66,10 @@ class Component extends DCLogic {
 
   // The configuration for the downloads: the one the run was processed with, with the
   // decisions written into their fields and every other field left as it was.
-  configFor(d) {
-    const M = this.model(d), out = {};
-    for (const k of Object.keys(this.state.run.config)) out[k] = this.state.run.config[k];
+  configFor(d, run) {
+    run = run || this.state.run;
+    const M = this.model(d, run), out = {};
+    for (const k of Object.keys(run.config)) out[k] = run.config[k];
     return Object.assign(out, {
       blank_correction: d.blank, linearity_correction: d.linN, linearity_correction_c: d.linC,
       drift_correction: d.drift, drift_model: d.model, exclude_drift_n: d.exclN.slice(), exclude_drift_c: d.exclC.slice(),
@@ -71,11 +80,12 @@ class Component extends DCLogic {
   // The port's model for a set of decisions. The repeatability source becomes u_sample_n
   // and u_sample_c: none for the pooled anchors, the configuration's value, or the SD of
   // the drift monitors in the fit (which needs the drift step first, hence a second run).
-  model(d) {
-    const run = this.state.run;
-    if (!this._mc || this._mcRun !== run.id) { this._mc = new Map(); this._mcRun = run.id; }
+  model(d, run) {
+    run = run || this.state.run;
+    let mc = this._mcs.get(run.id);
+    if (!mc) { mc = new Map(); this._mcs.set(run.id, mc); }
     const key = JSON.stringify(d);
-    const hit = this._mc.get(key);
+    const hit = mc.get(key);
     if (hit) return hit;
     const D = run.port;
     const e = { blank: d.blank, linN: d.linN, linC: d.linC, drift: d.drift, model: d.model,
@@ -98,8 +108,8 @@ class Component extends DCLogic {
     }
     M.monSD = sd;
     M.u = { n: e.uN, c: e.uC };
-    if (this._mc.size > 80) this._mc.clear();
-    this._mc.set(key, M);
+    if (mc.size > 80) mc.clear();
+    mc.set(key, M);
     return M;
   }
 
@@ -122,7 +132,7 @@ class Component extends DCLogic {
   // The port's values on the configuration's own decisions against the engine's, at
   // every position: the corrections, U, %N, %C, C:N, the elemental factors, the flags.
   verify(run) {
-    const M = this.model(run.dec0);
+    const M = this.model(run.dec0, run);
     const byRow = new Map(run.positions.map((p) => [p.row, p]));
     const same = (a, b) => (a == null || b == null ? a == null && b == null
       : Math.abs(a - b) <= 1e-9 * Math.max(1, Math.abs(b)));
@@ -160,6 +170,47 @@ class Component extends DCLogic {
     return run;
   }
 
+  // ---------------------------------------------------------------- the batch
+  // The working state of the run on screen, as run.saved keeps it for the others.
+  stash() {
+    const st = this.state;
+    if (st.run) st.run.saved = { dec: st.dec, sel: st.sel, filt: st.filt, runDate: st.runDate, dateFrom: st.dateFrom, last: st.last };
+  }
+
+  restore(run) {
+    const s = run.saved || { dec: run.dec0, sel: {}, filt: 'all', runDate: '', dateFrom: '', last: 'inst' };
+    return { run, dec: s.dec, sel: s.sel, filt: s.filt, runDate: s.runDate, dateFrom: s.dateFrom, last: s.last };
+  }
+
+  // The decisions and run date of any run in the batch, the one on screen included.
+  decOf(run) { return run === this.state.run ? this.state.dec : (run.saved || {}).dec || run.dec0; }
+
+  dateOf(run) { return run === this.state.run ? this.state.runDate : (run.saved || {}).runDate || ''; }
+
+  // Show another run of the batch, on the same screen, with the decisions it was left with.
+  switchRun(i) {
+    const st = this.state;
+    if (st.busy || i === st.active || !st.runs[i]) return;
+    this.stash();
+    this.setState(Object.assign(this.restore(st.runs[i]), { active: i, toast: '', error: null }));
+  }
+
+  removeRun(i) {
+    const st = this.state;
+    if (st.busy || !st.runs[i]) return;
+    this.stash();
+    const gone = st.runs[i], runs = st.runs.filter((_, j) => j !== i);
+    this._mcs.delete(gone.id);
+    if (!runs.length) {
+      this.setState({ runs, active: -1, run: null, dec: null, sel: {}, filt: 'all', runDate: '', dateFrom: '', last: 'inst',
+        error: null, toast: gone.name + ' was removed.' });
+      this.go('upload');
+      return;
+    }
+    const active = st.active === i ? Math.min(i, runs.length - 1) : st.active > i ? st.active - 1 : st.active;
+    this.setState(Object.assign(this.restore(runs[active]), { runs, active, error: null, toast: gone.name + ' was removed from the batch.' }));
+  }
+
   // ---------------------------------------------------------------- requests
   async boot() {
     const get = async (url) => {
@@ -189,66 +240,105 @@ class Component extends DCLogic {
     return 'The service answered ' + resp.status + (resp.statusText ? ' ' + resp.statusText : '') + ' without a message.';
   }
 
-  pickExport(file) {
+  // Exports chosen or dropped together are read one after another and added to the batch; an export
+  // with the name of a run already in it replaces that run. The run date comes from each file's name;
+  // a date typed before the first upload goes with it when its name has none.
+  async addExports(files) {
     if (this.state.busy) return;
-    const add = { error: null };
-    if (!this.state.runDate || this.state.dateFrom === 'name') {
-      const guess = this.dateFromName(file.name);
-      add.runDate = guess || (this.state.dateFrom === 'name' ? '' : this.state.runDate);
-      add.dateFrom = guess ? 'name' : (this.state.dateFrom === 'name' ? '' : this.state.dateFrom);
+    const list = Array.from(files || []).filter(Boolean);
+    if (!list.length) return;
+    const fails = [];
+    for (let k = 0; k < list.length; k++) {
+      const file = list[k], st = this.state;
+      const at = st.runs.findIndex((r) => r.name === file.name);
+      if (at < 0 && st.runs.length >= MAX_RUNS) {
+        fails.push({ name: file.name, detail: 'The batch already holds ' + MAX_RUNS + ' runs, the most the combined results take; remove one first.' });
+        continue;
+      }
+      let runDate = this.dateFromName(file.name), dateFrom = runDate ? 'name' : '';
+      if (!runDate && !st.runs.length && st.dateFrom === 'you' && st.runDate) { runDate = st.runDate; dateFrom = 'you'; }
+      this.setState({ busy: 'process', pending: file.name + (list.length > 1 ? ' (' + (k + 1) + ' of ' + list.length + ')' : ''), error: null, toast: '' });
+      const run = await this.send(file, st.cfg, runDate);
+      if (run.fail) { fails.push({ name: file.name, detail: run.detail }); continue; }
+      run.saved = { dec: run.dec0, sel: {}, filt: 'all', runDate, dateFrom, last: 'inst' };
+      this.stash();
+      const runs = this.state.runs.slice();
+      if (at >= 0) { this._mcs.delete(runs[at].id); runs[at] = run; } else runs.push(run);
+      this.setState(Object.assign(this.restore(run), { runs, active: at >= 0 ? at : runs.length - 1 }));
     }
-    this.setState(add);
-    this.process(file, this.state.cfg, 'export');
+    let error = null;
+    if (fails.length === 1 && list.length === 1) error = { title: fails[0].name + ' was not processed', detail: fails[0].detail };
+    else if (fails.length) {
+      error = { title: (fails.length === list.length ? 'None of the ' : fails.length + ' of the ') + list.length + ' exports '
+        + (fails.length === 1 ? 'was' : 'were') + ' processed', detail: fails.map((f) => f.name + ': ' + f.detail).join('\n') };
+    }
+    this.setState({ busy: '', pending: '', error });
+    this.forceUpdate();
   }
 
   // The 2026-09-15 test run, fetched from the service and then read like a dropped file
-  // (dc.js applies setState at once, so busy is clear when pickExport looks).
+  // (dc.js applies setState at once, so busy is clear when addExports looks).
   loadExample() {
     if (this.state.busy) return;
     this.setState({ busy: 'process', pending: '20260915_raw.csv', error: null });
     fetch('api/example', { cache: 'no-store' })
       .then((r) => { if (!r.ok) throw new Error('the service answered ' + r.status); return r.blob(); })
-      .then((b) => { this.setState({ busy: '', pending: '' }); this.pickExport(new File([b], '20260915_raw.csv', { type: 'text/csv' })); })
+      .then((b) => { this.setState({ busy: '', pending: '' }); this.addExports([new File([b], '20260915_raw.csv', { type: 'text/csv' })]); })
       .catch((e) => this.setState({ busy: '', pending: '', error: { title: 'The example run was not loaded', detail: String(e && e.message ? e.message : e) } }));
   }
 
-  async process(file, cfg, why) {
-    this.setState({ busy: 'process', pending: file.name, error: null, toast: '' });
+  // Post one export, with the configuration, to /api/process. Returns the run, checked against the
+  // engine's values, or { fail: true, detail } with the service's own words.
+  async send(file, cfg, runDate) {
     const form = new FormData();
     form.append('file', file, file.name);
     if (cfg) form.append('config', JSON.stringify(cfg.data));
-    if (this.state.runDate) form.append('run_date', this.state.runDate);
+    if (runDate) form.append('run_date', runDate);
     let resp;
     try {
       resp = await fetch('api/process', { method: 'POST', body: form });
     } catch (err) {
-      this.setState({ busy: '', error: { title: file.name + ' was not processed',
-        detail: 'The service could not be reached (' + err.message + '). Check the connection and try again.' } });
-      return;
+      return { fail: true, detail: 'The service could not be reached (' + err.message + '). Check the connection and try again.' };
     }
     const body = await this.answer(resp);
+    if (!resp.ok || !body || !body.port) {
+      return { fail: true, detail: resp.ok ? 'The service sent an answer this page cannot read.' : this.detail(resp, body) };
+    }
     try {
-      this.accept(file, cfg, why, resp, body);
+      const run = this.makeRun(file, cfg, body);
+      run.check = this.verify(run);
+      if (run.check.bad.length) console.warn('isoharness: the preview of ' + file.name + ' differs from the engine at positions', run.check.bad);
+      return run;
     } catch (err) {
       console.error(err);
-      this.setState({ busy: '', error: { title: file.name + ' could not be shown', detail: 'The page could not read the service’s answer (' + err.message + ').' } });
+      return { fail: true, detail: 'The page could not read the service’s answer (' + err.message + ').' };
     }
   }
 
-  accept(file, cfg, why, resp, body) {
-    if (!resp.ok || !body || !body.port) {
-      const title = why === 'config' ? (cfg ? cfg.name + ' was not accepted' : 'The run was not processed again')
-        : file.name + ' was not processed';
-      this.setState({ busy: '', error: { title, detail: resp.ok ? 'The service sent an answer this page cannot read.' : this.detail(resp, body) } });
+  // A new configuration processes every run again; if one is refused, the batch stays as it was.
+  async reprocessAll(cfg) {
+    this.stash();
+    const old = this.state.runs.slice(), active = this.state.active, runs = [], fails = [];
+    for (let k = 0; k < old.length; k++) {
+      const prev = old[k], s = prev.saved || {};
+      this.setState({ busy: 'process', pending: prev.name + (old.length > 1 ? ' (' + (k + 1) + ' of ' + old.length + ')' : ''), error: null, toast: '' });
+      const run = await this.send(prev.file, cfg, s.runDate || '');
+      if (run.fail) { fails.push({ name: prev.name, detail: run.detail }); continue; }
+      run.saved = { dec: run.dec0, sel: {}, filt: 'all', runDate: s.runDate || '', dateFrom: s.dateFrom || '', last: 'inst' };
+      runs.push(run);
+    }
+    if (fails.length) {
+      const title = cfg ? cfg.name + ' was not accepted' : (old.length > 1 ? 'The runs were' : 'The run was') + ' not processed again';
+      const detail = old.length === 1 ? fails[0].detail : fails.map((f) => f.name + ': ' + f.detail).join('\n')
+        + '\nThe batch keeps the configuration it had.';
+      this.setState(Object.assign(this.restore(old[active]), { busy: '', pending: '', runs: old, active, error: { title, detail } }));
       return;
     }
-    const run = this.makeRun(file, cfg, body);
-    const toast = why !== 'config' ? '' : cfg
-      ? 'The run was processed again with ' + cfg.name + '; the decisions now start from it.'
-      : 'The run was processed again with the package defaults; the decisions now start from them.';
-    this.setState({ busy: '', pending: '', run, cfg, dec: run.dec0, sel: {}, filt: 'all', error: null, toast, last: 'inst' });
-    run.check = this.verify(run);
-    if (run.check.bad.length) console.warn('isoharness: the preview differs from the engine at positions', run.check.bad);
+    for (const r of old) this._mcs.delete(r.id);
+    const what = old.length > 1 ? 'The ' + old.length + ' runs were' : 'The run was';
+    const toast = cfg ? what + ' processed again with ' + cfg.name + '; the decisions now start from it.'
+      : what + ' processed again with the package defaults; the decisions now start from them.';
+    this.setState(Object.assign(this.restore(runs[active]), { busy: '', pending: '', runs, active, cfg, error: null, toast }));
     this.forceUpdate();
   }
 
@@ -303,7 +393,7 @@ class Component extends DCLogic {
   }
 
   useConfig(cfg) {
-    if (this.state.run) this.process(this.state.run.file, cfg, 'config');
+    if (this.state.runs.length) this.reprocessAll(cfg);
     else this.setState({ cfg, error: null });
   }
 
@@ -319,14 +409,40 @@ class Component extends DCLogic {
 
   clearConfig() {
     if (this.state.busy) return;
-    if (this.state.run) this.process(this.state.run.file, null, 'config');
+    if (this.state.runs.length) this.reprocessAll(null);
     else this.setState({ cfg: null, error: null });
   }
 
-  async download(kind) {
-    const st = this.state, run = st.run;
-    if (!run || st.busy) return;
-    const config = this.configFor(st.dec);
+  async download(kind, i) {
+    const st = this.state;
+    if (!st.run || st.busy) return;
+    if (kind === 'batch' || kind === 'batchcsv') {
+      this.setState({ busy: kind, toast: '' });
+      let toast = '';
+      try {
+        toast = await this.fetchBatch(kind);
+      } catch (err) {
+        console.error(err);
+        toast = 'The combined results could not be saved (' + err.message + ').';
+      }
+      this.setState({ busy: '', toast });
+      return;
+    }
+    if (i != null && st.runs[i] && st.runs[i] !== st.run) {
+      // another run's workbook, with that run's decisions and run date
+      const other = st.runs[i];
+      this.setState({ busy: kind + ':' + i, toast: '' });
+      let toast = '';
+      try {
+        toast = await this.fetchFile(kind, other, this.configFor(this.decOf(other), other), this.dateOf(other));
+      } catch (err) {
+        console.error(err);
+        toast = 'The workbook could not be saved (' + err.message + ').';
+      }
+      this.setState({ busy: '', toast });
+      return;
+    }
+    const run = st.run, config = this.configFor(st.dec);
     if (kind === 'config') {
       this.setState({ busy: kind, toast: '' });
       let toast = '';
@@ -374,6 +490,51 @@ class Component extends DCLogic {
     this.save(blob, name);
     const formulas = kind === 'workbook' && resp.headers.get('X-Isoharness-Values') === 'formulas-only';
     return formulas ? 'This service has no LibreOffice, so ' + name + ' holds the formulas without their values; Excel or LibreOffice computes them when it opens the file.' : '';
+  }
+
+  // Post every run's export with its own configuration, its decisions written in, and its run date.
+  async fetchBatch(kind) {
+    const runs = this.state.runs, form = new FormData();
+    for (const r of runs) form.append('files', r.file, r.file.name);
+    form.append('configs', JSON.stringify(runs.map((r) => this.configFor(this.decOf(r), r))));
+    form.append('run_dates', JSON.stringify(runs.map((r) => this.dateOf(r) || null)));
+    if (this.state.cfg) form.append('config_name', this.state.cfg.name);
+    let resp;
+    try {
+      resp = await fetch(kind === 'batch' ? 'api/batch/results.xlsx' : 'api/batch/results.csv', { method: 'POST', body: form });
+    } catch (err) {
+      return 'The combined results were not built: the service could not be reached (' + err.message + ').';
+    }
+    if (!resp.ok) return 'The combined results were not built: ' + this.detail(resp, await this.answer(resp));
+    const nm = this.batchNames();
+    this.save(await resp.blob(), this.fileName(resp.headers.get('Content-Disposition')) || (kind === 'batch' ? nm.xlsx : nm.csv));
+    return '';
+  }
+
+  batchNames() {
+    const n = this.state.runs.length, v = (this.state.run && this.state.run.version) || '';
+    const s = 'combined_' + n + '_run' + (n === 1 ? '' : 's') + '_results_ea_irms_v' + v;
+    return { xlsx: s + '.xlsx', csv: s + '.csv' };
+  }
+
+  // Samples measured in more than one run of the batch, each run on its own decisions: the
+  // identifier, without surrounding spaces and without regard to case, as the combined results match it.
+  repeats() {
+    const groups = new Map();
+    this.state.runs.forEach((run, i) => {
+      const M = this.model(this.decOf(run), run);
+      for (const q of M.P) {
+        if (q.role !== 'S' || !String(q.id || '').trim()) continue;
+        const key = String(q.id).trim().toLowerCase();
+        if (!groups.has(key)) groups.set(key, { name: String(q.id).trim(), runs: new Set(), n: [], c: [], count: 0 });
+        const g = groups.get(key);
+        g.runs.add(i);
+        g.count++;
+        if (q.n.fin != null) g.n.push(q.n.fin);
+        if (q.c.fin != null) g.c.push(q.c.fin);
+      }
+    });
+    return [...groups.values()].filter((g) => g.runs.size > 1).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
   }
 
   save(blob, name) {
@@ -460,8 +621,8 @@ class Component extends DCLogic {
       e.preventDefault();
       this._depth = 0;
       if (this.state.drag) this.setState({ drag: false });
-      const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
-      if (f && this.state.screen === 'upload' && !this.state.busy) this.pickExport(f);
+      const fs = e.dataTransfer && e.dataTransfer.files;
+      if (fs && fs.length && this.state.screen === 'upload' && !this.state.busy) this.addExports(fs);
     });
     this.fromHash();
     this.boot();
@@ -1690,6 +1851,12 @@ class Component extends DCLogic {
       item('csv', 'Results table', nm.csv, 'The workbook’s Results sheet as a CSV file, with every position at full precision', 'Building the results table on the server'),
       item('config', 'Configuration', nm.config, 'Your choices for this run as an Excel lab configuration, to edit and load next time', 'Writing the configuration on the server'),
     ];
+    const many = st.runs.length > 1, bn = this.batchNames();
+    if (many) {
+      downloads.push(
+        item('batch', 'Combined results, all ' + st.runs.length + ' runs', bn.xlsx, 'Every position of every run with a Run column first, one row per run, and the samples measured in more than one run, each run with its own choices', 'Correcting the ' + st.runs.length + ' runs on the server'),
+        item('batchcsv', 'Combined results table', bn.csv, 'The combined Results sheet as a CSV file, at full precision', 'Correcting the ' + st.runs.length + ' runs on the server'));
+    }
     const pair = (a, b) => (a && b ? 'on both' : a ? 'on ' + this.iso('n') : b ? 'on ' + this.iso('c') : 'off');
     const a = this.uSrc(M, d, 'n'), b = this.uSrc(M, d, 'c');
     const srcName = (k) => (k === 'monitors' ? 'the monitors' : k === 'config' ? 'the configuration' : 'the anchors');
@@ -1700,7 +1867,49 @@ class Component extends DCLogic {
       'Elemental ' + (M.elem.n.inForce || M.elem.c.inForce ? 'corrected' : 'not corrected'),
       'Repeatability from ' + (a === b ? srcName(a) : srcName(a) + ' for ' + this.iso('n') + ' and ' + srcName(b) + ' for ' + this.iso('c')),
     ].map((t) => ({ t }));
-    return { rows, filters, chart, downloads, chips, methods: this.methods(M, d) };
+    return Object.assign({ rows, filters, chart, downloads, chips, methods: this.methods(M, d) }, this.batchView(H));
+  }
+
+  // The batch on the results screen: each run with its corrections and its own workbook, and the
+  // samples measured in more than one run.
+  batchView(H) {
+    const st = this.state, runs = st.runs, busy = st.busy;
+    if (runs.length < 2) return { multi: false, batch: { title: '', note: '', runs: [], reps: [], hasReps: false, noReps: '', repNote: '' } };
+    const pair = (a, b) => (a && b ? 'both' : a ? this.iso('n') : b ? this.iso('c') : 'off');
+    const list = runs.map((run, i) => {
+      const M = this.model(this.decOf(run), run), S = this.samples(M), cur = run === st.run, k = 'workbook:' + i;
+      const parts = ['Blank ' + (M.blank.n.inForce || M.blank.c.inForce ? 'subtracted' : 'not subtracted'),
+        'linearity ' + pair(M.lin.n.inForce, M.lin.c.inForce), 'drift ' + pair(M.drift.n.inForce, M.drift.c.inForce),
+        'elemental ' + (M.elem.n.inForce || M.elem.c.inForce ? 'corrected' : 'not corrected')];
+      const chk = run.check;
+      return {
+        n: String(i + 1), name: run.name,
+        meta: this.count(S.length, 'sample') + ' · ' + (this.dateOf(run) ? 'run of ' + this.fdate(this.dateOf(run)) : 'no run date') + (cur ? ' · shown now' : ''),
+        how: parts.join(', '),
+        status: chk && chk.bad.length ? 'Preview differs at ' + this.count(chk.bad.length, 'position') : 'Preview equals the server',
+        sfg: chk && chk.bad.length ? '#A33A00' : '#0B6E4F',
+        open: () => this.switchRun(i), openT: cur ? 'Shown' : 'Show', isCur: cur || !!busy,
+        book: () => this.download('workbook', i), bookT: busy === (cur ? 'workbook' : k) ? 'Building…' : 'Workbook', bookBusy: !!busy,
+        bg: cur ? '#F2F6F9' : '#FFFFFF',
+      };
+    });
+    const reps = this.repeats(), rows = [];
+    for (const g of reps) {
+      const st2 = (v) => (v.length >= 2 ? { sd: this.fx(engine.sdev(v), 2), r: this.fx(Math.max(...v) - Math.min(...v), 2) } : { sd: '', r: '' });
+      const mean = (v) => (v.length ? this.fx(v.reduce((a, b) => a + b, 0) / v.length, 2) : '');
+      const a = st2(g.n), b = st2(g.c);
+      rows.push({ name: g.name, runs: String(g.runs.size), n: String(g.count), mN: mean(g.n), sN: a.sd, rN: a.r, mC: mean(g.c), sC: b.sd, rC: b.r });
+    }
+    return {
+      multi: true,
+      batch: {
+        title: 'All ' + runs.length + ' runs',
+        note: 'Each run is corrected on its own, with the standards in that run and the choices made for it. Show a run to change its choices; the combined results take every run as it is left.',
+        runs: list, reps: rows, hasReps: rows.length > 0,
+        noReps: rows.length ? '' : 'No sample name appears in more than one run.',
+        repNote: rows.length ? this.count(rows.length, 'sample') + ' measured in more than one run, matched by name. SD and range are over the analyses, in ‰; the combined results list each analysis with its difference from the mean.' : '',
+      },
+    };
   }
 
   railItems(M, d, scr, H) {
@@ -1738,30 +1947,48 @@ class Component extends DCLogic {
     const pkg = 'Package defaults' + (version ? ', ea_irms ' + version : '');
     const up = {
       busy,
-      dropTitle: st.busy === 'process' ? 'Reading ' + st.pending + '…' : run ? 'Drop another export here, or choose a file' : 'Drop an export here, or choose a file',
-      dropNote: '.xls, .xlsx, .xlsm, .csv, .txt, or .tsv, as Isodat exported it.',
+      dropTitle: st.busy === 'process' ? 'Reading ' + st.pending + '…' : run ? 'Drop more exports here to add them, or choose files' : 'Drop exports here, or choose files',
+      dropNote: '.xls, .xlsx, .xlsm, .csv, .txt, or .tsv, as Isodat exported it. Several exports make a batch of up to ' + MAX_RUNS + ' runs, each corrected on its own.',
       dropBg: st.drag ? '#F2F7FB' : '#FFFFFF', dropBd: st.drag ? '#13212B' : '#9AA8B5', dropCursor: busy ? 'progress' : 'pointer',
       choose: () => { const el = document.getElementById('dc-export'); if (el && !this.state.busy) el.click(); },
       example: () => this.loadExample(), fresh: !run,
-      picked: (e) => { const f = e.target.files && e.target.files[0]; e.target.value = ''; if (f) this.pickExport(f); },
+      picked: (e) => { const fs = Array.from(e.target.files || []); e.target.value = ''; if (fs.length) this.addExports(fs); },
       cfgName: cfg ? cfg.name : pkg, hasCfg: !!cfg, cfgButton: cfg ? 'Choose another configuration' : 'Choose a configuration',
       cfgNote: (cfg ? 'Its standards table, switches, and limits replace the package defaults' + (cfg.wrapped ? ' (read from its "config" field)' : '')
         + (cfg.unknown.length ? '. Fields ea_irms does not read are ignored: ' + this.andList(cfg.unknown) : '') + '.'
         + (cfg.notes && cfg.notes.length ? ' Note: ' + cfg.notes.join('; ') + '.' : '')
         : 'An Excel file with a standards table, switches, and limits: download the template, fill in its yellow cells, and choose it here. A .json configuration from an earlier run also works.')
-        + (run ? ' Choosing another processes the run again.' : ''),
+        + (st.runs.length > 1 ? ' Choosing another processes all ' + st.runs.length + ' runs again.' : run ? ' Choosing another processes the run again.' : ''),
       chooseCfg: () => { const el = document.getElementById('dc-config'); if (el && !this.state.busy) el.click(); },
       pickedCfg: (e) => { const f = e.target.files && e.target.files[0]; e.target.value = ''; if (f) this.pickConfig(f); },
       clearCfg: () => this.clearConfig(),
       template: () => this.downloadTemplate(),
+      dateLabel: st.runs.length > 1 && run ? 'Run date of ' + run.name : 'Run date',
       dateValue: st.runDate || '',
       setDate: (e) => this.setState({ runDate: e.target.value, dateFrom: e.target.value ? 'you' : '' }),
       dateNote: st.dateFrom === 'name' && st.runDate ? 'Read from the file name; change it if it is wrong. It is printed on the workbook’s Setup sheet.'
         : 'Printed on the workbook’s Setup sheet; leave it empty if the run needs none.',
       hasError: !!st.error, errTitle: st.error ? st.error.title : '', errText: st.error ? st.error.detail : '',
       has: !!run, positions: '', date: st.runDate ? this.fdate(st.runDate) : 'no run date',
+      heading: st.runs.length > 1 ? 'Correct ' + st.runs.length + ' runs' : 'Correct a run',
+      multi: st.runs.length > 1, batchTitle: '', batchNote: '', runs: [],
     };
     if (!run) return up;
+    if (st.runs.length > 1) {
+      up.batchTitle = 'Batch of ' + st.runs.length + ' runs';
+      up.batchNote = 'One lab configuration for all; each run keeps its own choices. The details below are for the run shown.';
+      up.runs = st.runs.map((r, i) => {
+        const cur = r === run, chk = r.check, date = this.dateOf(r);
+        return {
+          n: String(i + 1), name: r.name, cur: cur ? 'true' : 'false',
+          meta: r.port.pos.length + ' positions · ' + this.count(r.port.pos.filter((q) => q.role === 'S').length, 'sample') + ' · ' + (date ? 'run of ' + this.fdate(date) : 'no run date'),
+          status: chk && chk.bad.length ? 'Preview differs at ' + this.count(chk.bad.length, 'position') : 'Read without errors',
+          sfg: chk && chk.bad.length ? '#A33A00' : '#0B6E4F', bg: cur ? '#F2F6F9' : '#FFFFFF',
+          open: () => this.switchRun(i), openT: cur ? 'Shown' : 'Show', isCur: cur || busy,
+          remove: () => this.removeRun(i), busy,
+        };
+      });
+    }
     const S = this.samples(M), n = M.P.length, pc = run.port.pulseCheck || {}, chk = run.check;
     const icon = (good) => (good ? OK_ICON : WARN_ICON);
     const checks = [
@@ -1822,11 +2049,12 @@ class Component extends DCLogic {
       blankFlag: set.blankMultiple ? 'Samples smaller than ' + this.times(set.blankMultiple) + ' the blank are flagged either way.' : 'The configuration turns off the flag for samples close to the blank.',
       linSeries: 'The size series', monitors: 'Drift monitors', anchors: 'The anchors',
     };
-    let flow = { kicker: '', file: '', rail: [], ctrl: [], hasCtrl: false, ribbon: [], legend: [], ribbonStart: '', ribbonEnd: '', charts: [], hasCharts: false,
+    let flow = { kicker: '', file: '', runLabel: 'Run', multi: false, runs: [], rail: [], ctrl: [], hasCtrl: false, ribbon: [], legend: [], ribbonStart: '', ribbonEnd: '', charts: [], hasCharts: false,
       stats: { rows: [] }, hasStats: false, statA: '', statB: '', effect: { title: '', lines: [] }, hasEffect: false, checks: [], hasChecks: false,
       budget: { title: '', rows: [] }, hasBudget: false, insp: { title: '', sub: '', facts: [], chain: [], tail: [], flags: [], hasFlags: false, noFlags: false },
       setupRows: [], prev: { t: '', pick: null }, next: { t: '', pick: null, busy: false }, stdSource: '', warn: false, warnText: '' };
-    let res = { rows: [], filters: [], charts: [], downloads: [], chips: [], methods: '' };
+    let res = { rows: [], filters: [], charts: [], downloads: [], chips: [], methods: '', multi: false,
+      batch: { title: '', note: '', runs: [], reps: [], hasReps: false, noReps: '', repNote: '' } };
     if (M && isFlow) {
       const matL = this.material(M, 'L'), matD = this.material(M, 'D'), groups = this.anchorGroups(M);
       if (matL) text.linSeries = 'The ' + matL + ' size series';
@@ -1851,6 +2079,9 @@ class Component extends DCLogic {
       const chk = run.check;
       flow = {
         kicker: scr === 'results' ? 'After step ' + (FLOW.length - 1) : 'Step ' + (fi + 1) + ' of ' + (FLOW.length - 1), file: run.name,
+        runLabel: st.runs.length > 1 ? 'Run ' + (st.active + 1) + ' of ' + st.runs.length : 'Run', multi: st.runs.length > 1,
+        runs: st.runs.length > 1 ? st.runs.map((r, i) => ({ t: (i + 1) + '  ' + r.name, pick: () => this.switchRun(i), cur: r === run ? 'true' : 'false',
+          bg: r === run ? '#13212B' : 'transparent', fg: r === run ? '#FFFFFF' : '#13212B', busy: !!st.busy })) : [],
         rail: this.railItems(M, d, scr, H),
         ctrl: view.ctrl, hasCtrl: view.ctrl.length > 0,
         ribbon: is.step ? this.ribbon(M, scr, sel, H) : [], legend: this.ribbonLegend(M),

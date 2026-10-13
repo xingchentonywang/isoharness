@@ -112,6 +112,38 @@ def port_input(positions, fits, config: Config, file_name: str, size: int,
     return clean(data)
 
 
+# The workbook's Results sheet, column for column (ea_irms 1.4.5): each value followed by its 1 sigma.
+# The CSV heads those columns 1sigma(...), since Excel misreads a Greek letter in a CSV file that has
+# no byte-order mark; an Excel file heads them 1σ(...), as the workbook does (results_header).
+RESULTS_HEADER = ["Row", "Identifier", "Type", "Mass (mg)", "%C", "1sigma(%C)", "%N", "1sigma(%N)",
+                  "C:N molar", "1sigma(C:N molar)", "C:N mass", "1sigma(C:N mass)",
+                  "d13C (permil)", "1sigma(d13C)", "d15N (permil)", "1sigma(d15N)", "Flags",
+                  "Rerun", "Why", "Suggested mass (mg)",
+                  "Elemental drift factor N", "Elemental drift factor C", "%C as measured", "%N as measured"]
+RESULTS_ATTRS = ["row", "identifier", "role", "amount", "pct_c_reported", "u_pct_c", "pct_n_reported", "u_pct_n",
+                 "cn_molar_reported", "u_cn_molar", "cn_mass_reported", "u_cn_mass",
+                 "d13c_final", "u_d13c", "d15n_final", "u_d15n", None,
+                 "rerun", "rerun_why", "rerun_mass",
+                 "elem_factor_n", "elem_factor_c", "pct_c_measured", "pct_n_measured"]
+
+
+def results_header(sigma: str = "1sigma") -> list[str]:
+    """The Results columns' names, with 1sigma(...) or, for an Excel file, 1σ(...)."""
+    return [h.replace("1sigma(", sigma + "(") for h in RESULTS_HEADER]
+
+
+def results_values(p: Position) -> list:
+    """One position's Results row: numbers as the engine left them, None where empty, the flags joined."""
+    row = []
+    for a in RESULTS_ATTRS:
+        if a is None:
+            row.append("; ".join(p.flags))
+        else:
+            v = clean(getattr(p, a, None))
+            row.append(v)
+    return row
+
+
 def results_csv(positions, config: Config) -> str:
     """The workbook's Results sheet as CSV, at full precision, same columns and order.
 
@@ -119,26 +151,14 @@ def results_csv(positions, config: Config) -> str:
     1σ(...); here they read 1sigma(...), since Excel misreads a Greek letter in a CSV file
     that has no byte-order mark.
     """
-    header = ["Row", "Identifier", "Type", "Mass (mg)", "%C", "1sigma(%C)", "%N", "1sigma(%N)",
-              "C:N molar", "1sigma(C:N molar)", "C:N mass", "1sigma(C:N mass)",
-              "d13C (permil)", "1sigma(d13C)", "d15N (permil)", "1sigma(d15N)", "Flags",
-              "Rerun", "Why", "Suggested mass (mg)",
-              "Elemental drift factor N", "Elemental drift factor C", "%C as measured", "%N as measured"]
-    attrs = ["row", "identifier", "role", "amount", "pct_c_reported", "u_pct_c", "pct_n_reported", "u_pct_n",
-             "cn_molar_reported", "u_cn_molar", "cn_mass_reported", "u_cn_mass",
-             "d13c_final", "u_d13c", "d15n_final", "u_d15n", None,
-             "rerun", "rerun_why", "rerun_mass",
-             "elem_factor_n", "elem_factor_c", "pct_c_measured", "pct_n_measured"]
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\n")
-    w.writerow(header)
+    w.writerow(RESULTS_HEADER)
     for p in positions:
-        row = []
-        for a in attrs:
-            if a is None:
-                row.append("; ".join(p.flags))
-                continue
-            v = clean(getattr(p, a, None))
-            row.append("" if v is None else (repr(v) if isinstance(v, float) else v))
-        w.writerow(row)
+        w.writerow(csv_cells(results_values(p)))
     return buf.getvalue()
+
+
+def csv_cells(values) -> list:
+    """Values as the results table writes them: floats in full (repr), empty for None."""
+    return ["" if v is None else (repr(v) if isinstance(v, float) else v) for v in values]
