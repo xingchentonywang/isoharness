@@ -18,8 +18,11 @@ already running there (the container image, say), opens the page in Chromium
    then as the Excel file the service writes for it, checks that the run is processed
    again with it and the decisions start from it, then goes back to the defaults;
 4. visits all ten step screens, checking the instrument screen's charts and its
-   settling line and the quality-check summary's links back to it, and changing
-   decisions on the way: the blank switch,
+   settling line, each correction step's explanation with its worked example and the
+   checks that step shows (isoharness 0.4.0; the blank's mass balance against the value
+   after the step, the button that hides every explanation and the browser keeping that
+   choice), the charts of each sample's change against kσ, and the quality-check
+   summary's links back to every step, and changing decisions on the way: the blank switch,
    a drift monitor left out of the d15N fit, the drift model, a monitor left out of
    the elemental correction, and the d15N repeatability (the drift monitors' SD);
 5. checks that every value the results screen shows (mass, d15N, 1σ, d13C, 1σ, %N,
@@ -91,6 +94,12 @@ BOOK = {5: "%C", 6: "1sigma(%C)", 7: "%N", 8: "1sigma(%N)", 9: "C:N molar", 10: 
         11: "C:N mass", 12: "1sigma(C:N mass)", 13: "d13C (permil)", 14: "1sigma(d13C)", 15: "d15N (permil)",
         16: "1sigma(d15N)", 21: "Elemental drift factor N", 22: "Elemental drift factor C", 23: "%C as measured",
         24: "%N as measured"}
+# The steps that explain their correction, and the checks each step shows, in the order the Quality
+# checks step lists them after the instrument's five (isoharness 0.4.0).
+EXPLAINED = ("blank", "lin", "drift", "cal", "elem", "unc")
+MOVED = {"lin": ["Effect of the linearity choice", "Sample size against the size series"],
+         "drift": ["Effect of the drift choice", "Drift monitors agree"],
+         "cal": ["Anchors bracket the samples", "Check standard"], "elem": ["Elemental content"]}
 # The decisions the test makes, and the drift monitors it leaves out.
 EXCL_N, EXCL_E = 18, 55
 
@@ -225,7 +234,8 @@ def sheet_diff(rows, text, rel=1e-15):
 
 def ftext(flag):
     """The page's wording of an engine flag (logic.js ftext)."""
-    return re.sub(r"(\d)x the blank", r"\1× the blank", flag.replace("d15N", "δ¹⁵N").replace("d13C", "δ¹³C"), count=1)
+    t = re.sub(r"(\d)x the blank", r"\1× the blank", flag.replace("d15N", "δ¹⁵N").replace("d13C", "δ¹³C"), count=1)
+    return re.sub(r" by -(\d)", r" by −\1", t, count=1)
 
 
 def js_fixed(value, d):
@@ -444,12 +454,49 @@ def main(argv=None):
                           "the instrument screen links to itself")
                 if scr == "setup":
                     expect(page.get_by_text("Package defaults, ea_irms " + ver + ".")).to_be_visible()
+                how = page.locator('section[aria-label="How this step works"]')
+                if scr in EXPLAINED:
+                    # isoharness 0.4.0: each correction explains itself, shown by default, with a worked example
+                    expect(how).to_be_visible()
+                    expect(how.get_by_role("button", name="Hide explanations")).to_be_visible()
+                    expect(how).to_contain_text("Worked example, ")
+                    rows = how.locator('[aria-label="Worked example"] > [role=row]')
+                    check(rows.count() >= 5, f"{scr}: the worked example has {rows.count() - 1} rows")
+                else:
+                    check(how.count() == 0, f"{scr}: an explanation on a screen that corrects nothing")
+                titles = page.locator('section[aria-label="Checks"] strong').all_text_contents()
+                if scr in MOVED:
+                    check(titles == MOVED[scr], f"{scr}: its checks are {titles}, not {MOVED[scr]}")
+                if scr in ("blank", "lin", "drift"):
+                    for el in ("δ¹⁵N", "δ¹³C"):
+                        expect(page.locator("figure", has_text="Change in " + el)).to_have_count(1)
                 if scr == "blank":
                     group = page.get_by_role("group", name="Blank correction")
                     expect(group.get_by_role("button", name="Auto")).to_have_attribute("aria-pressed", "true")
                     group.get_by_role("button", name="On").click()
                     expect(group.get_by_role("button", name="On")).to_have_attribute("aria-pressed", "true")
                     expect(page.get_by_text("δ¹⁵N: subtracted")).to_be_visible()
+                    # with the blank subtracted, the mass balance is the value after this step
+                    cells = lambda label: how.locator("[role=row]", has_text=label).first.locator("[role=cell]").all_text_contents()
+                    mb, after = cells("Mass balance"), cells("After this step")
+                    check(mb[0] != "" and mb[0] == after[0], f"blank: the mass balance reads {mb}, the step {after}")
+                    stats["mass balance"] = mb[0]
+                if scr == "lin":
+                    # an expert's choice to hide the explanations holds for every step and is kept in the browser
+                    how.get_by_role("button", name="Hide explanations").click()
+                    expect(how.get_by_role("button", name="Show explanations")).to_be_visible()
+                    check(how.locator('[aria-label="Worked example"]').count() == 0, "the explanation did not hide")
+                    check(page.evaluate("localStorage.getItem('isoharness.explanations')") == "hidden",
+                          "the choice to hide the explanations was not kept")
+                    page.locator("nav[aria-label='Correction steps'] button", has_text="Drift").click()
+                    heading("drift")
+                    expect(page.get_by_role("button", name="Show explanations")).to_be_visible()
+                    page.get_by_role("button", name="Show explanations").click()
+                    check(page.evaluate("localStorage.getItem('isoharness.explanations')") is None,
+                          "showing the explanations again left the choice to hide them")
+                    page.locator("nav[aria-label='Correction steps'] button", has_text="Linearity").click()
+                    heading("lin")
+                    expect(how.get_by_role("button", name="Hide explanations")).to_be_visible()
                 if scr == "drift":
                     chart = page.locator("figure", has_text="δ¹⁵N of the drift monitors")
                     point = chart.get_by_role("button", name=re.compile(rf", position {EXCL_N}: "))
@@ -463,12 +510,18 @@ def main(argv=None):
                     chart.get_by_role("button", name=re.compile(rf", position {EXCL_E}: ")).click()
                     expect(chart).to_contain_text("12 of 13 monitors used")
                 if scr == "qc":
+                    # every check of the run, each with a button back to the step it belongs to
                     back = page.get_by_role("button", name="Step 1, Instrument")
                     expect(back).to_have_count(5)
-                    back.first.click()
-                    heading("inst")
-                    page.locator("nav[aria-label='Correction steps'] button", has_text="Quality checks").click()
-                    heading("qc")
+                    for step, names in MOVED.items():
+                        label = f"Step {SCREENS.index(step) + 1}, {BUTTONS[step]}"
+                        expect(page.get_by_role("button", name=label)).to_have_count(len(names))
+                    check(titles[5:] == [t for step in MOVED for t in MOVED[step]], f"quality checks listed as {titles}")
+                    for label, step in (("Step 1, Instrument", "inst"), ("Step 4, Linearity", "lin")):
+                        page.get_by_role("button", name=label).first.click()
+                        heading(step)
+                        page.locator("nav[aria-label='Correction steps'] button", has_text="Quality checks").click()
+                        heading("qc")
                 if scr == "unc":
                     group = page.get_by_role("group", name="δ¹⁵N repeatability")
                     group.get_by_role("button", name="Drift monitors").click()

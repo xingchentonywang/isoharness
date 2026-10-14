@@ -66,7 +66,8 @@ SETTINGS = [
     ("max_area_c", "Maximum Area 44 (Vs)", "number_or_empty",
      "Empty: the largest linearity standard in the run."),
     ("min_blank_multiple", "Minimum peak area, x the blank", "number_or_empty",
-     "Below this multiple of the blank the blank correction amplifies rather than corrects. Empty: no check."),
+     "A peak under this multiple of the blank is flagged, since there the blank correction carries the blank's "
+     "scatter into the value. Empty: no check."),
     ("settled_threshold", "Settled when background excess is under (fraction)", "number_or_empty",
      "Fraction of the run's starting excess left in the reference-peak background. Empty: no check."),
     ("monitor_outlier_t", "Drift monitor outlier, studentized residual", "number",
@@ -77,8 +78,8 @@ SETTINGS = [
      "by more than this. Empty: no check."),
     (None, "Reference pulses", None, None),
     ("ref_pulse_ampl_tol", "Reference-pulse check, amplitude tolerance (fraction)", "number_or_empty",
-     "Only in an export without N2 reference peaks: an unflagged CO2 peak this close to the designated "
-     "pulses is a pulse, not the sample. Empty: no check."),
+     "Used only in an export without N2 reference peaks, where an unflagged CO2 peak this close to the "
+     "designated pulses is set aside as a reference pulse. Empty: no check."),
     ("ref_pulse_d13c_window", "Reference-pulse check, d13C window (permil)", "number",
      "Around the designated pulses' mean d13C."),
     ("ref_pulse_off_sd", "Reference pulse off at a position, robust SDs from the run's median",
@@ -102,8 +103,8 @@ SETTINGS = [
     ("u_sample_c", "Sample repeatability, d13C (1σ, permil)", "number_or_empty",
      "Empty: the pooled scatter of the anchor replicates in each run."),
     ("coverage_k", "Multiple of 1σ for the checks (k)", "number",
-     "The checks compare a standard's deviation with k x 1σ. 2 is about 95 percent when the replicates "
-     "behind 1σ are many."),
+     "The checks compare a standard's deviation with k x 1σ. k = 2 covers about 95 percent when the "
+     "replicates behind 1σ are many."),
     ("balance_u_mg", "Balance, 1σ of one weighing (mg)", "number_or_empty",
      "Empty: the weighing term is left out of the uncertainty of %N and %C."),
     (None, "One run only (leave these empty in a lab configuration)", None, None),
@@ -178,7 +179,7 @@ def config_to_xlsx(config: Config | None = None, path: str | Path | None = None,
         ("", f_sm),
         ("How to use it", f_h1),
         ("1. Fill in the yellow cells on Settings and Standards. Leave every other cell as it is, including "
-         "the grey Key column, which is how the file is read.", f_sm),
+         "the gray Key column, which is how the file is read.", f_sm),
         ("2. On isoharness.org, choose this file as the lab configuration before or after you upload an "
          "export. The same file can be used for every run of the lab.", f_sm),
         ("3. An empty cell means off or not given where the setting allows that, as the notes say. "
@@ -186,7 +187,7 @@ def config_to_xlsx(config: Config | None = None, path: str | Path | None = None,
         ("", f_sm),
         ("Standards", f_h1),
         ("Each row of Standards matches the identifiers of the export that contain its match text, and gives "
-         "them a role and, for anchors, check standards, drift monitors and linearity standards, their "
+         "them a role and, for anchors, check standards, drift monitors, and linearity standards, their "
          "accepted values. When two rows match the same identifier, the lower row wins, so put the more "
          f"specific text lower down. The table holds at most {MAX_STANDARDS} rows. The accepted values that "
          "come filled in are the published USGS values as of 2026-09-16; check them against your "

@@ -619,16 +619,16 @@ def template_xlsx(names) -> bytes:
         ("", f_sm),
         ("How samples are matched", f_h1),
         ("A sample matches a row when its name equals the Sample ID, or begins with it followed by a space, a "
-         "hyphen, or another character that is neither a letter nor a digit: CI 3-2 matches CI 3-2-S and "
-         "CI 3-2 H, not CI 3-20. When several IDs fit, the longest wins. Upper and lower case, spaces at either "
+         "hyphen, or another character that is neither a letter nor a digit. So CI 3-2 matches CI 3-2-S and "
+         "CI 3-2 H but not CI 3-20, and when several IDs fit, the longest wins. Upper and lower case, spaces at either "
          "end, and double spaces count as the same. When no ID fits as written, the spaces are taken out of the "
          "name and the IDs and they are compared again, so PD1-H matches PD 1, and the results say so. One row can "
          "describe several analyses, such as the fractions of one colony. Standards and blanks are not matched.",
          f_sm),
         ("", f_sm),
         ("Replicates", f_h1),
-        ("Analyses of one sample in one run are compared: samples that match the sheet and have the same name, "
-         "or the same Replicate of. Write in Replicate of the name of the analysis a row repeats, such as "
+        ("Within one run, samples that match the sheet and share a name, or share a Replicate of, are compared "
+         "as replicates. Write in Replicate of the name of the analysis a row repeats, such as "
          "CI 3-2-H in the row of CI 3-2-H rep, or one name for all of them. When their range is larger than the "
          "critical range of ISO 5725-6, f(n) times the repeatability of one analysis (2.77 for two analyses, "
          "which the standard rounds to 2.8), each of them is marked for a rerun of that element. Analyses that "

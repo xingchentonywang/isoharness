@@ -19,6 +19,11 @@
 // its run date, and the batch may have one sample sheet. The service reads the sheet and matches the
 // samples (/api/samplesheet/read); the page keeps the file in this tab and sends it, with each run's
 // information, with every download.
+//
+// From isoharness 0.4.0 each correction step explains itself, shown until the reader hides it (a choice
+// this browser remembers): its formula, one sample's arithmetic with the run's numbers, and, for the
+// blank, linearity, and drift corrections, every sample's change against its kσ. Each quality check sits
+// in the step it belongs to, and the Quality checks step lists them all with a button back to each step.
 'use strict';
 
 const FLOW = ['inst', 'setup', 'blank', 'lin', 'drift', 'cal', 'elem', 'unc', 'qc', 'results'];
@@ -45,13 +50,15 @@ const RUN_FIELDS = ['Operator', 'Instrument', 'Project', 'Notes'];
 // The most rows of the sample-sheet match table drawn on the page; the downloads hold every sample.
 const MAX_MATCH_ROWS = 600;
 const WARN_ICON = { c: '#A33A00', d: 'M10 5.5v5.5M10 14v.1' };
+// Where this browser keeps a reader's choice to hide the explanations (isoharness 0.4.0).
+const EXPLAIN_KEY = 'isoharness.explanations';
 
 class Component extends DCLogic {
   constructor(props) {
     super(props);
     this.state = { screen: 'upload', boot: null, run: null, runs: [], active: -1, cfg: null, runDate: '', dateFrom: '',
       busy: '', pending: '', error: null, toast: '', drag: false, dec: null, sel: {}, filt: 'all', last: 'inst',
-      runInfo: {}, sheet: null };
+      runInfo: {}, sheet: null, explain: this.explainSaved() };
     this._mcs = new Map();
     this._runs = 0;
     this._depth = 0;
@@ -408,7 +415,7 @@ class Component extends DCLogic {
       return;
     }
     if (!data || typeof data !== 'object' || Array.isArray(data)) {
-      fail('A configuration is a JSON object, such as the Configuration file downloaded from a run.');
+      fail('A .json configuration is one JSON object of fields, such as the Configuration a run gave before ea_irms 1.4.6.');
       return;
     }
     const known = this.state.boot && this.state.boot.defaults ? Object.keys(this.state.boot.defaults) : null;
@@ -700,6 +707,24 @@ class Component extends DCLogic {
     return '';
   }
 
+  // The explanations are shown unless this browser kept a choice to hide them; a browser that keeps
+  // nothing (a private window, blocked storage) shows them.
+  explainSaved() {
+    try {
+      return window.localStorage.getItem(EXPLAIN_KEY) !== 'hidden';
+    } catch (err) {
+      return true;
+    }
+  }
+
+  setExplain(on) {
+    try {
+      if (on) window.localStorage.removeItem(EXPLAIN_KEY);
+      else window.localStorage.setItem(EXPLAIN_KEY, 'hidden');
+    } catch (err) { /* the choice holds for this visit only */ }
+    this.setState({ explain: on });
+  }
+
   // ---------------------------------------------------------------- navigation
   go(s) {
     if (s !== 'upload' && !this.state.run) s = 'upload';
@@ -782,6 +807,57 @@ class Component extends DCLogic {
       if (!big || Math.abs(d) > Math.abs(big.d)) big = { d, q: A };
     }
     return { lo, hi, n, beyond, big };
+  }
+
+  // Each sample's change in its final δ from one correction, for one element: the value with the
+  // correction minus the value without it, every other choice as it stands, beside the sample's kσ.
+  // key is 'blank', 'lin', or 'drift'. null when the switch cannot change that element (no blank peak,
+  // or too few standards for a slope).
+  stepShift(M, d, key, el) {
+    const inForce = (m) => (key === 'blank' ? m.blank[el] : key === 'lin' ? m.lin[el] : m.drift[el]).inForce;
+    const field = key === 'lin' ? (el === 'n' ? 'linN' : 'linC') : key;
+    const on = inForce(M), Mo = this.model(Object.assign({}, d, { [field]: on ? 'Off' : 'On' }));
+    if (inForce(Mo) === on) return null;
+    const W = on ? M : Mo, O = on ? Mo : M, list = [];
+    for (let i = 0; i < M.P.length; i++) {
+      const q = M.P[i];
+      if (q.role !== 'S') continue;
+      const a = W.P[i][el].fin, b = O.P[i][el].fin;
+      if (a == null || b == null) continue;
+      list.push({ q, d: a - b, U: q[el].U });
+    }
+    return { on, list, n: list.length, beyond: list.filter((s) => s.U != null && Math.abs(s.d) > s.U) };
+  }
+
+  shiftChart(M, d, key, el, sel, H) {
+    const col = this.col(el), iso = this.iso(el), ks = this.kSig(M), gas = el === 'n' ? 'N2' : 'CO2';
+    const what = { blank: ['subtracting the blank', 'if the blank were subtracted'],
+      lin: ['the linearity correction', 'if the linearity correction were applied'],
+      drift: ['the drift correction', 'if the drift correction were applied'] }[key];
+    const sh = this.stepShift(M, d, key, el);
+    const titleOn = 'Change in ' + iso + ' from ' + what[0], titleOff = 'Change in ' + iso + ' ' + what[1];
+    if (!sh) {
+      return this.none(titleOn, col, key === 'blank' ? 'No blank capsule gave ' + (el === 'n' ? 'an' : 'a') + ' ' + gas + ' peak, so ' + iso + ' has no blank to subtract.'
+        : key === 'lin' ? 'The size series has fewer than three ' + gas + ' peaks, so no slope can be applied to ' + iso + '.'
+          : 'Fewer than three monitors are in the ' + iso + ' fit, so no drift slope can be applied.');
+    }
+    const title = sh.on ? titleOn : titleOff;
+    if (!sh.n) return this.none(title, col, 'No sample has a final ' + iso + ' value.');
+    const ax = this.rowAxis(M), withU = sh.list.filter((s) => s.U != null), out = new Set(sh.beyond.map((s) => s.q.r));
+    return this.chart({
+      title, sub: 'Each sample’s final ' + iso + ' with the correction minus without it, against ±' + ks + ' of that sample',
+      badge: sh.beyond.length ? { text: sh.beyond.length + ' of ' + sh.n + ' beyond ' + ks, bg: '#FADFD2', fg: '#A33A00' }
+        : { text: 'None beyond ' + ks, bg: '#DDF2EA', fg: '#0B6E4F' },
+      color: col, r: 4, x: ax, y: this.dom(sh.list.map((s) => s.d).concat(withU.map((s) => s.U), withU.map((s) => -s.U), [0]), 0.1),
+      lineB: { paths: [[[ax.min, 0], [ax.max, 0]]], stroke: '#8A99A5', w: 1, dash: '4 3' },
+      errs: { segs: withU.map((s) => [s.q.r, -s.U, s.q.r, s.U]), stroke: '#9AA8B5' },
+      pts: sh.list.map((s) => ({ x: s.q.r, y: s.d, kind: 'fill', ring: out.has(s.q.r), sel: s.q.r === sel,
+        label: s.q.id + ', position ' + s.q.r + ': ' + this.fs(s.d, 3) + '‰' + (s.U != null ? ', ' + ks + ' ' + this.fx(s.U, 3) + '‰' : '')
+          + (out.has(s.q.r) ? ', beyond ' + ks : ''), pick: () => H.pick(s.q.r) })),
+      legend: [{ kind: 'dot', color: col, label: 'Change' }, { kind: 'line', color: '#9AA8B5', label: '±' + ks + ' of the sample' },
+        { kind: 'ring', color: col, label: 'Beyond ' + ks }],
+      xLabel: 'Position in the run', yLabel: 'Change in ' + iso + ' (‰)',
+    });
   }
 
   pctShift(Ma, Mb, key) {
@@ -1049,7 +1125,7 @@ class Component extends DCLogic {
   iso(el) { return el === 'n' ? 'δ¹⁵N' : 'δ¹³C'; }
 
   ftext(s) {
-    return s.replace(/d15N/g, 'δ¹⁵N').replace(/d13C/g, 'δ¹³C').replace(/(\d)x the blank/, '$1× the blank');
+    return s.replace(/d15N/g, 'δ¹⁵N').replace(/d13C/g, 'δ¹³C').replace(/(\d)x the blank/, '$1× the blank').replace(/ by -(\d)/, ' by −$1');
   }
 
   chip(s) {
@@ -1150,6 +1226,203 @@ class Component extends DCLogic {
       title: q.id, sub: 'Position ' + q.r + ' of ' + M.P.length, facts, chain, tail,
       flags: q.flags.map((f) => ({ t: this.ftext(f) })), hasFlags: q.flags.length > 0, noFlags: q.flags.length === 0,
     };
+  }
+
+  // ---------------------------------------------------------------- explanations (isoharness 0.4.0)
+  // The sample a step's worked example follows: the selected position when it is a sample with a value
+  // for that step, else the first such sample.
+  exampleOf(M, sel, ok) {
+    const q = M.P.find((p) => p.r === sel);
+    if (q && q.role === 'S' && ok(q)) return q;
+    return M.P.find((p) => p.role === 'S' && ok(p)) || null;
+  }
+
+  // How a correction step works, with one sample's arithmetic in the run's own numbers: { lines,
+  // formulas, title, sub, colA, colB, rows, after }, or null on a screen that corrects nothing.
+  explainView(M, d, scr, sel) {
+    if (!['blank', 'lin', 'drift', 'cal', 'elem', 'unc'].includes(scr)) return null;
+    const D = this.data(), set = M.settings, iso = (el) => this.iso(el), E = ['n', 'c'];
+    const v = (x, dg) => (x == null || !isFinite(x) ? '' : this.fx(x, dg));
+    const dif = (a, b, dg) => (a == null || b == null ? '' : this.fs(a - b, dg));
+    const gas = { n: 'N2', c: 'CO2' }, ak = { n: 'aN', c: 'aC' }, alpha = this.num(set.alpha);
+    const out = { lines: [], formulas: [], title: '', sub: 'It follows the sample you select on a figure or in the sequence.',
+      colA: iso('n'), colB: iso('c'), rows: [], after: [] };
+    const named = (q) => 'Worked example, ' + (q.id || 'Unnamed') + ' at position ' + q.r;
+    const lines = (...t) => t.map((x) => ({ t: x }));
+    let q = null;
+    if (scr === 'blank') {
+      out.lines = lines('A peak holds the sample and the blank together, so its area A is the sum of the two and its δ is their mean '
+        + 'weighted by area. Taking out the blank’s share gives the formula below, with the blank’s area and δ the means of the '
+        + 'blank capsules.', 'The correction applies to every position except the blank capsules, wherever the peak is larger than the '
+        + 'blank. The weight of the blank, blank area / (A − blank area), is how far an error in the blank’s δ moves the result, 1 '
+        + 'for a peak twice the size of the blank.');
+      out.formulas = lines('δ after blank = (A × δ − blank area × blank δ) / (A − blank area)');
+      q = this.exampleOf(M, sel, (p) => p.n.raw != null || p.c.raw != null);
+      if (q) {
+        const B = M.blank, big = (el) => B[el].n && q[ak[el]] != null && q[ak[el]] > B[el].area;
+        const mb = (el) => (big(el) && q[el].raw != null ? (q[ak[el]] * q[el].raw - B[el].area * B[el].d) / (q[ak[el]] - B[el].area) : null);
+        const wt = (el) => (big(el) ? B[el].area / (q[ak[el]] - B[el].area) : null);
+        const row = (k, f) => ({ k, a: f('n'), b: f('c') });
+        out.rows = [
+          row('Peak area A (Vs)', (el) => v(q[ak[el]], 3)),
+          row('Raw δ (‰)', (el) => v(q[el].raw, 3)),
+          row('Blank area (Vs)', (el) => (B[el].n ? v(B[el].area, 3) : 'no blank')),
+          row('Blank δ (‰)', (el) => (B[el].n ? v(B[el].d, 3) : '')),
+          row('Mass balance (‰)', (el) => v(mb(el), 3)),
+          row('Weight of the blank', (el) => v(wt(el), 3)),
+          row('After this step (‰)', (el) => v(q[el].blank, 3)),
+          row('Change (‰)', (el) => dif(q[el].blank, q[el].raw, 3)),
+        ];
+        for (const el of E) {
+          if (!B[el].n) out.after.push({ t: 'No blank capsule gave ' + (el === 'n' ? 'an' : 'a') + ' ' + gas[el] + ' peak, so ' + iso(el) + ' has no blank to subtract.' });
+          else if (!B[el].inForce) out.after.push({ t: 'The blank is not subtracted from ' + iso(el) + ' in this run, so ' + iso(el) + ' after this step is the raw value.' });
+          else if (!big(el) && q[ak[el]] != null) out.after.push({ t: 'This ' + gas[el] + ' peak is not larger than the blank, so its ' + iso(el) + ' is left as it is.' });
+        }
+      }
+    } else if (scr === 'lin') {
+      const L = M.lin;
+      out.lines = lines('The size series gives the slope b of δ against peak area. Each position is moved along that slope to the '
+        + 'series’ mean area Ā, so a peak of the mean size keeps its value and the calibration absorbs the choice of Ā.',
+      'On Auto, b is applied only when its p is below ' + alpha + '; otherwise b counts as 0.');
+      out.formulas = lines('δ after linearity = δ after blank − b × (A − Ā)');
+      q = this.exampleOf(M, sel, (p) => p.n.blank != null || p.c.blank != null);
+      if (q) {
+        const fitted = (el) => (L[el].fit && q[ak[el]] != null && q[el].blank != null ? q[el].blank - L[el].fit.slope * (q[ak[el]] - L[el].pivot) : null);
+        const row = (k, f) => ({ k, a: f('n'), b: f('c') });
+        out.rows = [
+          row('Peak area A (Vs)', (el) => v(q[ak[el]], 3)),
+          row('Series mean area Ā (Vs)', (el) => (L[el].n ? v(L[el].pivot, 3) : 'no series')),
+          row('Fitted slope b (‰ per Vs)', (el) => (L[el].fit ? this.fs(L[el].fit.slope, 5) : 'no fit')),
+          row('δ after blank (‰)', (el) => v(q[el].blank, 3)),
+          row('δ − b × (A − Ā) (‰)', (el) => v(fitted(el), 3)),
+          row('After this step (‰)', (el) => v(q[el].lin, 3)),
+          row('Change (‰)', (el) => dif(q[el].lin, q[el].blank, 3)),
+        ];
+        for (const el of E) {
+          const l = L[el], nm = el === 'n' ? 'N' : 'C';
+          if (l.fit && !l.inForce) out.after.push({ t: 'The ' + iso(el) + ' correction is not applied in this run (' + this.peq(l.fit.p) + '), so b counts as 0 and the value is unchanged.' });
+          if (q.flags.includes(nm + ' above linearity range') || q.flags.includes(nm + ' below linearity range')) {
+            out.after.push({ t: 'This sample’s ' + gas[el] + ' peak lies outside the size range of the series, so ' + (l.inForce ? 'its correction is extrapolated.' : 'a correction would be extrapolated.') });
+          }
+        }
+      }
+    } else if (scr === 'drift') {
+      const R = M.drift;
+      out.lines = lines('The drift monitors give the slope b of δ against x, which is the position in the run for the Row model and the '
+        + 'background under the N2 reference peak for the Background model. Each position is moved along that slope to the monitors’ '
+        + 'mean x̄, so the run’s mean level is left to the calibration.',
+      'On Auto, b is applied only when its p is below ' + alpha + '; otherwise b counts as 0.');
+      out.formulas = lines('δ after drift = δ after linearity − b × (x − x̄)');
+      q = this.exampleOf(M, sel, (p) => p.n.lin != null || p.c.lin != null);
+      if (q) {
+        const bg = (el) => R[el].model === 'Background';
+        const x = (el) => (bg(el) && q.rbgd != null ? q.rbgd : q.r);
+        const fitted = (el) => (R[el].fit && q[el].lin != null ? q[el].lin - R[el].fit.slope * (x(el) - R[el].pivot) : null);
+        const row = (k, f) => ({ k, a: f('n'), b: f('c') });
+        out.rows = [
+          row('Model', (el) => R[el].model),
+          row('x, position or background', (el) => (bg(el) && q.rbgd != null ? v(q.rbgd, 2) + ' mV' : 'position ' + q.r)),
+          row('Monitors’ mean x̄', (el) => (R[el].n ? v(R[el].pivot, 2) + (bg(el) ? ' mV' : '') : 'no monitors')),
+          row('Fitted slope b (‰ per ' + (bg('n') && bg('c') ? 'mV' : bg('n') || bg('c') ? 'position or mV' : 'position') + ')', (el) => (R[el].fit ? this.fs(R[el].fit.slope, 5) : 'no fit')),
+          row('δ after linearity (‰)', (el) => v(q[el].lin, 3)),
+          row('δ − b × (x − x̄) (‰)', (el) => v(fitted(el), 3)),
+          row('After this step (‰)', (el) => v(q[el].drift, 3)),
+          row('Change (‰)', (el) => dif(q[el].drift, q[el].lin, 3)),
+        ];
+        for (const el of E) {
+          if (R[el].fit && !R[el].inForce) out.after.push({ t: 'The ' + iso(el) + ' correction is not applied in this run (' + this.peq(R[el].fit.p) + '), so b counts as 0 and the value is unchanged.' });
+        }
+        if ((bg('n') || bg('c')) && q.rbgd == null) out.after.push({ t: 'This position has no background under a reference peak, so the Background model uses its position.' });
+      }
+    } else if (scr === 'cal') {
+      const C = M.cal;
+      out.lines = lines('The anchors’ accepted values are regressed on their measured values after drift, and the fitted line converts '
+        + 'every position. The slope m stretches the run’s scale onto AIR or VPDB, and the intercept c moves its zero.');
+      out.formulas = lines('δ calibrated = m × δ after drift + c');
+      q = this.exampleOf(M, sel, (p) => p.n.drift != null || p.c.drift != null);
+      if (q) {
+        const cal = (el) => (C[el].slope != null && C[el].n >= 2 && q[el].drift != null ? C[el].slope * q[el].drift + C[el].intercept : null);
+        const row = (k, f) => ({ k, a: f('n'), b: f('c') });
+        out.rows = [
+          row('δ after drift, measured (‰)', (el) => v(q[el].drift, 3)),
+          row('Slope m', (el) => (C[el].slope != null ? v(C[el].slope, 5) : 'not calibrated')),
+          row('Intercept c (‰)', (el) => v(C[el].intercept, 3)),
+          row('m × δ + c, calibrated (‰)', (el) => v(cal(el), 3)),
+          row('Anchors’ accepted range (‰)', (el) => (C[el].accMin != null ? this.span(C[el].accMin, C[el].accMax, 2) : '')),
+        ];
+        for (const el of E) {
+          if (q.flags.includes((el === 'n' ? 'd15N' : 'd13C') + ' outside anchor range')) {
+            out.after.push({ t: 'This sample’s ' + iso(el) + ' lies outside the anchors’ accepted range, so the line is extrapolated to it.' });
+          }
+        }
+      }
+    } else if (scr === 'elem') {
+      const K = D.k || {}, at = D.atomic || {};
+      out.colA = 'N';
+      out.colB = 'C';
+      out.lines = lines('The weighed standards give a line of peak area against micrograms, with slope k and intercept a, so a '
+        + 'position’s micrograms are (A − a) / k. Divided by the mass, they give the % measured.',
+      'Where the elemental correction is in force, the % measured is divided by f, the drift monitors’ measured over certified value '
+        + 'at this position, interpolated between monitors; elsewhere f is 1. C:N, molar, takes the micrograms of each element over '
+        + 'its atomic mass, times fN / fC.');
+      out.formulas = lines('µg = (A − a) / k', '% measured = µg / (mass in mg × 1000) × 100', '% reported = % measured / f');
+      q = this.exampleOf(M, sel, (p) => p.ugN != null || p.ugC != null);
+      if (q) {
+        const k = (el) => K[el] || {};
+        const ug = (el) => (k(el).slope && k(el).n >= 3 && q[ak[el]] != null ? (q[ak[el]] - k(el).intercept) / k(el).slope : null);
+        const meas = (el) => (ug(el) != null && q.amt ? ug(el) / (q.amt * 1000) * 100 : null);
+        const row = (k2, f) => ({ k: k2, a: f('n'), b: f('c') });
+        out.rows = [
+          row('Peak area A (Vs)', (el) => v(q[ak[el]], 3)),
+          row('Slope k (Vs per µg)', (el) => (k(el).slope != null ? v(k(el).slope, 5) : 'no fit')),
+          row('Intercept a (Vs)', (el) => v(k(el).intercept, 4)),
+          row('µg, (A − a) / k', (el) => v(ug(el), 3)),
+          row('Mass (mg)', () => (q.amt ? v(q.amt, 3) : 'not weighed')),
+          row('% measured', (el) => v(meas(el), 3)),
+          row('Factor f at this position', (el) => v(q['f' + el], 4)),
+          row('% reported', (el) => v(el === 'n' ? q.pctN : q.pctC, 3)),
+        ];
+        if (ug('n') != null && ug('c') != null && ug('n') > 0 && at.c && at.n) {
+          out.after.push({ t: 'C:N, molar, is (' + this.fx(ug('c'), 3) + ' / ' + this.num(at.c) + ') / (' + this.fx(ug('n'), 3) + ' / ' + this.num(at.n) + ') × '
+            + this.fx(q.fn, 4) + ' / ' + this.fx(q.fc, 4) + ' = ' + this.fx(q.cn, 2) + '.' });
+        }
+        if (!q.amt) out.after.push({ t: 'This sample was not weighed, so it has no %N or %C; its C:N needs no mass.' });
+      }
+    } else if (scr === 'unc') {
+      const U = M.unc, C = M.cal;
+      out.lines = lines('1σ adds three variances, each carried through the calibration line at the sample’s measured value. They are the '
+        + 'repeatability of one analysis, s, times the slope m; the anchors’ certified 1σ; and the standard errors of the anchors’ '
+        + 'measured means. The last two grow with the distance of the sample’s measured value from the anchors’ mean.');
+      out.formulas = lines('1σ = √[(s × m)² + certified term + measured-means term]', this.kSig(M) + ' = ' + this.num(set.k) + ' × 1σ');
+      q = this.exampleOf(M, sel, (p) => p.n.u != null || p.c.u != null);
+      if (q) {
+        const p = (el) => q[el].parts || null, w = (x) => v(x, 6);
+        const row = (k, f) => ({ k, a: f('n'), b: f('c') });
+        out.rows = [
+          row('Repeatability s (‰)', (el) => v(U[el].uS, 4)),
+          row('Calibration slope m', (el) => v(C[el].slope, 5)),
+          row('(s × m)² (‰²)', (el) => (p(el) ? w(p(el).rep) : '')),
+          row('Certified term (‰²)', (el) => (p(el) ? w(p(el).acc) : '')),
+          row('Measured-means term (‰²)', (el) => (p(el) ? w(p(el).mean) : '')),
+          row('Sum (‰²)', (el) => (p(el) ? w(p(el).rep + p(el).acc + p(el).mean) : '')),
+          row('1σ, the square root (‰)', (el) => v(q[el].u, 4)),
+          row(this.kSig(M) + ' (‰)', (el) => v(q[el].U, 4)),
+        ];
+      }
+    }
+    if (q) out.title = named(q);
+    else out.after = [{ t: 'This run has no sample with a value for this step, so there is no worked example.' }];
+    return out;
+  }
+
+  // The explanation as the page draws it, with the button that hides or shows every step's explanation.
+  explainShell(ex, st) {
+    const open = !!st.explain;
+    return Object.assign({ lines: [], formulas: [], title: '', sub: '', colA: '', colB: '', rows: [], after: [] }, ex || {}, {
+      open, exp: open ? 'true' : 'false', toggleT: open ? 'Hide explanations' : 'Show explanations',
+      toggle: () => this.setExplain(!this.state.explain),
+      hasTitle: !!(ex && ex.title), hasRows: !!(ex && ex.rows && ex.rows.length),
+    });
   }
 
   // ---------------------------------------------------------------- the instrument
@@ -1382,7 +1655,8 @@ class Component extends DCLogic {
         + (blk.sd != null ? ', SD ' + this.fx(blk.sd, 2) + '‰' : '') + why(blk), on: blk.inForce };
     };
     const ctrl = [this.seg('Blank correction', 'blank', d.blank, ['Auto', 'On', 'Off'], H, [verdict('n'), verdict('c')])];
-    const charts = [this.blankChart(M, 'n', blanks, sel, H), this.blankChart(M, 'c', blanks, sel, H)];
+    const charts = [this.blankChart(M, 'n', blanks, sel, H), this.blankChart(M, 'c', blanks, sel, H),
+      this.shiftChart(M, d, 'blank', 'n', sel, H), this.shiftChart(M, d, 'blank', 'c', sel, H)];
     const under = (el) => {
       const ak = el === 'n' ? 'aN' : 'aC', area = b[el].area;
       return mult && area > 0 ? S.filter((q) => q[ak] != null && q[ak] < mult * area) : [];
@@ -1407,9 +1681,10 @@ class Component extends DCLogic {
       const ak = el === 'n' ? 'aN' : 'aC';
       lines.push({ t: (Ma.blank[el].inForce ? 'Subtracting the blank' : 'Leaving the blank in') + ' would move sample ' + this.iso(el) + ' by ' + this.span(sh.lo, sh.hi, 2, true) + '‰, ' + sh.beyond + ' of ' + sh.n + ' by more than ' + this.kSig(M) + '.' });
       const big = sh.big;
-      if (big && Math.abs(big.d) > 0.5) {
+      if (big && Math.abs(big.d) > 0.5 && big.q[ak] > b[el].area) {
         lines.push({ t: 'The largest change is ' + this.who(big.q) + ' (' + this.fs(big.d, 2) + '‰), whose ' + (el === 'n' ? 'N2' : 'CO2') + ' peak is '
-          + this.fx(big.q[ak] / b[el].area, 1) + ' times the blank. A sample this small relative to the blank cannot be corrected reliably.' });
+          + this.fx(big.q[ak] / b[el].area, 1) + ' times the blank, so an error of 1‰ in the blank’s δ would move its blank-corrected δ by '
+          + this.fx(b[el].area / (big.q[ak] - b[el].area), 2) + '‰.' });
       }
     }
     for (const [el, list, gas] of [['n', uN, 'N2'], ['c', uC, 'CO2']]) {
@@ -1458,6 +1733,7 @@ class Component extends DCLogic {
         xLabel: gas + ' peak area (Vs)', yLabel: this.iso(el) + ' after blank (‰)',
       }));
     }
+    charts.push(this.shiftChart(M, d, 'lin', 'n', sel, H), this.shiftChart(M, d, 'lin', 'c', sel, H));
     const fN = L.n.fit, fC = L.c.fit;
     const stats = { rows: [
       { k: 'Slope (‰ per Vs)', a: this.fs(fN && fN.slope, 5), b: this.fs(fC && fC.slope, 5) },
@@ -1479,7 +1755,7 @@ class Component extends DCLogic {
       lines.push({ t: (on ? 'Switching the ' + this.iso(el) + ' correction off' : 'Forcing the ' + this.iso(el) + ' correction on') + ' would move sample ' + this.iso(el) + ' by ' + this.span(sh.lo, sh.hi, 2, true) + '‰, ' + sh.beyond + ' of ' + sh.n + ' by more than ' + this.kSig(M) + '.' });
     }
     if (!lines.length) lines.push({ t: lin.length < 3 ? 'With fewer than three size standards, no slope can be applied, so the switches change nothing.' : 'The switches change no sample in this run.' });
-    return { ctrl, charts, stats, effect: { title: 'Effect of this choice', lines } };
+    return { ctrl, charts, stats, effect: { title: 'Effect of this choice', lines }, checks: this.stepChecks(M, d, 'lin') };
   }
 
   vDrift(M, d, sel, H) {
@@ -1526,6 +1802,7 @@ class Component extends DCLogic {
         xLabel: bg ? 'N2 reference-peak background (mV)' : 'Position in the run', yLabel: this.iso(el) + ' after linearity (‰)',
       }));
     }
+    charts.push(this.shiftChart(M, d, 'drift', 'n', sel, H), this.shiftChart(M, d, 'drift', 'c', sel, H));
     const unit = (el) => (Dr[el].model === 'Background' ? '‰ per mV' : '‰ per position');
     const stats = { rows: [
       { k: 'Model', a: Dr.n.model, b: Dr.c.model },
@@ -1549,7 +1826,7 @@ class Component extends DCLogic {
     }
     if (Dr.n.outliers.length || Dr.c.outliers.length) lines.push({ t: 'With ' + this.words(mons.length) + ' monitors, leaving one out can make another look like an outlier. Leave a monitor out only when there is a known problem with its capsule or its weighing.' });
     if (!lines.length) lines.push({ t: Math.max(Dr.n.n, Dr.c.n) < 3 ? 'Fewer than three monitors are in the fit, so no drift slope can be applied.' : 'Reversing the switch changes no sample in this run.' });
-    return { ctrl, charts, stats, effect: { title: 'Effect of this choice', lines } };
+    return { ctrl, charts, stats, effect: { title: 'Effect of this choice', lines }, checks: this.stepChecks(M, d, 'drift') };
   }
 
   vCal(M, d, sel, H) {
@@ -1595,7 +1872,7 @@ class Component extends DCLogic {
       if (below.length) t += ' ' + below.length + ' below, down to ' + this.fx(Math.min(...below.map((q) => q[el].fin)), 2) + '‰.';
       lines.push({ t });
     }
-    if (K.length) lines.push({ t: this.count(K.length, 'check analysis', 'check analyses') + ' in this run test the calibration; Quality checks compares them with their accepted values.' });
+    if (K.length) lines.push({ t: this.count(K.length, 'check analysis', 'check analyses') + ' in this run test the calibration; the Check standard row above compares them with their accepted values.' });
     else if (outside && this.anchorGroups(M).length < 3) lines.push({ t: 'A third anchor or a check standard near the samples would test the extrapolation; this run has neither.' });
     const n = M.cal.n, c = M.cal.c;
     const stats = { rows: [
@@ -1605,7 +1882,7 @@ class Component extends DCLogic {
       { k: 'Residual SD (‰)', a: this.fx(n.sd, 3), b: this.fx(c.sd, 3) },
       { k: 'Anchor analyses', a: String(n.n), b: String(c.n) },
     ] };
-    return { ctrl: [], charts, stats, effect: { title: 'Extrapolation', lines } };
+    return { ctrl: [], charts, stats, effect: { title: 'Extrapolation', lines }, checks: this.stepChecks(M, d, 'cal') };
   }
 
   // the elemental factor along the run, from the monitors' factors
@@ -1686,16 +1963,16 @@ class Component extends DCLogic {
       lines.push({ t: 'Fewer than two monitors are used, so the switch changes nothing.' });
     }
     if (S.length && !S.some((q) => q.pctN != null || q.pctC != null)) lines.push({ t: 'The samples were not weighed, so the run reports no %N or %C for them' + (S.some((q) => q.cn != null) ? '; the correction still moves their C:N.' : '.') });
-    lines.push({ t: 'Leave a monitor out when its weight is in doubt. A capsule weighed 10% light reads 10% high in both %N and %C.' });
-    return { ctrl, charts, stats, effect: { title: 'Effect of this choice', lines } };
+    lines.push({ t: 'Leave a monitor out when its weight is in doubt. A capsule whose entered weight is 10% too low reads 11% high in both %N and %C.' });
+    return { ctrl, charts, stats, effect: { title: 'Effect of this choice', lines }, checks: this.stepChecks(M, d, 'elem') };
   }
 
   vUnc(M, d, sel, H) {
     const U = M.unc, run = this.state.run, S = this.samples(M), A = M.P.filter((q) => q.role === 'A');
     const src = (el) => {
       const b = U[el], want = el === 'n' ? d.uSrcN : d.uSrcC, now = this.uSrc(M, d, el);
-      if (!b.ok) return { t: 'No uncertainty: the calibration has fewer than three anchor analyses', on: false };
-      if (b.uS == null) return { t: 'No repeatability estimate: no anchor was analyzed more than once', on: false };
+      if (!b.ok) return { t: 'No uncertainty, since the calibration has fewer than three anchor analyses', on: false };
+      if (b.uS == null) return { t: 'No repeatability estimate, since no anchor was analyzed more than once', on: false };
       const what = now === 'monitors' ? 'SD of the drift monitors in the fit' : now === 'config' ? 'set in the configuration'
         : 'pooled SD of the anchor replicates, ' + b.df + ' df' + (want === 'monitors' ? ', since fewer than two monitors are left in the drift fit' : '');
       return { t: '1σ = ' + this.fx(b.uS, 3) + '‰, ' + what, on: true };
@@ -1777,24 +2054,70 @@ class Component extends DCLogic {
       lines.push({ t: 'With the ' + (alt === 'monitors' ? 'drift monitors’ SD (' + this.fx(M.monSD[el], 3) + '‰)' : 'pooled anchor SD (' + this.fx(U[el].pooled, 3) + '‰)')
         + ', 1σ(' + this.iso(el) + ') would be ' + this.span(Math.min(...a), Math.max(...a), 3) + '‰ instead of ' + this.span(Math.min(...b), Math.max(...b), 3) + '‰.' });
     }
-    lines.push({ t: '1σ does not include the blank, linearity, or drift corrections, or differences between runs.' });
+    if (!lines.length) lines.push({ t: 'No other repeatability source is available in this run, so the choice changes no 1σ.' });
     return { ctrl, charts, stats: { rows }, effect: { title: 'Effect of this choice', lines }, budget: pn || pc ? budget : null };
   }
 
+  // Every check of the run, each tagged with the step it belongs to, in the order of the steps.
   qcChecks(M, d) {
-    const D = this.data(), set = M.settings, S = this.samples(M), out = [], ax = this.rowAxis(M);
-    if (S.length) {
-      const rev = [];
-      for (const [k, el, lab] of [['linN', 'n', 'linearity'], ['linC', 'c', 'linearity'], ['drift', 'n', 'drift'], ['drift', 'c', 'drift']]) {
-        const on = k === 'drift' ? M.drift[el].inForce : M.lin[el].inForce;
-        const Ma = this.model(Object.assign({}, d, { [k]: on ? 'Off' : 'On' }));
-        rev.push({ el, lab, on, sh: this.shift(M, Ma, el) });
+    const set = M.settings, S = this.samples(M), out = [], ks = this.kSig(M);
+    const add = (step, c) => out.push(Object.assign({ step }, c));
+    for (const c of this.instChecks(M)) if (c.s !== 'info') add('inst', c);
+    // reversing a linearity or drift choice, each element against its samples' kσ
+    const effect = (key, title, what) => {
+      if (!S.length) return;
+      const moved = [], none = [];
+      let hit = 0;
+      for (const el of ['n', 'c']) {
+        const sh = this.stepShift(M, d, key, el);
+        if (!sh) { none.push(this.iso(el)); continue; }
+        hit += sh.beyond.length;
+        moved.push(this.iso(el) + ' in ' + sh.beyond.length + ' of ' + this.count(sh.n, 'sample') + ' (' + (sh.on ? 'applied' : 'not applied') + ')');
       }
-      const hit = rev.filter((r) => r.sh.beyond > 0);
-      out.push({ s: hit.length ? 'caution' : 'ok', title: 'Effect of the choices',
-        t: 'If each choice were reversed, ' + rev.map((r, i) => (i === rev.length - 1 ? 'and ' : '') + this.iso(r.el) + ' ' + r.lab + ' (' + (r.on ? 'applied' : 'not applied') + ') would move ' + r.sh.beyond + (i ? '' : ' of ' + r.sh.n + ' samples')).join(', ') + ' by more than ' + this.kSig(M) + '.' });
+      const t = (moved.length ? 'Reversing the ' + what + ' choice would move ' + this.andList(moved) + ' by more than ' + ks + '.' : '')
+        + (none.length ? (moved.length ? ' ' : '') + 'No ' + what + ' slope can be applied to ' + this.andList(none) + ' in this run.' : '');
+      add(key, { s: hit ? 'caution' : 'ok', title, t });
+    };
+    effect('lin', 'Effect of the linearity choice', 'linearity');
+    if (S.length) {
+      const cnt = (f) => S.filter((q) => q.flags.includes(f)).length;
+      const nu = cnt('N below linearity range'), no = cnt('N above linearity range'), cu = cnt('C below linearity range'), co = cnt('C above linearity range');
+      add('lin', { s: nu + no + cu + co ? 'note' : 'ok', title: 'Sample size against the size series',
+        t: 'N2 peaks of ' + nu + ' samples fall below the series and ' + no + ' above it; CO2 peaks of ' + cu + ' below and ' + co + ' above.' });
     }
-    const E = M.elem, mons = M.P.filter((q) => q.role === 'D');
+    effect('drift', 'Effect of the drift choice', 'drift');
+    const mons = M.P.filter((q) => q.role === 'D');
+    if (mons.length) {
+      const outs = [], lo = [];
+      for (const el of ['n', 'c']) for (const r of M.drift[el].outliers) outs.push(this.who(M.P.find((q) => q.r === r)) + ' in ' + this.iso(el) + ', t ' + this.fs(M.drift[el].t[r], 2));
+      for (const el of ['n', 'c']) for (const r of M.drift[el].excluded) lo.push(r + ' from the ' + this.iso(el) + ' fit');
+      const tested = mons.some((q) => M.drift.n.t[q.r] != null || M.drift.c.t[q.r] != null);
+      add('drift', { s: outs.length || lo.length ? 'note' : 'ok', title: 'Drift monitors agree',
+        t: (outs.length ? 'Outlier: ' + outs.join('; ') + '.' : tested ? 'No monitor has |t| above ' + this.num(set.outlierT) + ' against the line through the others.'
+          : 'Fewer than five monitors are in the fit, so none is tested as an outlier.') + (lo.length ? ' Left out: ' + lo.join(', ') + '.' : '') });
+    } else {
+      add('drift', { s: 'note', title: 'Drift monitors agree', t: 'This run has no drift monitors, so drift was not checked.' });
+    }
+    if (S.length) {
+      // each element counted over the samples that have its final value
+      const has = (el) => S.filter((q) => q[el].fin != null);
+      const oa = (el) => has(el).filter((q) => M.cal[el].accMin != null && (q[el].fin < M.cal[el].accMin || q[el].fin > M.cal[el].accMax)).length;
+      const els = ['n', 'c'].filter((el) => has(el).length);
+      add('cal', { s: !els.length || oa('n') || oa('c') ? 'note' : 'ok', title: 'Anchors bracket the samples',
+        t: els.length ? this.andList(els.map((el) => this.iso(el) + ' ' + oa(el) + ' of ' + has(el).length)) + ' samples with a final value fall outside the anchors and are extrapolated.'
+          : 'No sample has a final δ¹⁵N or δ¹³C, so the anchors’ range was not compared.' });
+    }
+    const K = M.P.filter((q) => q.role === 'K');
+    if (K.length) {
+      const off = K.filter((q) => q.flags.some((f) => /^check /.test(f)));
+      add('cal', { s: off.length ? 'note' : 'ok', title: 'Check standard',
+        t: this.count(K.length, 'check analysis', 'check analyses') + ' in this run' + (off.length
+          ? '; ' + (off.length === 1 ? 'one differs' : off.length + ' differ') + ' from the accepted value by more than ' + this.num(set.checkOffset) + '‰: ' + off.map((q) => this.who(q) + ', ' + q.flags.filter((f) => /^check /.test(f)).map((f) => this.ftext(f).replace(/^check /, '')).join(', ')).join('; ') + '.'
+          : '; each is within ' + this.num(set.checkOffset) + '‰ of its accepted value.') });
+    } else {
+      add('cal', { s: 'note', title: 'Check standard', t: 'None in this run. The FIRMS guide (Dunn and Carter, 2018, section 6.3) recommends an independent check material in every run.' });
+    }
+    const E = M.elem;
     let worst = 0, at = null, el0 = 'n';
     for (const el of ['n', 'c']) {
       for (const q of mons) {
@@ -1803,50 +2126,23 @@ class Component extends DCLogic {
       }
     }
     if (at == null) {
-      out.push({ s: 'note', title: 'Elemental content', t: 'No drift monitor has both a measured and a certified %N or %C, so sensitivity drift was not checked.' });
+      add('elem', { s: 'note', title: 'Elemental content', t: 'No drift monitor has both a measured and a certified %N or %C, so sensitivity drift was not checked.' });
     } else {
       const left = E.n.excluded;
       const applied = E.n.inForce && E.c.inForce ? 'applied to both' : E.n.inForce ? 'applied to %N' : E.c.inForce ? 'applied to %C' : 'not applied';
-      out.push({ s: Math.abs(worst) > 0.10 ? 'caution' : Math.abs(worst) * 100 > set.elemGate || left.length ? 'note' : 'ok', title: 'Elemental content',
+      add('elem', { s: Math.abs(worst) > 0.10 ? 'caution' : Math.abs(worst) * 100 > set.elemGate || left.length ? 'note' : 'ok', title: 'Elemental content',
         t: 'Largest bias among the monitors used is ' + this.fs(worst * 100, 1) + '% in ' + (el0 === 'n' ? '%N' : '%C') + ' at position ' + at + (left.length ? '; ' + this.andList(left) + ' left out' : '') + '. The correction is ' + applied + '.' });
-    }
-    if (mons.length) {
-      const outs = [], lo = [];
-      for (const el of ['n', 'c']) for (const r of M.drift[el].outliers) outs.push(this.who(M.P.find((q) => q.r === r)) + ' in ' + this.iso(el) + ', t ' + this.fs(M.drift[el].t[r], 2));
-      for (const el of ['n', 'c']) for (const r of M.drift[el].excluded) lo.push(r + ' from the ' + this.iso(el) + ' fit');
-      const tested = mons.some((q) => M.drift.n.t[q.r] != null || M.drift.c.t[q.r] != null);
-      out.push({ s: outs.length || lo.length ? 'note' : 'ok', title: 'Drift monitors agree',
-        t: (outs.length ? 'Outlier: ' + outs.join('; ') + '.' : tested ? 'No monitor is more than ' + this.num(set.outlierT) + ' t from the others.' : 'Fewer than five monitors are in the fit, so none is tested as an outlier.')
-          + (lo.length ? ' Left out: ' + lo.join(', ') + '.' : '') });
-    } else {
-      out.push({ s: 'note', title: 'Drift monitors agree', t: 'This run has no drift monitors, so drift was not checked.' });
-    }
-    if (S.length) {
-      const oa = (el) => S.filter((q) => q[el].fin != null && M.cal[el].accMin != null && (q[el].fin < M.cal[el].accMin || q[el].fin > M.cal[el].accMax)).length;
-      out.push({ s: oa('n') || oa('c') ? 'note' : 'ok', title: 'Anchors bracket the samples',
-        t: this.iso('n') + ' ' + oa('n') + ' of ' + S.length + ' and ' + this.iso('c') + ' ' + oa('c') + ' of ' + S.length + ' samples fall outside the anchors and are extrapolated.' });
-      const cnt = (s) => S.filter((q) => q.flags.includes(s)).length;
-      const nu = cnt('N below linearity range'), no = cnt('N above linearity range'), cu = cnt('C below linearity range'), co = cnt('C above linearity range');
-      out.push({ s: nu + no + cu + co ? 'note' : 'ok', title: 'Sample size against the size series',
-        t: 'N2 peaks of ' + nu + ' samples fall below the series and ' + no + ' above it; CO2 peaks of ' + cu + ' below and ' + co + ' above.' });
-    }
-    for (const c of this.instChecks(M)) if (c.s !== 'info') out.push(Object.assign({}, c, { step: 'inst' }));
-    const K = M.P.filter((q) => q.role === 'K');
-    if (K.length) {
-      const off = K.filter((q) => q.flags.some((f) => /^check /.test(f)));
-      out.push({ s: off.length ? 'note' : 'ok', title: 'Check standard',
-        t: this.count(K.length, 'check analysis', 'check analyses') + ' in this run' + (off.length
-          ? '; ' + off.length + ' differ from the accepted value by more than ' + this.num(set.checkOffset) + '‰: ' + off.map((q) => this.who(q) + ', ' + q.flags.filter((f) => /^check /.test(f)).map((f) => this.ftext(f).replace(/^check /, '')).join(', ')).join('; ') + '.'
-          : '; each is within ' + this.num(set.checkOffset) + '‰ of its accepted value.') });
-    } else {
-      out.push({ s: 'note', title: 'Check standard', t: 'None in this run. The FIRMS guide (Dunn and Carter, 2018, section 6.3) recommends an independent check material in every run.' });
     }
     return out.map((c) => Object.assign({}, c, this.status(c.s)));
   }
 
+  // The checks of one step, as that step shows them.
+  stepChecks(M, d, step) { return this.qcChecks(M, d).filter((c) => c.step === step); }
+
+  // The Quality checks step: every check of the run, each with a button back to its step.
   vQC(M, d, sel, H) {
-    const checks = this.qcChecks(M, d).map((c) => (c.step === 'inst'
-      ? Object.assign({}, c, { hasGo: true, goText: 'Step 1, ' + NAMES.inst, go: H.go('inst') }) : c));
+    const checks = this.qcChecks(M, d).map((c) => Object.assign({}, c, { hasGo: true,
+      goText: 'Step ' + (FLOW.indexOf(c.step) + 1) + ', ' + NAMES[c.step], go: H.go(c.step) }));
     return { ctrl: [], charts: [], checks };
   }
 
@@ -1963,14 +2259,14 @@ class Component extends DCLogic {
       busy: !!busy, aria: busy === kind ? 'true' : 'false', cursor: busy ? (busy === kind ? 'progress' : 'default') : 'pointer',
     });
     const downloads = [
-      item('workbook', 'Workbook', nm.workbook, lo ? 'Every step as a formula; Excel or LibreOffice fills in the values when it opens the file' : 'Every step as a formula, with the values filled in', 'Building the workbook on the server; this takes a few seconds'),
+      item('workbook', 'Workbook', nm.workbook, lo ? 'Every step as a formula; Excel or LibreOffice fills in the values when it opens the file' : 'Every step as a formula, with the values filled in', 'Building the workbook on the server, where LibreOffice computes every formula'),
       item('csv', 'Results table', nm.csv, 'The workbook’s Results sheet as a CSV file, with every position at full precision', 'Building the results table on the server'),
       item('config', 'Configuration', nm.config, 'Your choices for this run as an Excel lab configuration, to edit and load next time', 'Writing the configuration on the server'),
     ];
     const many = st.runs.length > 1, bn = this.batchNames();
     if (many) {
       downloads.push(
-        item('batch', 'Combined results, all ' + st.runs.length + ' runs', bn.xlsx, 'Every position of every run with a Run column first, one row per run, and the samples measured in more than one run, each run with its own choices', 'Correcting the ' + st.runs.length + ' runs on the server'),
+        item('batch', 'Combined results, all ' + st.runs.length + ' runs', bn.xlsx, 'Every position of every run with a Run column first, a Runs sheet with one row per run, and the samples measured in more than one run; each run keeps its own choices', 'Correcting the ' + st.runs.length + ' runs on the server'),
         item('batchcsv', 'Combined results table', bn.csv, 'The combined Results sheet as a CSV file, at full precision', 'Correcting the ' + st.runs.length + ' runs on the server'));
     }
     const pair = (a, b) => (a && b ? 'on both' : a ? 'on ' + this.iso('n') : b ? 'on ' + this.iso('c') : 'off');
@@ -2073,7 +2369,7 @@ class Component extends DCLogic {
       cfgNote: (cfg ? 'Its standards table, switches, and limits replace the package defaults' + (cfg.wrapped ? ' (read from its "config" field)' : '')
         + (cfg.unknown.length ? '. Fields ea_irms does not read are ignored: ' + this.andList(cfg.unknown) : '') + '.'
         + (cfg.notes && cfg.notes.length ? ' Note: ' + cfg.notes.join('; ') + '.' : '')
-        : 'An Excel file with a standards table, switches, and limits: download the template, fill in its yellow cells, and choose it here. A .json configuration from an earlier run also works.')
+        : 'An Excel file with a standards table, switches, and limits. Download the template, fill in its yellow cells, and choose it here; a .json configuration from an earlier run also works.')
         + (st.runs.length > 1 ? ' Choosing another processes all ' + st.runs.length + ' runs again.' : run ? ' Choosing another processes the run again.' : ''),
       chooseCfg: () => { const el = document.getElementById('dc-config'); if (el && !this.state.busy) el.click(); },
       pickedCfg: (e) => { const f = e.target.files && e.target.files[0]; e.target.value = ''; if (f) this.pickConfig(f); },
@@ -2151,8 +2447,8 @@ class Component extends DCLogic {
       clear: () => this.clearSheet(),
       template: () => this.downloadSheetTemplate(),
       templateLabel: st.runs.length ? 'Download a sheet with these sample names' : 'Download an empty sample sheet',
-      note: 'A table with one row per sample: its ID, then any columns, such as project, site, species or material, fraction, '
-        + 'collection date, depth, and notes. A sample matches a row when its name equals the ID, or begins with it followed by '
+      note: 'A table with one row per sample, its ID first and then any columns, such as project, site, species or material, '
+        + 'fraction, collection date, depth, and notes. A sample matches a row when its name equals the ID, or begins with it followed by '
         + 'a space, a hyphen, or another character that is neither a letter nor a digit (CI 3-2 matches CI 3-2-S); the longest '
         + 'ID wins, and when no ID fits as written, spaces are ignored (PD1-H matches PD 1). The matched rows are written into '
         + 'the results tables and each workbook. Analyses of one sample in a run, '
@@ -2231,7 +2527,8 @@ class Component extends DCLogic {
     let flow = { kicker: '', file: '', runLabel: 'Run', multi: false, runs: [], rail: [], ctrl: [], hasCtrl: false, ribbon: [], legend: [], ribbonStart: '', ribbonEnd: '', charts: [], hasCharts: false,
       stats: { rows: [] }, hasStats: false, statA: '', statB: '', effect: { title: '', lines: [] }, hasEffect: false, checks: [], hasChecks: false,
       budget: { title: '', rows: [] }, hasBudget: false, insp: { title: '', sub: '', facts: [], chain: [], tail: [], flags: [], hasFlags: false, noFlags: false },
-      setupRows: [], prev: { t: '', pick: null }, next: { t: '', pick: null, busy: false }, stdSource: '', warn: false, warnText: '' };
+      setupRows: [], prev: { t: '', pick: null }, next: { t: '', pick: null, busy: false }, stdSource: '', warn: false, warnText: '',
+      explain: this.explainShell(null, st), hasExplain: false };
     let res = { rows: [], filters: [], charts: [], downloads: [], chips: [], methods: '', multi: false,
       batch: { title: '', note: '', runs: [], reps: [], hasReps: false, noReps: '', repNote: '' } };
     if (M && isFlow) {
@@ -2280,6 +2577,9 @@ class Component extends DCLogic {
         warn: !!(chk && chk.bad.length),
         warnText: chk && chk.bad.length ? 'The values in this browser differ from the server’s at ' + this.count(chk.bad.length, 'position') + '; the downloads hold the server’s.' : '',
       };
+      const ex = this.explainView(M, d, scr, sel);
+      flow.explain = this.explainShell(ex, st);
+      flow.hasExplain = !!ex;
     }
     return {
       is, nav, up, flow, res, text, version,

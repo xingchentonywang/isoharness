@@ -23,7 +23,7 @@ from .metadata import (NOT_MATCHED, REPLICATE_COLUMN, RUN_FIELDS, clean_run_info
 from .parse import _read_rows, parse_export
 from .pipeline import DEFAULT_STANDARDS, MAX_STANDARDS, MIN_OUTLIER_MONITORS, Config, assign_roles
 
-VERSION = "1.4.8"
+VERSION = "1.4.9"
 NSTD = MAX_STANDARDS      # rows in the Setup standards table (16 from 1.4.2, 13 before)
 
 
@@ -129,103 +129,101 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     r = 2
     ws.cell(r, 2, 'EA-IRMS correction template').font = F_TITLE
     r += 2
-    r = rd(r, 'Thermo Flash EA coupled to a Delta/253 IRMS. Takes the Isodat export and returns %C, %N, C:N, '
-              f'delta-13C and delta-15N, with every correction visible as a live formula. ea_irms {VERSION}.')
+    r = rd(r, 'For a Thermo Flash EA coupled to a Delta or 253 IRMS. The workbook takes the Isodat export and returns '
+              f'%C, %N, C:N, delta-13C, and delta-15N, with every correction visible as a live formula. ea_irms {VERSION}.')
     r += 1
     r = rd(r, 'How to use it', F_H1)
     r = rd(r, '1.  Open the Raw sheet. Select rows 2 to 1001 and press Delete, then paste your Isodat export '
-              'starting in cell A2. Do not paste over row 1: the headers there are what every other sheet looks for. '
-              'The sheet ships loaded with the 2026-09-15 test run as a worked example, so delete that first.')
-    r = rd(r, '2.  Open Setup. Check the standards table against the certificates and against what the sequence '
-              'actually called things. A material is recognised by the text in column A appearing anywhere in '
-              'Identifier 1, so "Ace Drift" catches Ace Drift1 through Ace Drift 13. Matching ignores case. '
-              'When two rows match, the lower row wins, so put the more specific text lower down.')
+              'starting in cell A2. Do not paste over row 1, whose headers every other sheet looks for. The sheet '
+              f'comes loaded with the export this workbook was built from ({_FILE}), so delete that first.')
+    r = rd(r, '2.  Open Setup and check the standards table against the certificates and against the names the '
+              'sequence used. A material is recognized when the text in column A appears anywhere in Identifier 1, '
+              'ignoring case, so "Ace Drift" catches Ace Drift1 through Ace Drift 13. When two rows match, the lower '
+              'row wins, so put the more specific text lower down.')
     r = rd(r, '3.  Open Work and type sample masses in the yellow column F, in mg. Leave a cell empty to use the '
-              'mass the export already carries in its Amount column. Without a mass there is no %C, %N or C:N for '
+              'mass the export already carries in its Amount column. Without a mass there is no %C, %N, or C:N for '
               'that row, though the isotope values still come out.')
-    r = rd(r, '4.  Read QC before you read anything else. It flags check standards that missed, samples outside '
-              'the calibrated size range, blanks that cannot support a blank correction, a reference gas that moved '
-              'during the run, and positions whose background rose right after an oversized sample.')
-    r = rd(r, '5.  Take the numbers from Results, with their uncertainties. Work is the audit trail behind them '
-              'and Fits holds every fitted coefficient with its r-squared, residual scatter and, for the '
-              'corrections, the test that decided whether it was applied.')
+    r = rd(r, '4.  Read QC before Results. It flags check standards that missed, samples outside the calibrated '
+              'size range, blanks that cannot support a blank correction, a reference gas that moved during the '
+              'run, and positions whose background rose right after an oversized sample.')
+    r = rd(r, '5.  Take the numbers from Results, each with its 1σ. Work is the audit trail behind them, and Fits '
+              'holds every fitted coefficient with its r-squared, its residual scatter, and, for the corrections, '
+              'the test that decided whether it was applied.')
     r = rd(r, '6.  Open Rerun. It lists the samples to measure again, with the reason and a mass to weigh, and '
               'the samples to check first. Its top line says whether the run as a whole has a problem.')
     r = rd(r, '7.  Metadata holds the run information and, when a sample sheet was given, each sample\'s row of it, '
               'which Results also carries after its own columns. Replicates compares the analyses of one sample '
               'in this run (1.4.8).')
     r += 1
-    r = rd(r, 'Colour', F_H1)
-    r = rd(r, 'Yellow cells with blue text are yours to fill in. Grey columns are machinery and can be ignored. '
+    r = rd(r, 'Color', F_H1)
+    r = rd(r, 'Yellow cells with blue text are yours to fill in. Gray columns are machinery and can be ignored. '
               'Green columns are the reported values. Everything else is a formula, and overtyping one breaks that '
               'row silently, so work on a copy. Orange rows on Results and Rerun are samples to measure again; '
               'pale orange rows are samples to check first.')
     r += 1
     r = rd(r, 'What the sheets do', F_H1)
     for a, b in [
-        ('Raw',     'Paste target, unaltered. Two grey helper columns label each peak record by channel and give it a key.'),
-        ('Setup',   'Everything you are meant to change: processing switches, the standards table, flag thresholds.'),
+        ('Raw',     'Paste target, unaltered. Two gray helper columns label each peak record by channel and give it a key.'),
+        ('Setup',   'Everything you are meant to change: processing switches, the standards table, and flag thresholds.'),
         ('Work',    'One row per autosampler position. Reads left to right: parsed peaks, then blank, linearity, '
-                    'drift and calibration corrections, then elemental content.'),
-        ('Fits',    'Every coefficient fitted from this run, each with n, r-squared and residual scatter.'),
+                    'drift, and calibration corrections, then elemental content.'),
+        ('Fits',    'Every coefficient fitted from this run, each with n, r-squared, and residual scatter.'),
         ('Results', 'The clean table to copy out or plot from.'),
         ('Rerun',   'The samples to measure again or to check, with the reason and a suggested mass.'),
         ('Replicates', 'Analyses of one sample in this run, their range, and the critical range of ISO 5725-6 (1.4.8).'),
-        ('QC',      'Checks and flags. Read this first.'),
+        ('QC',      'Checks and flags, to read before Results.'),
         ('Metadata', 'The run information and the sample sheet\'s rows for this run\'s samples (1.4.8).'),
     ]:
         c = ws.cell(r, 2); c.value = f'{a}.  {b}'; c.font = F_SM
         c.alignment = Alignment(wrap_text=True, vertical='top'); r += 1
     r += 1
     r = rd(r, 'How the corrections work', F_H1)
-    r = rd(r, 'Blank, then linearity, then drift, then calibration, in that order, each fitted from this run\'s own '
-              'standards rather than from a coefficient typed in by hand. Because linearity is fitted after the blank '
-              'correction, the two cannot double-count a size dependence that the blank already explains.')
-    r = rd(r, 'Calibration regresses accepted values on measured values and applies that line directly. It is never '
-              'fitted in the other direction and then inverted, which is where the arithmetic usually goes wrong: '
-              'dividing the intercept by the slope and subtracting it shifts every value by a constant and never '
-              'applies the slope at all.')
-    r = rd(r, 'Drift is fitted twice, against autosampler position and against the mass-28 background on the '
-              'reference peaks, and QC reports the residual scatter of both. The default is autosampler position. '
-              'Residual scatter cannot decide between the two, since both were fitted to the same drift standards, so '
-              'run labelled check standards and let their offsets decide.')
+    r = rd(r, 'The corrections run in the order blank, linearity, drift, and calibration, each fitted from this '
+              'run\'s own standards. Because linearity is fitted after the blank correction, the two cannot count '
+              'twice a size dependence that the blank already explains.')
+    r = rd(r, 'Calibration regresses accepted values on measured values and applies that line as it is. A line '
+              'fitted the other way, measured on accepted, has to be inverted, and subtracting its intercept over '
+              'its slope from each value shifts every value by a constant without applying the slope.')
+    r = rd(r, 'Drift is fitted twice, against autosampler position, the default, and against the mass-28 background '
+              'on the reference peaks, and QC reports the residual scatter of both. Residual scatter cannot decide '
+              'between the two, since both were fitted to the same drift standards, so run labeled check standards '
+              'and let their offsets decide.')
     r += 1
-    r = rd(r, 'Before trusting any drift correction, read the settling section of QC. What looks like drift is often '
-              'the instrument still coming to rest: the mass-28 background decays towards a floor over the first '
-              'several dozen positions and the standards follow it down, then both stop. QC finds the position where '
-              'the background settles, as the first three readings in a row near the floor, reports the drift slope '
+    r = rd(r, 'Before trusting a drift correction, read the settling section of QC. While the instrument comes to rest '
+              'at the start of a run, the mass-28 background decays toward a floor and the standards follow it down '
+              'until both stop, and a drift fit reads that transient as drift. QC finds the position where the '
+              'background settles, as the first three readings in a row near the floor, reports the drift slope '
               'separately before and after it, and says which pattern the run shows. A spike later in the run is '
-              'carryover from an oversized sample, not settling, and does not move that position. A straight line in '
-              'position is the wrong shape for a transient, under-correcting the early positions and over-correcting '
-              'the late ones. Setup B14 excludes the unsettled positions from the drift fit. The real fix is upstream: '
-              'wait for the background to reach its floor before the first real sample, and there is no drift left '
-              'to correct.')
+              'carryover from an oversized sample and does not move that position. A straight line in position '
+              'fits a transient badly, under-correcting the early positions and over-correcting the late ones, so '
+              'Setup B14 can leave the unsettled positions out of the drift fit; waiting for the background to reach '
+              'its floor before the first sample avoids the transient.')
     r += 1
-    r = rd(r, 'QC also lists the scatter of the drift standards after each correction in turn. A correction that does '
-              'not lower that number is not earning its place in the run you are looking at.')
+    r = rd(r, 'QC also lists the scatter of the drift standards after each correction in turn. A blank or drift '
+              'correction that does not lower it has not improved this run; linearity is judged by the check '
+              'standards instead, since the drift standards are all one size.')
     r += 1
     r = rd(r, 'Only corrections the run supports', F_H1)
-    r = rd(r, 'On Auto, which is the default, a correction is applied only when this run supports it: the blank when '
-              'at least three blank capsules agree to within 2 per mil, linearity and drift when the fitted slope '
-              'differs from zero at the significance level in Setup B15 (a two-sided t-test of the slope). That '
-              'follows the FIRMS Good Practice Guide for IRMS (Dunn and Carter, 2018, section 6.4), which asks that '
-              'a correction be shown necessary before it is applied. With five or six standards the test has little '
-              'power, so a slope that fails it is unproven rather than disproven; set the switch to On to apply it '
-              'regardless. Setup B11 sets linearity for both elements unless B18 sets carbon on its own. '
-              'Each drift monitor is also compared against the line through the others, and one that '
-              'sits far off is flagged rather than removed: if the capsule was the cause, list its position in Setup '
-              'B16 or B17 and that element\'s fit leaves it out.')
+    r = rd(r, 'On Auto, the default, a correction is applied only when this run supports it, the blank when at least '
+              'three blank capsules agree to within 2 permil, and linearity and drift when the fitted slope differs '
+              'from zero at the significance level in Setup B15 (a two-sided t-test of the slope). That follows the '
+              'FIRMS Good Practice Guide for IRMS (Dunn and Carter, 2018, section 6.4), which asks that a correction '
+              'be shown necessary before it is applied. With five or six standards the test has little power, so it '
+              'can miss a slope that is there; set the switch to On to apply it regardless. Setup B11 sets linearity for both '
+              'elements unless B18 sets carbon on its own. Each drift monitor is also compared with the line through '
+              'the others, and one that sits far off is flagged and kept in the fit; if the capsule was the cause, '
+              'list its position in Setup B16 or B17 and that element\'s fit leaves it out.')
     r += 1
     r = rd(r, 'Uncertainty', F_H1)
     r = rd(r, 'Results gives every calibrated value with its uncertainty beside it as one standard deviation, 1σ '
               '(from 1.4.5; earlier versions put U = k x 1σ there). The checks on QC and on the Rerun sheet compare '
               'a standard\'s deviation from its accepted value with k x 1σ, k from Setup B32 (2 by default). '
-              'The budget follows section 6.5 of the guide: the 1σ certificate uncertainty of each anchor '
-              'material (Setup columns H and I), the scatter of its replicates in this run, and the repeatability of '
-              'one sample analysis (Setup B30 and B31, or the pooled anchor scatter when those are empty), each '
-              'propagated through the calibration line as a Kragten spreadsheet would. It leaves out the blank, '
-              'linearity and drift corrections and day-to-day reproducibility, so it is a floor. A control chart of '
-              'an in-house standard is what supplies the rest.')
+              'The budget follows section 6.5 of the guide and has three terms, the 1σ certificate uncertainty of '
+              'each anchor material (Setup columns H and I), the scatter of its replicates in this run, and the '
+              'repeatability of one sample analysis (Setup B30 and B31, or the pooled anchor scatter when those are '
+              'empty), each propagated through the calibration line as a Kragten spreadsheet would. It leaves out '
+              'the blank, linearity, and drift corrections and day-to-day reproducibility, which a control chart of '
+              'an in-house standard measures.')
     r = rd(r, 'Elemental content comes from a regression of peak area on micrograms of C or N across every standard '
               'with both a known mass and a known composition. The intercept of that line is the area blank and is '
               'subtracted, so the k-factor is not forced through the origin.')
@@ -250,7 +248,7 @@ def build_workbook(export_path, out_path, config: Config | None = None,
               'position\'s micrograms are divided by the factor at its position. On Auto the correction is applied '
               'when a monitor is further than Setup B36 (percent) from its certified value; On applies it always, '
               'Off never. A monitor whose capsule was weighed or entered wrongly would be carried into the samples, '
-              'so list such positions in Setup B37 and they are left out. Results reports the corrected %N, %C and '
+              'so list such positions in Setup B37 and they are left out. Results reports the corrected %N, %C, and '
               'C:N, with the factors and the values as measured in its last columns; the isotope values are not '
               'touched.')
     r += 1
@@ -259,12 +257,12 @@ def build_workbook(export_path, out_path, config: Config | None = None,
               'Where a position made no sample CO2, the first exported CO2 peak is then a reference pulse that '
               'Isodat did not flag, and it would be read as the sample. Such a pulse matches the designated pulses '
               'the export does carry (at positions with no sample gas) in amplitude, within Setup B39, and reads '
-              'the working-gas value in d13C, within Setup B40, which no sample does. The template rejects it, '
-              'reports the position without a carbon value, and says so in Flags. Leave B39 empty to switch the '
-              'check off.')
+              'the working-gas value in d13C, within Setup B40; a sample peak is rejected only if it matches both. '
+              'The template rejects such a pulse, reports the position without a carbon value, and says so in '
+              'Flags. Leave B39 empty to switch the check off.')
     r += 1
     r = rd(r, 'Rerun marks (1.4.4, 1.4.7, 1.4.8)', F_H1)
-    r = rd(r, 'A sample is marked for what measuring it again can fix: the amount, the peak, or the state of '
+    r = rd(r, 'A sample is marked for what measuring it again can fix, namely the amount, the peak, or the state of '
               'the instrument at its position. It is marked for a rerun of N, C, or both when its peak lies below '
               'the range of the linearity standards (Fits rows 81 to 104) or under the blank multiple in Setup B25; '
               'when its peak reaches the instrument\'s largest amplitude, Setup B69 (1.4.7; a peak above the '
@@ -274,35 +272,38 @@ def build_workbook(export_path, out_path, config: Config | None = None,
               'run\'s pulses; when the 1σ of its final d15N or d13C is above Setup B70 (1.4.7), which a run '
               'with better anchors can fix; or when it has replicates in the run whose range is above the critical '
               'range of ISO 5725-6 (1.4.8, Replicates sheet, switched by Setup B71). It is marked for a check when it '
-              'ran before the background settled or has the peak of only one element. A value outside the anchors\' range is not marked, because a '
-              'rerun would extrapolate the same way; the fix is an anchor that brackets it.')
+              'ran before the background settled or has the peak of only one element. A value outside the anchors\' '
+              'range is not marked, because a rerun would extrapolate the same way; the fix is an anchor that '
+              'brackets it.')
     r = rd(r, 'The suggested mass puts each peak inside the linearity range and above the blank multiple, read from '
               'this analysis\'s own peak area per mg. When no one mass does that for both N and C, the two '
               'elements need two capsules and both ranges are given. Problems of the whole run, a check standard '
               'off, anchors outside k x 1σ, or a reference-gas SD at or above Setup B68 (the FIRMS guide\'s '
               'zero-enrichment limit, section 4.3.2), are listed once at the top of Rerun and not on every sample.')
-    r = rd(r, 'Replicates are the analyses of one sample in this run, as the sample sheet names them: samples '
-              'matched to it with the same name, or the same Replicate of. Their range is compared with f(n) x s, '
-              'the critical range of ISO 5725-6 (section 5.2), where s is the repeatability of one analysis in use '
-              'times the calibration slope and f(n) is 2.77 for two analyses (the 2.8 of r = 2.8 s, unrounded), '
-              '3.31 for three and 3.63 for four. When the range is above it, every one of them is marked for a '
-              'rerun of that element, since the data cannot say which analysis is off; the standard\'s next step '
-              'is more analyses and their median. Without a sample sheet nothing is compared.')
+    r = rd(r, 'Replicates are the analyses of one sample in this run as the sample sheet names them, that is, the '
+              'samples matched to it with the same name or the same Replicate of. Their range is compared with '
+              'f(n) x s, the critical range of ISO 5725-6 (section 5.2), where s is the repeatability of one analysis '
+              'in use times the calibration slope and f(n) is 2.77 for two analyses (the 2.8 of r = 2.8 s, '
+              'unrounded), 3.31 for three, and 3.63 for four. When the range is above it, every one of them is '
+              'marked for a rerun of that element, since the data cannot say which analysis is off; the standard\'s '
+              'next step is more analyses and their median. Without a sample sheet nothing is compared.')
     r += 1
     r = rd(r, 'Known limits', F_H1)
     r = rd(r, 'The outlier test on the drift monitors needs five of them in the fit; with four it has one degree of '
-              'freedom and flags residuals of a hundredth of a per mil, so from 1.4.2 it is not run below five.')
+              'freedom and flags residuals of a hundredth of a permil, so from 1.4.2 it is not run below five.')
     r = rd(r, 'Linearity is fitted as a straight line. On the 2026-09-15 run the fitted slope moved 36 percent when '
-              'the smallest standard was included, so the response is curved across the full size range and a sample '
-              'far from the standards will carry that curvature as an error. The size flags in QC mark those rows.')
-    r = rd(r, 'A blank correction is only as good as the blanks. Two blank capsules whose delta-15N differ by 22 per '
-              'mil cannot constrain one, and QC says so rather than letting the correction run quietly. Setting the '
-              'switch to Auto applies the correction only when at least three blanks agree to within 2 per mil. A '
-              'sample barely larger than the blank is flagged separately, because there the mass balance amplifies '
-              'the blank\'s uncertainty instead of removing it, whatever the blanks look like.')
-    r = rd(r, 'Precision quoted from the drift standards understates the real figure, because those are the material '
-              'the drift correction was fitted to. QC reports both that number and the scatter of any check standards '
-              'and repeated unknowns, which is the honest one.')
+              'the smallest standard was included, which suggests a response curved across the full size range. A '
+              'sample far from the standards will carry that curvature as an error, and the size flags in QC mark '
+              'those rows.')
+    r = rd(r, 'Two blank capsules whose delta-15N differ by 22 permil cannot constrain a blank correction, and QC '
+              'says so. On Auto the correction is applied only when at least three blanks agree to within 2 permil. '
+              'A sample barely larger than the blank is flagged separately whatever the blanks look like, because '
+              'the mass balance carries an error in the blank\'s d value into the sample with the weight '
+              'A_blank / (A - A_blank), which is 1 for a peak twice the blank.')
+    r = rd(r, 'Precision quoted from the drift standards understates the scatter of an unknown, because the drift '
+              'correction was fitted to those standards. QC reports both that number and the offsets of any check '
+              'standards, which test the correction independently, and the Replicates sheet compares repeated '
+              'samples.')
     r += 1
     c = ws.cell(r, 2, f'ea_irms {VERSION}. Built at the Wang Stable Isotope Biogeochemistry Lab, '
                       f'Boston College, and free to use and adapt. Cite the version when you publish '
@@ -320,7 +321,7 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     for j, h in enumerate(['Channel', 'Key'], start=18):
         c = raw.cell(1, j, h); c.font = F_GRP; c.fill = FILL_HELP
         c.alignment = Alignment(horizontal='center')
-    raw.cell(1, 20, 'grey helper columns, computed').font = F_NOTE
+    raw.cell(1, 20, 'gray helper columns, computed').font = F_NOTE
 
     header, records = _read_rows(SRC)
     order = [header.index(h) if h in header else None for h in RAW_HDR]
@@ -413,8 +414,8 @@ def build_workbook(export_path, out_path, config: Config | None = None,
 
     lab(st, 14, 'First position to use in the drift fit', F_SM)
     inp(st, 14, 2, _CFG.first_drift_position or '')
-    lab(st, 14, 'Leave empty to use every position. QC suggests a value. The calibration anchors are '
-                'never excluded, since they are always run early.', F_NOTE, 7)
+    lab(st, 14, 'Leave empty to use every position. QC suggests a value. It applies to the drift monitors '
+                'only; the calibration anchors are never left out.', F_NOTE, 7)
     lab(st, 15, 'Significance level for Auto', F_SM)
     inp(st, 15, 2, _CFG.significance_level, '0.00')
     lab(st, 15, 'A slope is applied on Auto when its two-sided p-value is below this. The FIRMS guide asks '
@@ -449,8 +450,9 @@ def build_workbook(export_path, out_path, config: Config | None = None,
         ('Maximum Area 44', _CFG.max_area_c or '',
                                               'Leave empty to use the largest linearity standard in the run.'),
         ('Minimum peak area, x the blank', _CFG.min_blank_multiple or '',
-                                              'Below this multiple of the blank the blank correction amplifies '
-                                              'rather than corrects. Leave empty to skip the check.'),
+                                              'A peak under this multiple of the blank is flagged, since there the '
+                                              'blank correction carries the blank\'s scatter into the value. Leave '
+                                              'empty to skip the check.'),
         ('Settled when background excess is under', _CFG.settled_threshold or '',
                                                'Fraction of the run\'s starting excess left in the reference-peak '
                                                'background. Used only to suggest a first position and to flag.'),
@@ -472,14 +474,14 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     UNC = [
         ('Sample repeatability, d15N (1σ, permil)', _CFG.u_sample_n or '',
                                                'One analysis of one sample. Leave empty to use the pooled scatter '
-                                               'of the anchor replicates in this run; better is the long-term SD '
-                                               'of a matrix-matched in-house standard.'),
+                                               'of the anchor replicates in this run; the long-term SD of a '
+                                               'matrix-matched in-house standard is a better value.'),
         ('Sample repeatability, d13C (1σ, permil)', _CFG.u_sample_c or '', ''),
         ('Multiple of 1σ for the checks (k)', _CFG.coverage_k,
                                                'Results gives 1σ. The checks compare a standard\'s deviation from '
-                                               'its accepted value with k x 1σ: the anchors and linearity standards '
-                                               'on QC, the anchors on Rerun. k = 2 is about 95 percent only when the '
-                                               'replicates behind 1σ are many; with a handful, take k from '
+                                               'its accepted value with k x 1σ, the anchors and linearity standards '
+                                               'on QC and the anchors on Rerun. k = 2 is about 95 percent only when '
+                                               'the replicates behind 1σ are many; with few, take k from '
                                                'Student\'s t.'),
     ]
     for i, (k, v, note) in enumerate(UNC):
@@ -505,8 +507,8 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     lab(st, 37, 'Positions left out of the elemental correction', F_SM)
     inp(st, 37, 2, ', '.join(str(v) for v in (_CFG.exclude_elemental or [])))
     st.cell(37, 2).number_format = '@'
-    lab(st, 37, 'Comma-separated. For a monitor whose capsule was weighed or entered wrongly, which the '
-                'instrument did not cause: the anchors beside it and the reference pulses say which.', F_NOTE, 7)
+    lab(st, 37, 'Comma-separated. For a monitor whose capsule was weighed or entered wrongly; when the anchors '
+                'beside it and the reference pulses do not share its change, the instrument did not cause it.', F_NOTE, 7)
     dv_el = DataValidation(type='list', formula1='"On,Off,Auto"', allow_blank=False)
     st.add_data_validation(dv_el); dv_el.add('B35')
     lab(st, 38, 'Reference-pulse check for exports without reference peaks (1.4.2)', F_H1)
@@ -750,7 +752,7 @@ def build_workbook(export_path, out_path, config: Config | None = None,
         wk.column_dimensions[col].width = width
     wk.cell(1, 1, 'Work').font = F_TITLE
     wk.cell(2, 1, 'One row per autosampler position. Type sample masses in the yellow column F, in mg. '
-                  'Everything else is a formula. Grey columns are machinery.').font = F_NOTE
+                  'Everything else is a formula. Gray columns are machinery.').font = F_NOTE
 
     FILLS = {'i': FILL_IN, 'o': FILL_OUT, 'h': FILL_HELP, 'k': None}
     FONTS = {'i': F_IN, 'o': F_SM, 'h': F_SM, 'k': F_SM}
@@ -1220,7 +1222,7 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     for col, w in zip('ABCD', [40, 14, 8, 62]):
         ft.column_dimensions[col].width = w
     ft.cell(1, 1, 'Fits').font = F_TITLE
-    ft.cell(2, 1, 'Every coefficient below is fitted from this run. Nothing here is typed in by hand.').font = F_NOTE
+    ft.cell(2, 1, 'Every coefficient below is fitted from this run\'s own standards.').font = F_NOTE
 
     def sec(r_, title):
         c = ft.cell(r_, 1, title); c.font = F_H1; c.fill = FILL_GRP
@@ -1305,7 +1307,7 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     fit(57, 'intercept',  f'=IFERROR(INTERCEPT({W("AV")},{W("AU")}),"")')
     fit(58, 'r-squared',  f'=IFERROR(RSQ({W("AV")},{W("AU")}),"")', '0.00000')
     fit(59, 'residual SD (permil)', f'=IFERROR(STEYX({W("AV")},{W("AU")}),"")', '0.000',
-            'Applied as accepted = slope x measured + intercept. Never inverted.')
+            'Applied as accepted = slope x measured + intercept, never inverted.')
 
     sec(61, 'Calibration, carbon: accepted regressed on measured')
     fit(62, 'n anchor measurements', f'=COUNT({W("AW")})', '0')
@@ -1638,14 +1640,14 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     RHDR += [(h, 16 if j == 0 else 11 if j == 1 else 14) for j, h in enumerate(MHDR)]
     rs.cell(1, 1, 'Results').font = F_TITLE
     rs.cell(2, 1, 'Read QC before using these. Isotope values are on the scale set by the anchor standards '
-                  'in Setup; %C, %N and C:N need a mass in Work column F or G, and from 1.4.2 they carry the '
+                  'in Setup; %C, %N, and C:N need a mass in Work column F or G, and from 1.4.2 they carry the '
                   'elemental drift correction when it is in force (Fits row 243 onwards), with the factors and '
                   'the values as measured in the last four columns. Each value is followed by its 1σ, one standard '
                   'deviation (1.4.5); the checks on QC and Rerun use k x 1σ, k from Setup B32. Flags is followed by '
                   'the rerun mark (1.4.4), its reason, and a suggested mass, which the Rerun sheet lists. For the '
                   'isotope values 1σ comes from the scale '
                   'calibration and the sample repeatability (Fits rows 132 onwards) and leaves out the blank, '
-                  'linearity and drift corrections and day-to-day reproducibility; for %C, %N and C:N it has five '
+                  'linearity, and drift corrections and day-to-day reproducibility; for %C, %N, and C:N it has five '
                   'terms (Fits rows 300 onwards), and stays incomplete until Setup B33 and Setup columns J and K '
                   'are filled in.' + (' From 1.4.8 the columns after %N as measured come from the sample sheet '
                                       '(Metadata sheet): the ID a sample matched, how it matched, and the sheet\'s '
@@ -1755,14 +1757,14 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     for col, w in zip('ABCDEFGHIJKLMNOPQR', [7, 18, 8, 18, 10, 10, 7, 9, 9, 7, 7, 9, 9, 7, 22, 3, 5, 9]):
         rp.column_dimensions[col].width = w
     rp.cell(1, 1, 'Replicates').font = F_TITLE
-    rp.cell(2, 1, 'Analyses of one sample in this run, as the sample sheet names them: samples that match it and have '
-                  'the same name, or the same Replicate of (Metadata sheet). When their range in d15N or d13C is above '
-                  'the critical range of ISO 5725-6, f(n) x s, each of them is marked for a rerun of that element. s is '
-                  'the repeatability of one analysis in use (Fits B136 and B156: Setup B30 and B31, or the pooled '
-                  'anchor replicates) times the calibration slope, and f(n) is the 0.95 quantile of the range of n '
-                  'values from one normal distribution, in units of its SD (columns Q and R): 2.77 for two, which '
-                  'ISO 5725-6 rounds to 2.8 in r = 2.8 s. n counts the analyses with a value. Setup B71 switches the '
-                  'marks off.').font = F_NOTE
+    rp.cell(2, 1, 'Analyses of one sample in this run as the sample sheet names them, that is, the samples matched to '
+                  'it with the same name or the same Replicate of (Metadata sheet). When their range in d15N or d13C is '
+                  'above the critical range of ISO 5725-6, f(n) x s, each of them is marked for a rerun of that '
+                  'element, unless Setup B71 is Off. s is the repeatability of one analysis in use (Fits B136 and B156, '
+                  'from Setup B30 and B31 or the pooled anchor replicates) times the calibration slope, and f(n), for '
+                  'the n analyses with a value, is the 0.95 quantile of the range of n values from one normal '
+                  'distribution in units of its SD (columns Q and R), 2.77 for two, which ISO 5725-6 rounds to 2.8 in '
+                  'r = 2.8 s.').font = F_NOTE
     rp.merge_cells('A2:O2'); rp.row_dimensions[2].height = 66
     rp['A2'].alignment = Alignment(wrap_text=True, vertical='top')
     NF = max([20] + [len(g_['rows']) for g_ in _GROUPS])
@@ -1789,8 +1791,8 @@ def build_workbook(export_path, out_path, config: Config | None = None,
         c.alignment = Alignment(horizontal='center', wrap_text=True)
     if not _GROUPS:
         rp.cell(REP_TOP, 1, 'No sample sheet was given, so no replicates are compared.' if samples is None else
-                'No sample is analysed more than once in this run, by the sample sheet: no two samples matched to '
-                'it share a name or a Replicate of.').font = F_NOTE
+                'No two samples matched to the sample sheet share a name or a Replicate of, so no replicates are '
+                'compared in this run.').font = F_NOTE
     for g_ in _GROUPS:
         top_, bot_ = REP_FIRST[g_['group']], REP_FIRST[g_['group']] + len(g_['rows']) - 1
         for k_, pos_ in enumerate(g_['rows']):
@@ -1844,9 +1846,9 @@ def build_workbook(export_path, out_path, config: Config | None = None,
           f'=SUMPRODUCT(({WB_}<>"")*1)-COUNT(Work!$L${R0}:$L${R0+NSAMP-1})', '0')
 
     qsec(10, 'Working gas, from the reference pulses Isodat did not designate')
-    qc.cell(11, 1, 'The designated pulse carries the assigned value by definition, so it can never move. '
-                   'An export cut down to the sample peaks carries no pulses at all, and this section then '
-                   'says so rather than reporting a number.').font = F_NOTE
+    qc.cell(11, 1, 'The designated pulse carries the assigned value by definition, so it cannot show movement. '
+                   'An export cut down to the sample peaks carries no other pulses, and then this section says '
+                   'so.').font = F_NOTE
     for r_, base, name in ((12, 201, 'N2'), (16, 208, 'CO2')):
         qline(r_,     f'{name} pulses read',              f'=Fits!$B${base}', '0',
               f'=IF(Fits!$B${base}<3,"no reference pulses in this export; nothing to check","ok")')
@@ -1881,7 +1883,7 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     qsec(30, 'Is each correction supported by this run?')
     qc.cell(31, 1, 'A slope is applied on Auto only when p is below the significance level in Setup B15. '
                    'The FIRMS guide (section 6.4) asks that a correction be shown necessary before it is '
-                   'applied, because over-correction adds as much error as it removes.').font = F_NOTE
+                   'applied.').font = F_NOTE
     def decision(r_, label, slope, se, p, force):
         qline(r_, label, f'={slope}', '0.00000',
               f'=IF({slope}="","no fit",IF({p}="","too few standards to test",'
@@ -1893,9 +1895,9 @@ def build_workbook(export_path, out_path, config: Config | None = None,
              'IF(Fits!$B$38="Row",Fits!$B$32,Fits!$B$35)', 'Fits!$B$112', 'Fits!$B$114', 'Fits!$B$115')
     decision(35, 'Carbon drift slope',
              'IF(Fits!$B$50="Row",Fits!$B$44,Fits!$B$47)', 'Fits!$B$125', 'Fits!$B$127', 'Fits!$B$128')
-    qc.cell(36, 1, 'With five or six standards the test has little power: a slope that fails it is unproven, '
-                   'not disproven. Set the switch to On to apply it regardless. The outlier test below needs five '
-                   'monitors in the fit and is not run with fewer (1.4.2).').font = F_NOTE
+    qc.cell(36, 1, 'With five or six standards the test has little power, so it can miss a slope that is there; '
+                   'set the switch to On to apply it regardless. The outlier test below needs five monitors in the fit and '
+                   'is not run with fewer (1.4.2).').font = F_NOTE
     qline(37, 'Nitrogen drift monitors flagged as outliers', '=Fits!$B$117', '0',
           f'=IF(Fits!$B$117=0,"ok","CHECK: a monitor sits far from the line through the others (Work column CB). '
           f'If the capsule is the cause, list its position in Setup B16 and read QC again")')
@@ -1909,7 +1911,7 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     qline(43, 'Residual SD, row model (permil)', '=Fits!$B$46')
     qline(44, 'Residual SD, background model (permil)', '=Fits!$B$49')
     qc.cell(45, 1, 'Residual SD is the scatter left in the drift standards themselves, so it cannot decide '
-                   'between the two models. The check standard offsets below can.').font = F_NOTE
+                   'between the two models; the check standard offsets below can.').font = F_NOTE
 
     qsec(47, 'Blank')
     qline(48, 'Blank correction in force, nitrogen', '=Fits!$C$5', '@')
@@ -1926,7 +1928,7 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     qline(51, 'Blank correction in force, carbon', '=Fits!$C$9', '@')
     qline(52, 'Blank capsules with a carbon peak', '=Fits!$B$9', '0')
     qline(53, 'SD of blank d13C (permil)', '=Fits!$B$12')
-    qc.cell(54, 1, 'A blank that gives no peak at all has not been measured, only bounded by the detection '
+    qc.cell(54, 1, 'A blank that gives no peak has not been measured, only bounded by the detection '
                    'limit. The guide asks that its size and d value be determined, which the two-standard '
                    'decreasing-size series does.').font = F_NOTE
 
@@ -1955,7 +1957,7 @@ def build_workbook(export_path, out_path, config: Config | None = None,
             if j == 3: c.number_format = '0'
             if j in (6, 9): c.fill = FILL_OUT
     qc.cell(58 + NSTD, 1, 'An anchor is forced onto its accepted value by construction, so only the check rows '
-                          'are an independent test. Offsets are in per mil.').font = F_NOTE
+                          'are an independent test. Offsets are in permil.').font = F_NOTE
 
     # The rows below moved down by three in 1.4.2, with the standards table.
     Q = 58 + NSTD + 2
@@ -1969,12 +1971,12 @@ def build_workbook(export_path, out_path, config: Config | None = None,
           f'=IFERROR(AVERAGEIFS({W("CN")},{WD_},"Sample"),"")')
     qc.cell(Q + 6, 1, '1σ combines the certificate uncertainty of each anchor, the scatter of its replicates, and '
                       'the sample repeatability, through the fitted line, as a Kragten spreadsheet would. It '
-                      'leaves out the blank, linearity and drift corrections and the day-to-day reproducibility '
-                      'a control chart would give, so it is a floor, not the whole budget.').font = F_NOTE
+                      'leaves out the blank, linearity, and drift corrections and the day-to-day reproducibility '
+                      'a control chart would give.').font = F_NOTE
     qline(Q + 7, 'SD of the drift standards, d15N (permil)', f'=IFERROR(STDEV(Work!$BG${R0}:$BG${R0+NSAMP-1}),"")')
     qline(Q + 8, 'SD of the drift standards, d13C (permil)', f'=IFERROR(STDEV(Work!$BH${R0}:$BH${R0+NSAMP-1}),"")')
-    qc.cell(Q + 9, 1, 'These understate the real precision, because the drift standards are the material the drift '
-                      'correction was fitted to. The check standard offsets above are the honest test.').font = F_NOTE
+    qc.cell(Q + 9, 1, 'These understate the scatter of an unknown, because the drift correction was fitted to these '
+                      'same standards; the check standard offsets above test it independently.').font = F_NOTE
 
     qsec(Q + 11, 'Flags')
     qline(Q + 12, 'Rows carrying a flag on Results', f'=COUNTIF(Results!$Q$5:$Q${5+NSAMP-1},"?*")', '0')
@@ -1988,7 +1990,7 @@ def build_workbook(export_path, out_path, config: Config | None = None,
 
     qsec(96, 'Instrument settling')
     qc.cell(97, 1, 'A run that began before the mass-28 background reached its floor carries a settling '
-                   'transient, not a steady drift, and a straight line in position is the wrong shape for it.').font = F_NOTE
+                   'transient, which a straight line in position does not follow.').font = F_NOTE
     NBI = f'COUNT({W("BI")})'      # reference-peak backgrounds read; zero for an export cut to peaks 3 and 4
     qline(98, 'Reference-peak background floor', f'=IF({NBI}=0,"",Fits!$B$83)', '0.00',
           f'=IF({NBI}=0,"no reference peaks in this export, so rows 98 to 105 have nothing to read; '
@@ -2003,7 +2005,7 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     qline(102, 'Linearity standards before that position',
           f'=IF({NBI}=0,"",COUNTIFS({WD_},"Linearity",{WA_},"<"&Fits!$B$86))', '0',
           f'=IF({NBI}=0,"",IF($B$102=0,"ok",'
-          f'"CHECK: size and time are confounded, the linearity fit sits inside the unsettled window"))')
+          f'"CHECK: size and time are confounded; the linearity fit sits inside the unsettled window"))')
     qline(103, 'Calibration anchors before that position',
           f'=IF({NBI}=0,"",COUNTIFS({WD_},"Anchor",{WA_},"<"&Fits!$B$86))', '0',
           f'=IF({NBI}=0,"",IF($B$103=0,"ok","CHECK: the scale was set while the instrument was still settling"))')
@@ -2020,15 +2022,14 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     # Two short lines, since the background chart starts at column K and hides
     # whatever a long note spills into it.
     qc.cell(108, 1, 'The drift monitors are all one size, so their background follows the instrument.').font = F_NOTE
-    qc.cell(109, 1, 'A high background right after a large sample points to carryover from that sample, '
-                    'not to instrument drift.').font = F_NOTE
+    qc.cell(109, 1, 'A high background right after a large sample points to carryover from that sample.').font = F_NOTE
 
     qsec(110, 'Does each correction reduce the scatter of the drift standards?')
     STAGES = [('as measured', 'BO'), ('after blank', 'BP'), ('after linearity', 'BQ'),
               ('after drift', 'BR'), ('after calibration', 'BG')]
     for i, (nm, col) in enumerate(STAGES):
         qline(111 + i, nm, f'=IFERROR(STDEV({W(col)}),"")')
-    qc.cell(116, 4, 'SD in per mil.').font = F_NOTE
+    qc.cell(116, 4, 'SD in permil.').font = F_NOTE
     qc.cell(117, 1, 'This table can judge the blank and drift corrections but not the linearity one, because the '
                     'drift standards are all about the same size and a size-dependent correction moves them together. '
                     'Judge linearity by the check standards and by the spread of the linearity series itself.').font = F_NOTE
@@ -2116,10 +2117,12 @@ def build_workbook(export_path, out_path, config: Config | None = None,
 
     # 1.4.4
     qsec(166, 'Rerun marks')
-    qc.cell(167, 1, 'Samples are marked only for what a rerun can fix: a peak outside the linearity range or under '
-                    'the blank multiple, carryover after an oversized sample, or a reference pulse off at their '
-                    'position; a check for a sample that ran before the background settled or lacks one '
-                    'element\'s peak. The Rerun sheet lists them.').font = F_NOTE
+    qc.cell(167, 1, 'A sample is marked for a rerun when its peak lies below the linearity range or under the blank '
+                    'multiple, reaches the instrument\'s largest amplitude (Setup B69), follows an oversized sample '
+                    'with a background rise, or meets a reference pulse that is off, when its 1σ is above Setup B70, '
+                    'or when its replicates differ by more than the critical range (Replicates sheet). It is marked '
+                    'for a check when it ran before the background settled or lacks one element\'s peak, and the '
+                    'Rerun sheet lists every mark.').font = F_NOTE
     qline(168, 'Samples marked for a rerun', '=Fits!$B$351', '0',
           '=IF(Fits!$B$351=0,"ok","see the Rerun sheet")')
     qline(169, 'Samples marked for a check', '=Fits!$B$352', '0',
@@ -2211,9 +2214,9 @@ def build_workbook(export_path, out_path, config: Config | None = None,
         md.column_dimensions[col].width = w
     md.cell(1, 1, 'Metadata').font = F_TITLE
     md.cell(2, 1, 'The run information and the sample sheet\'s rows for this run\'s samples, as isoharness.org '
-                  'received them. The sample table holds values, not formulas: it belongs to the run this workbook '
-                  'was built from, and Results reads it only at positions whose identifier is still the one '
-                  'matched.').font = F_NOTE
+                  'received them. Unlike the rest of the workbook, the sample table holds plain values, because it '
+                  'belongs to the run this workbook was built from; Results reads it only at positions whose '
+                  'identifier is still the one matched.').font = F_NOTE
     md.merge_cells('A2:H2'); md.row_dimensions[2].height = 40
     md['A2'].alignment = Alignment(wrap_text=True, vertical='top')
     md.cell(4, 1, 'Run information').font = F_H1

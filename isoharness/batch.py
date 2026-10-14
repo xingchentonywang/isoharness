@@ -214,13 +214,13 @@ def combined_xlsx(runs: list[BatchRun], config_name: str | None = None, sheet=No
     lines = [
         ("title", f"Combined results of {len(runs)} run{'s' if len(runs) != 1 else ''}"),
         ("note", f"Written by isoharness with ea_irms {VERSION}. Each run was corrected on its own, with the "
-                 "standards in that run and the choices made for it; nothing here pools the runs' standards."),
+                 "standards in that run and the choices made for it."),
         ("h1", "Sheets"),
-        ("text", "Results: every position of every run, in the order the runs were given, each with the run's "
-                 "name in column A and then the columns of that run's Results sheet in its workbook: the value "
-                 "and its 1σ, one standard deviation, then Flags, the rerun mark with its reason and a suggested "
+        ("text", "Results: every position of every run, in the order the runs were given, with the run's name "
+                 "in column A. The other columns are those of the run's Results sheet in its workbook, each value "
+                 "with its 1σ (one standard deviation), then Flags, the rerun mark with its reason and a suggested "
                  "mass, the elemental drift factors, and %C and %N as measured. The values are numbers at full "
-                 "precision, not formulas; each run's workbook holds the formulas."),
+                 "precision; each run's workbook holds the formulas behind them."),
         ("text", "Runs: one row per run, with its file, run date, counts of positions, which corrections were "
                  "in force, the calibration slopes, the samples marked for a rerun or a check, and the problems "
                  "the run's Rerun sheet lists for the whole run; then the run information typed on the page "
@@ -230,8 +230,8 @@ def combined_xlsx(runs: list[BatchRun], config_name: str | None = None, sheet=No
                  "standard by its row of the standards table. Every analysis of a matched name is listed, "
                  "including repeats within one run. 'minus mean' is the analysis's value less the mean of that "
                  "name's analyses with a value, and SD is their standard deviation (n − 1); these are arithmetic "
-                 "on the values in Results, and 1σ stays each analysis's own. Differences between runs are not "
-                 "part of any 1σ."),
+                 "on the values in Results, and each analysis keeps its own 1σ, which leaves out differences "
+                 "between runs."),
         ("h1", "These runs"),
     ]
     for r in runs:
