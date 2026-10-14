@@ -99,7 +99,8 @@ BOOK = {5: "%C", 6: "1sigma(%C)", 7: "%N", 8: "1sigma(%N)", 9: "C:N molar", 10: 
 EXPLAINED = ("blank", "lin", "drift", "cal", "elem", "unc")
 MOVED = {"lin": ["Effect of the linearity choice", "Sample size against the size series"],
          "drift": ["Effect of the drift choice", "Drift monitors agree"],
-         "cal": ["Anchors bracket the samples", "Check standard"], "elem": ["Elemental content"]}
+         "cal": ["Calibration line", "Anchors bracket the samples", "Check standard"],    # the first from 1.4.12
+         "elem": ["Elemental content"]}
 # The decisions the test makes, and the drift monitors it leaves out.
 EXCL_N, EXCL_E = 18, 55
 

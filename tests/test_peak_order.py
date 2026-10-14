@@ -164,5 +164,5 @@ def test_the_workbook_of_reversed_peaks_agrees_with_the_engine(reversed_run, tmp
     flags = [c for c in range(1, rs.max_column + 1) if rs.cell(4, c).value == "Flags"][0]
     for p in positions:
         text = rs.cell(4 + p.row, flags).value or ""
-        assert set(p.flags) == {t.strip() for t in text.split(";") if t.strip()}, p.row
+        assert p.flags == [t.strip() for t in text.split(";") if t.strip()], p.row
     assert json.dumps(sorted(p.row for p in positions)) == json.dumps(list(range(1, 57)))

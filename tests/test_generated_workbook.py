@@ -116,5 +116,5 @@ def test_workbook_agrees_with_engine(built, name):
     flags_col = [c for c in range(1, rs.max_column + 1) if rs.cell(4, c).value == "Flags"][0]
     for p in positions:
         text = rs.cell(4 + p.row, flags_col).value or ""
-        theirs = {t.strip() for t in text.split(";") if t.strip()}
-        assert set(p.flags) == theirs, f"{name} row {p.row}: {set(p.flags) ^ theirs}"
+        theirs = [t.strip() for t in text.split(";") if t.strip()]
+        assert p.flags == theirs, f"{name} row {p.row}: {p.flags} vs {theirs}"

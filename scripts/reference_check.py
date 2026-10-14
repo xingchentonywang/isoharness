@@ -153,7 +153,7 @@ def check_values(body, wb):
                 bad.append(("Results", attr, p["row"], mine, theirs))
         text = rs[f"{FLAGS_COL}{4 + p['row']}"].value or ""
         n += 1
-        if {t.strip() for t in text.split(";") if t.strip()} != set(p["flags"]):
+        if [t.strip() for t in text.split(";") if t.strip()] != list(p["flags"]):     # in order (1.4.12)
             bad.append(("flags", p["row"], text, p["flags"]))
         # the rerun mark, its reason and the suggested mass (text, R to T), from 1.4.10 here too
         for col, attr in RERUN_TEXT.items():

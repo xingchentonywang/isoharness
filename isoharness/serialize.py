@@ -81,6 +81,8 @@ def port_input(positions, fits, config: Config, file_name: str, size: int,
             # 1.4.4: the pulse's distance from the run's median, only where it flags the position
             "poN": p.pulse_dev_n if any(f.startswith("N2 reference pulse off by ") for f in p.flags) else None,
             "poC": p.pulse_dev_c if any(f.startswith("CO2 reference pulse off by ") for f in p.flags) else None,
+            # 1.4.12 (finding W-09): two or more CO2 peaks came before the designated pulse, so Flags says so
+            "cpre": p.c_before if (p.c_before >= 2 and p.area_c is not None) else None,
         })
     F = fits
     data = {
@@ -112,7 +114,10 @@ def port_input(positions, fits, config: Config, file_name: str, size: int,
                      "checkOffset": config.check_offset_permil,
                      "blankMultiple": config.min_blank_multiple, "k": config.coverage_k,
                      "elemGate": config.elemental_threshold_pct,
-                     "firstDrift": config.first_drift_position},
+                     "firstDrift": config.first_drift_position,
+                     # 1.4.12 (finding W-02): the calibration line's limits, read by the page's checks
+                     "calSlopeNote": config.cal_slope_note, "calSlopeCaution": config.cal_slope_caution,
+                     "calSdNote": config.cal_sd_note, "calSdCaution": config.cal_sd_caution},
     }
     return clean(data)
 

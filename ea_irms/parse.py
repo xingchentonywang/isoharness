@@ -11,6 +11,10 @@ order such an export's reference pulses were taken for the sample peaks. Peak Nr
 sets the order of the peaks and never says which peak is which. The workbook's
 formulas find each peak by its Peak Nr value (the Key column on Raw), whatever
 the order of the rows, so the workbook needed no change.
+
+From 1.4.12 a position with two or more unflagged CO2 peaks before its first
+designated pulse records how many (``c_before``). The one next to the pulse is
+the sample's, as before; the workbook now takes the same one, and Flags says so.
 """
 from __future__ import annotations
 
@@ -58,6 +62,9 @@ class Position:
     # row, the yardstick for an unflagged pulse mistaken for the sample peak
     desig_c: list = field(default_factory=list)
     c_rejected: bool = False             # the CO2 peak was a reference pulse (set by process)
+    # 1.4.12: how many unflagged CO2 peaks came before the first designated pulse when there were two
+    # or more (0 otherwise); the last of them is the sample's, and Flags says so (finding W-09)
+    c_before: int = 0
 
     @property
     def has_n(self) -> bool:
@@ -215,6 +222,10 @@ def parse_export(path: str | Path) -> list[Position]:
             sample = None
             if first_ref:                       # not None and not 0
                 sample = mass44[first_ref - 1]
+                if first_ref >= 2:
+                    # 1.4.12: two or more unflagged CO2 peaks before the designated pulse. The one next to
+                    # it is taken, as before, and the workbook now takes the same one (finding W-09).
+                    pos.c_before = first_ref
             elif first_ref is None:
                 # A filtered export (Peak Nr 3 and 4 only) carries no reference
                 # peaks to count from. The sample CO2 is then the first mass-44

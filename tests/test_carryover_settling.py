@@ -175,4 +175,4 @@ def test_workbook_agrees_with_engine(exports, tmp_path):
                 if mine is not None:
                     assert abs(mine - theirs) < 1e-9 * max(1.0, abs(mine)), (name, p.row, attr)
             text = rs.cell(4 + p.row, flags_col).value or ""
-            assert set(p.flags) == {t.strip() for t in text.split(";") if t.strip()}, (name, p.row)
+            assert p.flags == [t.strip() for t in text.split(";") if t.strip()], (name, p.row)

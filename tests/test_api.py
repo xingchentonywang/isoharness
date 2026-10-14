@@ -156,8 +156,8 @@ def test_workbook_values_equal_the_engine(engine):
             if mine is not None:
                 assert abs(mine - theirs) <= 1e-9 * max(1.0, abs(mine)), (p.row, attr, mine, theirs)
                 compared += 1
-        flags = {t.strip() for t in (rs.cell(4 + p.row, head["Flags"]).value or "").split(";") if t.strip()}
-        assert flags == set(p.flags), p.row
+        flags = [t.strip() for t in (rs.cell(4 + p.row, head["Flags"]).value or "").split(";") if t.strip()]
+        assert flags == p.flags, p.row
     assert compared > 3 * len(positions)
 
 
@@ -220,12 +220,14 @@ def test_refuses_more_standards_than_the_workbook_holds():
 def test_port_block_carries_the_settings_the_port_reads():
     cfg = config_to_dict(Config(significance_level=0.1, monitor_outlier_t=3.0, check_offset_permil=0.2,
                                 min_blank_multiple=None, coverage_k=3.0, elemental_threshold_pct=2.0,
-                                first_drift_position=20))
+                                first_drift_position=20, cal_slope_note=0.04, cal_sd_caution=None))
     r = post("/api/process", config=json.dumps(cfg))
     assert r.status_code == 200, r.text
     port = r.json()["port"]
+    # from 1.4.12 the calibration line's limits too, which the page's Calibration step reads
     assert port["settings"] == {"alpha": 0.1, "outlierT": 3.0, "checkOffset": 0.2, "blankMultiple": None,
-                                "k": 3.0, "elemGate": 2.0, "firstDrift": 20}
+                                "k": 3.0, "elemGate": 2.0, "firstDrift": 20, "calSlopeNote": 0.04,
+                                "calSlopeCaution": 0.1, "calSdNote": 0.3, "calSdCaution": None}
     # A full export: the reference-pulse check sets no CO2 peak aside.
     assert [q["rej"] for q in port["pos"]] == [False] * len(port["pos"])
 

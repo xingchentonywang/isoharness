@@ -653,7 +653,7 @@ def test_workbook_agrees_with_the_engine(computed, name):
     head = {rs.cell(4, j).value: j for j in range(1, rs.max_column + 1)}
     for p in positions:
         text = rs.cell(4 + p.row, head["Flags"]).value or ""
-        assert set(p.flags) == {t.strip() for t in text.split(";") if t.strip()}, f"{name} row {p.row}"
+        assert p.flags == [t.strip() for t in text.split(";") if t.strip()], f"{name} row {p.row}"
         assert (rs.cell(4 + p.row, head["Rerun"]).value or None) == (p.rerun or None), f"{name} row {p.row}"
     if name == "carbon_blank":
         assert fits["blank_c"]["in_force"]

@@ -24,7 +24,7 @@ from .cells import as_text, put
 from .parse import _read_rows, parse_export
 from .pipeline import DEFAULT_STANDARDS, MAX_STANDARDS, MIN_OUTLIER_MONITORS, Config, assign_roles
 
-VERSION = "1.4.11"
+VERSION = "1.4.12"
 NSTD = MAX_STANDARDS      # rows in the Setup standards table (16 from 1.4.2, 13 before)
 # 1.4.10: the largest export the workbook is built for. Before 1.4.10 it held positions 1 to 120 and
 # 1,000 peak records and left out the rest without a word; it now grows to fit, up to these.
@@ -207,7 +207,9 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     r = rd(r, 'What the sheets do', F_H1)
     for a, b in [
         ('Raw',     'Paste target, unaltered. Gray helper columns label each peak record by channel and give it a key, '
-                    'and, from 1.4.10, pick out each reference pulse Isodat did not designate (columns U to AD).'),
+                    'and, from 1.4.10, pick out each reference pulse Isodat did not designate (columns U to AD). '
+                    'The sample CO2 peak is the one right before the first designated CO2 pulse; where two or more '
+                    'come before it, Flags says so (1.4.12).'),
         ('Setup',   'Everything you are meant to change: processing switches, the standards table, and flag thresholds.'),
         ('Work',    'One row per autosampler position. Reads left to right: parsed peaks, then blank, linearity, '
                     'drift, and calibration corrections, then elemental content.'),
@@ -229,7 +231,10 @@ def build_workbook(export_path, out_path, config: Config | None = None,
               'fitted the other way, measured on accepted, has to be inverted, and subtracting its intercept over '
               'its slope from each value shifts every value by a constant without applying the slope. The line '
               'needs anchors of two materials with different accepted values; when every anchor carries the same '
-              'value, nothing is calibrated, and the top line of Rerun says why (1.4.10).')
+              'value, nothing is calibrated, and the top line of Rerun says why (1.4.10). From 1.4.12 the line '
+              'itself is judged too, its slope against 1 and the anchors\' residual SD about it, at the Note and '
+              'Caution limits of Setup B73 to B76 (Fits rows 360 to 367, QC rows 23 and 25); a line beyond either '
+              'limit is a problem of the whole run on Rerun.')
     r = rd(r, 'Drift is fitted twice, against autosampler position, the default, and against the mass-28 background '
               'on the reference peaks, and QC reports the residual scatter of both. Residual scatter cannot decide '
               'between the two, since both were fitted to the same drift standards, so run labeled check standards '
@@ -269,7 +274,9 @@ def build_workbook(export_path, out_path, config: Config | None = None,
               'The budget follows section 6.5 of the guide and has three terms, the 1σ certificate uncertainty of '
               'each anchor material (Setup columns H and I), the scatter of its replicates in this run, and the '
               'repeatability of one sample analysis (Setup B30 and B31, or the pooled anchor scatter when those are '
-              'empty), each propagated through the calibration line as a Kragten spreadsheet would. It leaves out '
+              'empty), each propagated through the calibration line as a Kragten spreadsheet would. A material '
+              'analyzed once has no scatter of its own, so the error of its mean takes that repeatability (from '
+              '1.4.12; before, it counted as 0 and the 1σ was too small). It leaves out '
               'the blank, linearity, and drift corrections and day-to-day reproducibility, which a control chart of '
               'an in-house standard measures.')
     r = rd(r, 'Elemental content comes from a regression of peak area on micrograms of C or N across every standard '
@@ -309,7 +316,10 @@ def build_workbook(export_path, out_path, config: Config | None = None,
               'the export does carry (at positions with no sample gas) in amplitude, within Setup B39, and reads '
               'the working-gas value in d13C, within Setup B40; a sample peak is rejected only if it matches both. '
               'The template rejects such a pulse, reports the position without a carbon value, and says so in '
-              'Flags. Leave B39 empty to switch the check off.')
+              'Flags. Leave B39 empty to switch the check off. The designated pulses\' amplitude is interpolated '
+              'between the positions that carry one and held flat before the first and after the last, where it '
+              'cannot follow the pulses\' drift, so from 1.4.12 those positions use the tolerance of Setup B41, or '
+              'B39 where that is wider.')
     r += 1
     r = rd(r, 'Rerun marks (1.4.4, 1.4.7, 1.4.8)', F_H1)
     r = rd(r, 'A sample is marked for what measuring it again can fix, namely the amount, the peak, or the state of '
@@ -332,8 +342,9 @@ def build_workbook(export_path, out_path, config: Config | None = None,
               'than the heaviest capsule in this run. When no one mass does that for both N and C, the two '
               'elements need two capsules and both ranges are given. Problems of the whole run, a check standard '
               'off, anchors outside k x 1σ, a reference-gas SD at or above Setup B68 (the FIRMS guide\'s '
-              'zero-enrichment limit, section 4.3.2), or an element with no calibration (1.4.10), are listed once '
-              'at the top of Rerun and not on every sample.')
+              'zero-enrichment limit, section 4.3.2), an element with no calibration (1.4.10), or a calibration '
+              'line beyond the limits of Setup B73 to B76 (1.4.12), are listed once at the top of Rerun and not on '
+              'every sample.')
     r = rd(r, 'Replicates are the analyses of one sample in this run as the sample sheet names them: samples matched '
               'to the sheet with the same name, and samples whose own row gives the same Replicate of. A sample '
               'matched by an ID its name begins with, such as CI 2-2-H+S by the row CI 2-2-H, takes that row\'s '
@@ -565,11 +576,11 @@ def build_workbook(export_path, out_path, config: Config | None = None,
 
     lab(st, 29, 'Uncertainty', F_H1)
     UNC = [
-        ('Sample repeatability, d15N (1σ, permil)', _CFG.u_sample_n or '',
+        ('Sample repeatability, d15N (1σ, permil)', '' if _CFG.u_sample_n is None else _CFG.u_sample_n,
                                                'One analysis of one sample. Leave empty to use the pooled scatter '
                                                'of the anchor replicates in this run; the long-term SD of a '
                                                'matrix-matched in-house standard is a better value.'),
-        ('Sample repeatability, d13C (1σ, permil)', _CFG.u_sample_c or '', ''),
+        ('Sample repeatability, d13C (1σ, permil)', '' if _CFG.u_sample_c is None else _CFG.u_sample_c, ''),
         ('Multiple of 1σ for the checks (k)', _CFG.coverage_k,
                                                'Results gives 1σ. The checks compare a standard\'s deviation from '
                                                'its accepted value with k x 1σ, the anchors and linearity standards '
@@ -612,6 +623,11 @@ def build_workbook(export_path, out_path, config: Config | None = None,
                 'an export with no N2 reference peaks. Leave empty to switch the check off.', F_NOTE, 7)
     lab(st, 40, 'd13C window around the designated pulses (permil)', F_SM)
     inp(st, 40, 2, _CFG.ref_pulse_d13c_window, '0.00')
+    # 1.4.12 (Tony, 2026-10-14; finding W-03): before the first and after the last designated pulse
+    lab(st, 41, 'Amplitude tolerance before the first and after the last designated pulse', F_SM)
+    inp(st, 41, 2, '' if _CFG.ref_pulse_ampl_tol_outside is None else _CFG.ref_pulse_ampl_tol_outside, '0.000')
+    lab(st, 41, 'There the yardstick is held flat and cannot follow the pulses\' drift, so the tolerance is wider '
+                '(1.4.12). A value below B39 counts as B39; leave empty to use B39 everywhere.', F_NOTE, 7)
 
     lab(st, 42, 'Standards', F_H1)
     st.cell(43, 1, 'Accepted values below are the published USGS values as of 2026-09-16, and 1σ is the '
@@ -677,6 +693,25 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     dv_rep = DataValidation(type='list', formula1='"On,Off"', allow_blank=False)
     st.add_data_validation(dv_rep); dv_rep.add(f'B{SLAST + 11}')
     S_REP = f'Setup!$B${SLAST+11}'
+    # 1.4.12 (Tony, 2026-10-14; finding W-02): the calibration line itself, at two levels
+    lab(st, SLAST + 12, 'Calibration line (1.4.12)', F_H1)
+    CAL_LIMITS = [
+        ('Calibration slope further from 1 than this is a Note', _CFG.cal_slope_note, '0.000',
+         'Either level is a problem of the whole run on the Rerun sheet, and QC rows 23 and 25 say which. Leave a '
+         'cell empty to switch that test off.'),
+        ('Calibration slope further from 1 than this is a Caution', _CFG.cal_slope_caution, '0.000', ''),
+        ('Anchor residual SD about the line above this is a Note (permil)', _CFG.cal_sd_note, '0.00',
+         'The scatter of the anchors about the calibration line (Fits rows 59 and 66).'),
+        ('Anchor residual SD about the line above this is a Caution (permil)', _CFG.cal_sd_caution, '0.00', ''),
+    ]
+    for k_, (label_, v_, fmt_, note_) in enumerate(CAL_LIMITS):
+        row_ = SLAST + 13 + k_
+        lab(st, row_, label_, F_SM)
+        inp(st, row_, 2, '' if v_ is None else v_, fmt_)
+        if note_:
+            lab(st, row_, note_, F_NOTE, 7)
+    S_CSN, S_CSC = f'Setup!$B${SLAST+13}', f'Setup!$B${SLAST+14}'
+    S_CDN, S_CDC = f'Setup!$B${SLAST+15}', f'Setup!$B${SLAST+16}'
 
     S_BLANK, S_LIN, S_DRIFT, S_DM = 'Setup!$B$10', 'Setup!$B$11', 'Setup!$B$12', 'Setup!$B$13'
     S_LINC = 'IF(Setup!$B$18<>"",Setup!$B$18,Setup!$B$11)'   # carbon switch, empty = follow B11 (1.4.1)
@@ -688,6 +723,7 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     S_USN, S_USC, S_K = 'Setup!$B$30', 'Setup!$B$31', 'Setup!$B$32'
     S_ELEM, S_ETHR, S_EXE = 'Setup!$B$35', 'Setup!$B$36', 'Setup!$B$37'      # 1.4.2
     S_RPA, S_RPD = 'Setup!$B$39', 'Setup!$B$40'                               # 1.4.2
+    S_RPO = 'Setup!$B$41'                                                       # 1.4.12
     S_BAL = 'Setup!$B$33'                                                       # 1.4.3
     SMATCH = f'Setup!$A${SFIRST}:$A${SLAST}'
     SROLE  = f'Setup!$B${SFIRST}:$B${SLAST}'
@@ -814,6 +850,12 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     first_pulse_col = first_rep_col + len(REP_NAMES)
     RX.update({name: gcl(first_pulse_col + k) for k, name in enumerate(PULSE_NAMES)})
     COLS += [(name, RX[name], 7, 'h') for name in PULSE_NAMES]
+    # 1.4.12 (finding W-09): how many CO2 peaks came before the designated pulse, and the flag that says the
+    # last of them was taken
+    CPRE_NAMES = ['c before', 'fl cpre']
+    first_cpre_col = first_pulse_col + len(PULSE_NAMES)
+    RX.update({name: gcl(first_cpre_col + k) for k, name in enumerate(CPRE_NAMES)})
+    COLS += [(name, RX[name], 7, 'h') for name in CPRE_NAMES]
     GROUPS = [('A','D','identification'),('E','G','mass'),('H','K','peak lookup'),('L','R','as measured'),
               ('S','V','from the standards table'),('W','AA','nitrogen corrections'),
               ('AB','AF','carbon corrections'),('AG','AL','elemental content'),
@@ -832,7 +874,8 @@ def build_workbook(export_path, out_path, config: Config | None = None,
               (RX['rerun rank'],RX['rerun rank'],'helper'),
               (RX['fl amplN'],RX['why sizeC'],'rerun marks (1.4.7): helpers, ignore'),
               (RX['rep group'],RX['fl repC'],'replicates (1.4.8): helpers, ignore'),
-              (RX['np N'],RX['pmin C'],'reference pulses (1.4.10): helpers, ignore')]
+              (RX['np N'],RX['pmin C'],'reference pulses (1.4.10): helpers, ignore'),
+              (RX['c before'],RX['fl cpre'],'CO2 peaks before the reference pulse (1.4.12): helpers, ignore')]
     for a, b, t in GROUPS:
         wk.cell(4, wk[a + '1'].column, t).font = F_GRP
         wk.cell(4, wk[a + '1'].column).fill = FILL_GRP
@@ -912,8 +955,13 @@ def build_workbook(export_path, out_path, config: Config | None = None,
         f['G'] = f'=IF($B{i}="","",IF($F{i}<>"",$F{i},IF($E{i}="","",$E{i})))'
         f['H'] = f'=IF($B{i}="","",SUMPRODUCT(MAX(({rawA}=$A{i})*({rawR}="N")*{rawD})))'
         f['I'] = f'=IF(OR($H{i}="",$H{i}=0),"",$A{i}&"|N|"&$H{i})'
-        f['J'] = (f'=IF($B{i}="","",SUMPRODUCT(MIN(({rawA}=$A{i})*({rawR}="C")*{rawD}'
-                  f'+(1-({rawA}=$A{i})*({rawR}="C"))*9999)))')
+        # 1.4.12 (finding W-09): with a designated CO2 pulse, the CO2 peak right before it, as the engine
+        # takes it; before 1.4.12 the first CO2 peak, which differs where two or more come before the pulse
+        pre = f'({rawA}=$A{i})*({rawR}="C")*({rawD}<$BU{i})'
+        f['J'] = (f'=IF($B{i}="","",IF(AND(ISNUMBER($BU{i}),$BU{i}<>9999,SUMPRODUCT({pre})>0),'
+                  f'SUMPRODUCT(MAX({pre}*{rawD})),'
+                  f'SUMPRODUCT(MIN(({rawA}=$A{i})*({rawR}="C")*{rawD}'
+                  f'+(1-({rawA}=$A{i})*({rawR}="C"))*9999))))')
         f['K'] = f'=IF(OR($J{i}="",$J{i}=0,$J{i}=9999),"",IF(${EX["rej C"]}{i}=1,"",$A{i}&"|C|"&$J{i}))'
         # 1.4.2: an unflagged CO2 peak that matches the designated pulses in
         # amplitude (interpolated in position between them) and d13C, in an
@@ -937,7 +985,9 @@ def build_workbook(export_path, out_path, config: Config | None = None,
                           f'IF(INDEX({rawI},MATCH({ckey},{rawS},0))<>0,0,IF(${PA}{i}="",0,'
                           f'IF(AND(ISNUMBER(INDEX({rawJ},MATCH({ckey},{rawS},0))),'
                           f'ISNUMBER(INDEX({rawO},MATCH({ckey},{rawS},0))),'
-                          f'ABS(INDEX({rawJ},MATCH({ckey},{rawS},0))-${PA}{i})<={S_RPA}*${PA}{i},'
+                          f'ABS(INDEX({rawJ},MATCH({ckey},{rawS},0))-${PA}{i})<='
+                          f'IF(OR($A{i}<MIN({XR}),$A{i}>MAX({XR})),IF({S_RPO}="",{S_RPA},MAX({S_RPA},{S_RPO})),{S_RPA})'
+                          f'*${PA}{i},'
                           f'ABS(INDEX({rawO},MATCH({ckey},{rawS},0))-Fits!$B$239)<={S_RPD}),1,0)))))')
         f['L'] = pullN(i, rawH); f['M'] = pullN(i, rawF); f['N'] = pullN(i, rawG); f['O'] = pullN(i, rawN)
         f['P'] = pullC(i, rawK); f['Q'] = pullC(i, rawJ); f['R'] = pullC(i, rawO)
@@ -1229,6 +1279,11 @@ def build_workbook(export_path, out_path, config: Config | None = None,
                             f'IF(ABS(${CNC}{i}-{CERTCN})<=${UXc["U CN molar"]}{i},1,0),""),"")')
         # Rerun marks (1.4.4). Fits rows 339 to 356 hold the run's numbers.
         R_ = lambda name: f'${RX[name]}{i}'      # noqa: E731
+        # 1.4.12 (finding W-09): CO2 peaks before the designated pulse; with two or more, Flags says so
+        f[RX['c before']] = (f'=IF(OR($B{i}="",NOT(ISNUMBER($BU{i}))),0,IF($BU{i}=9999,0,'
+                             f'SUMPRODUCT(({rawA}=$A{i})*({rawR}="C")*({rawD}<$BU{i}))))')
+        f[RX['fl cpre']] = (f'=IF($B{i}="","",IF(AND($P{i}<>"",N({R_("c before")})>=2),'
+                            f'{R_("c before")}&" CO2 peaks before the reference pulse, the last one used; ",""))')
         # 1.4.10: a position's pulse furthest from the run's median, of all its pulses (Raw columns U to AB);
         # of two equally far, the one above it
         for el, val, dev, med in (('N', 'U', 'Y', '$B$340'), ('C', 'W', 'AA', '$B$344')):
@@ -1530,7 +1585,7 @@ def build_workbook(export_path, out_path, config: Config | None = None,
         f'=COUNTIFS({W("CC")},">"&{S_TOUT},{W("BY")},0)+COUNTIFS({W("CC")},"<"&-{S_TOUT},{W("BY")},0)', '0')
 
     # ---- calibration statistics and the uncertainty budget ---------------
-    def caltable(r0, hdr, xcol, onecol, devcol, rescol, sqcol, ucol_setup):
+    def caltable(r0, hdr, xcol, onecol, devcol, rescol, sqcol, ucol_setup, urow):
         sec(r0 - 1, hdr)
         heads = ['Material', 'n', 'sum x', 'sum x^2', 'mean measured', 'SD', '1σ(mean)',
                  'S1', 'S2', '1σ(accepted)']
@@ -1546,7 +1601,8 @@ def build_workbook(export_path, out_path, config: Config | None = None,
                 f'=SUMIF({W("C")},{sr},{W(sqcol)})',
                 f'=IF($B{i}>0,$C{i}/$B{i},"")',
                 f'=IF($B{i}>1,SQRT(MAX(0,($D{i}-$C{i}^2/$B{i})/($B{i}-1))),0)',
-                f'=IF($B{i}>1,$F{i}/SQRT($B{i}),0)',
+                # 1.4.12 (finding W-10): a material analyzed once takes the repeatability in use
+                f'=IF($B{i}>1,$F{i}/SQRT($B{i}),IF($B{i}=1,IF(ISNUMBER($B${urow}),$B${urow},0),0))',
                 f'=SUMIF({W("C")},{sr},{W(devcol)})',
                 f'=SUMIF({W("C")},{sr},{W(rescol)})',
                 f'=IF(ISNUMBER({ucol_setup}${sr}),{ucol_setup}${sr},0)',
@@ -1556,7 +1612,9 @@ def build_workbook(export_path, out_path, config: Config | None = None,
                 c.number_format = '0' if j == 2 else '0.0000'
         ft.cell(r0 + NSTD + 1, 1, 'One row per line of the standards table. n, mean and SD are of the anchor '
                             'replicates after drift correction; S1 and S2 are the sums the uncertainty '
-                            'weights need; 1σ(accepted) is the certificate value from Setup.').font = F_NOTE
+                            'weights need; 1σ(accepted) is the certificate value from Setup. 1σ(mean) is SD over '
+                            f'the square root of n, and for a material analyzed once the repeatability in use, row '
+                            f'{urow} (1.4.12).').font = F_NOTE
 
     sec(132, 'Calibration, nitrogen: statistics behind the uncertainty')
     fit(133, 'mean measured, all anchors', f'=IFERROR(AVERAGE({W("AU")}),"")', '0.0000')
@@ -1571,7 +1629,7 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     fit(138, 'accepted d15N, lowest anchor',  f'=IFERROR(MIN({W("AV")}),"")', '0.00')
     fit(139, 'accepted d15N, highest anchor', f'=IFERROR(MAX({W("AV")}),"")', '0.00',
             'A sample outside this range is extrapolated beyond the anchors and is flagged.')
-    caltable(UT_N - 1, f'Uncertainty table, nitrogen (rows {UT_N} to {UT_N + NSTD - 1})', 'AU', 'CD', 'CE', 'CF', 'CG', 'Setup!$I')
+    caltable(UT_N - 1, f'Uncertainty table, nitrogen (rows {UT_N} to {UT_N + NSTD - 1})', 'AU', 'CD', 'CE', 'CF', 'CG', 'Setup!$I', 136)
 
     sec(152, 'Calibration, carbon: statistics behind the uncertainty')
     fit(153, 'mean measured, all anchors', f'=IFERROR(AVERAGE({W("AW")}),"")', '0.0000')
@@ -1583,7 +1641,7 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     fit(157, 'its source', f'=IF({S_USC}<>"","Setup","pooled anchor replicates")', '@')
     fit(158, 'accepted d13C, lowest anchor',  f'=IFERROR(MIN({W("AX")}),"")', '0.00')
     fit(159, 'accepted d13C, highest anchor', f'=IFERROR(MAX({W("AX")}),"")', '0.00')
-    caltable(UT_C - 1, f'Uncertainty table, carbon (rows {UT_C} to {UT_C + NSTD - 1})', 'AW', 'CH', 'CI', 'CJ', 'CK', 'Setup!$H')
+    caltable(UT_C - 1, f'Uncertainty table, carbon (rows {UT_C} to {UT_C + NSTD - 1})', 'AW', 'CH', 'CI', 'CJ', 'CK', 'Setup!$H', 156)
 
     # ---- working gas, from the pulses Isodat did not designate --------------
     sec(199, 'Reference pulses: did the working-gas measurement hold across the run?')
@@ -1750,7 +1808,32 @@ def build_workbook(export_path, out_path, config: Config | None = None,
                          f'IF(COUNTIFS({W("D")},"Sample",{W(z_)},">-1E+30")>0,"no {name} calibrated: no anchor has '
                          f'a measured {name}; ","")))')
     fit(357, 'whole run: calibration', '=' + '&'.join(cal_parts), '@')
-    ALL = '$B$357&$B$353&$B$354&$B$355'
+    # 1.4.12 (Tony, 2026-10-14; finding W-02): the calibration line itself, its slope against 1 and the
+    # anchors' residual SD about it, at the Note and Caution limits of Setup B73 to B76
+    sec(360, 'Calibration line: slope against 1 and the anchors\' residual SD (1.4.12)')
+
+    def cal_level(off_r, sd_r):
+        over = lambda v, lim: f'AND({lim}<>"",ISNUMBER({v}),{v}>{lim})'          # noqa: E731
+        off, sd = f'$B${off_r}', f'$B${sd_r}'
+        return (f'=IF(NOT(ISNUMBER({off})),"",IF(OR({over(off, S_CSC)},{over(sd, S_CDC)}),"Caution",'
+                f'IF(OR({over(off, S_CSN)},{over(sd, S_CDN)}),"Note","OK")))')
+    calline = []
+    for base, name, slope_r, sd_r, ok in ((361, 'd15N', 56, 59, '$C$55'), (364, 'd13C', 63, 66, '$C$62')):
+        fit(base, f'{name}: slope, distance from 1',
+            f'=IF(AND({ok}="Yes",ISNUMBER($B${slope_r})),ABS($B${slope_r}-1),"")', '0.0000')
+        fit(base + 1, f'{name}: anchor residual SD (permil)',
+            f'=IF(AND({ok}="Yes",ISNUMBER($B${sd_r})),$B${sd_r},"")', '0.000')
+        fit(base + 2, f'{name}: calibration line', cal_level(base, base + 1), '@',
+            'OK, Note or Caution, at the limits of Setup B73 to B76.' if name == 'd15N' else '')
+        off, sd = f'$B${base}', f'$B${base + 1}'
+        for v, note, caution, text in (
+                (off, S_CSN, S_CSC, f'"{name} calibration slope "&TEXT($B${slope_r},"0.0000")&", more than "&LIM&" from 1; "'),
+                (sd, S_CDN, S_CDC, f'"{name} anchor residual SD "&TEXT({sd},"0.000")&" permil, above "&LIM&"; "')):
+            lim = f'IF(AND({caution}<>"",{v}>{caution}),{caution},{note})'
+            calline.append(f'IF(NOT(ISNUMBER({v})),"",IF(OR(AND({caution}<>"",{v}>{caution}),AND({note}<>"",{v}>{note})),'
+                           + text.replace('LIM', lim) + ',""))')
+    fit(367, 'whole run: calibration line', '=' + '&'.join(calline), '@')
+    ALL = '$B$357&$B$367&$B$353&$B$354&$B$355'
     fit(356, 'problems of the whole run', f'=IF({ALL}="","none found",LEFT({ALL},LEN({ALL})-2))', '@')
 
     fit(217, 'check standards with a calibrated value',
@@ -1801,8 +1884,9 @@ def build_workbook(export_path, out_path, config: Config | None = None,
                 pull(CNm), pull(UX['u CN molar']), pull(CNw), pull(UX['u CN mass']),
                 f'=IF(Work!$AF{k}="","",Work!$AF{k})', pull('CN'), f'=IF(Work!$AA{k}="","",Work!$AA{k})', pull('CL'),
                 (f'=IF(Work!$B{k}="","",'
-                 f'Work!${RX["fl noN"]}{k}&Work!${RX["fl noC"]}{k}&Work!${RX["fl rejC"]}{k}'
-                 f'&Work!${RX["fl sizeN"]}{k}&Work!${RX["fl sizeC"]}{k}'
+                 # 1.4.12: in the engine's order, the N peak's flags and then the C peak's
+                 f'Work!${RX["fl noN"]}{k}&Work!${RX["fl sizeN"]}{k}&Work!${RX["fl noC"]}{k}'
+                 f'&Work!${RX["fl rejC"]}{k}&Work!${RX["fl sizeC"]}{k}&Work!${RX["fl cpre"]}{k}'
                  f'&IF(OR(Work!$D{k}="Sample",Work!$D{k}="Check"),IF(Work!$AA{k}="","",IF(Fits!$B$138="","",'
                  f'IF(AND(Work!$AA{k}>=Fits!$B$138,Work!$AA{k}<=Fits!$B$139),"","d15N outside anchor range; "))),"")'
                  f'&IF(OR(Work!$D{k}="Sample",Work!$D{k}="Check"),IF(Work!$AF{k}="","",IF(Fits!$B$158="","",'
@@ -1812,8 +1896,8 @@ def build_workbook(export_path, out_path, config: Config | None = None,
                  f'IF(Work!$CB{k}="","",IF(ABS(Work!$CB{k})>{S_TOUT},"N drift monitor outlier; ",""))))'
                  f'&IF(Work!$D{k}<>"Drift","",IF(Work!$BY{k}=1,"excluded from C drift fit; ",'
                  f'IF(Work!$CC{k}="","",IF(ABS(Work!$CC{k})>{S_TOUT},"C drift monitor outlier; ",""))))'
-                 f'&Work!${RX["fl blankN"]}{k}&Work!${RX["fl blankC"]}{k}'
                  f'&IF(AND(Work!$D{k}="Drift",Work!${EX["excl E"]}{k}=1),"excluded from elemental correction; ","")'
+                 f'&Work!${RX["fl blankN"]}{k}&Work!${RX["fl blankC"]}{k}'
                  f'&Work!${RX["fl settle"]}{k}&Work!${RX["fl carry"]}{k}'
                  f'&Work!${RX["fl pulseN"]}{k}&Work!${RX["fl pulseC"]}{k}'
                  f'&IF(AND(ISNUMBER(Work!$AG{k}),ISNUMBER(Work!$G{k})),IF(AND(Work!$AG{k}<=0,Work!$G{k}>0),'
@@ -2001,14 +2085,17 @@ def build_workbook(export_path, out_path, config: Config | None = None,
           '=IF(Fits!$B$55<2,"CHECK: need at least two anchor measurements",IF(Fits!$C$55<>"Yes",'
           '"CHECK: every anchor carries the same accepted d15N; two materials with different values set the '
           'scale, so no d15N is reported","ok"))')
+    # 1.4.12 (finding W-02): the slope and the anchors' residual SD against Setup B73 to B76
     qline(23, 'Nitrogen calibration slope', '=Fits!$B$56', '0.0000',
-          '=IF(Fits!$B$56="","",IF(ABS(Fits!$B$56-1)>0.05,"CHECK: stretch factor far from 1","ok"))')
+          f'=IF(Fits!$B$363="","",IF(Fits!$B$363="OK","ok","CHECK, "&Fits!$B$363&": the slope or the anchors\' '
+          f'residual SD (Fits rows 361 and 362) is beyond the limits in Setup B{SLAST+13} to B{SLAST+16}"))')
     qline(24, 'Carbon anchors used', '=Fits!$B$62', '0',
           '=IF(Fits!$B$62<2,"CHECK: need at least two anchor measurements",IF(Fits!$C$62<>"Yes",'
           '"CHECK: every anchor carries the same accepted d13C; two materials with different values set the '
           'scale, so no d13C is reported","ok"))')
     qline(25, 'Carbon calibration slope', '=Fits!$B$63', '0.0000',
-          '=IF(Fits!$B$63="","",IF(ABS(Fits!$B$63-1)>0.05,"CHECK: stretch factor far from 1","ok"))')
+          f'=IF(Fits!$B$366="","",IF(Fits!$B$366="OK","ok","CHECK, "&Fits!$B$366&": the slope or the anchors\' '
+          f'residual SD (Fits rows 364 and 365) is beyond the limits in Setup B{SLAST+13} to B{SLAST+16}"))')
     qline(26, 'Check standards measured in this run', '=Fits!$B$217', '0',
           '=IF(Fits!$B$217<1,"CHECK: nothing independent of the anchors tests this calibration; run a '
           'check standard (USGS66, or an in-house material with an assigned value) in every sequence","ok")')

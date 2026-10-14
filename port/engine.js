@@ -11,7 +11,8 @@
 // the block as D.settings, and each position says whether the server set its CO2
 // peak aside as a reference pulse (rej) and, from ea_irms 1.4.4, how far its
 // undesignated N2 and CO2 reference pulses lie from the run's median when that
-// flags them (poN, poC; null otherwise);
+// flags them (poN, poC; null otherwise), and from 1.4.12 how many CO2 peaks came
+// before the designated pulse where two or more did (cpre; null otherwise);
 // a block without them gets the package defaults. Settings that act before the
 // block is built (the standards, the reference-pulse windows and limit, the size
 // limits, settling and carryover) are applied by the server, so a change to them
@@ -145,7 +146,9 @@ class PortEngine {
   // flag off, as None does in ea_irms.
   settings(D) {
     const S = { alpha: 0.05, outlierT: 4.0, checkOffset: 0.5, blankMultiple: 3.0, k: 2.0, elemGate: 5.0,
-      firstDrift: null };
+      firstDrift: null,
+      // ea_irms 1.4.12 (finding W-02): the calibration line's limits, for the page's checks
+      calSlopeNote: 0.05, calSlopeCaution: 0.10, calSdNote: 0.3, calSdCaution: 1.0 };
     const given = D && D.settings ? D.settings : {};
     for (const key of Object.keys(S)) if (key in given) S[key] = given[key];
     return S;
@@ -289,6 +292,9 @@ class PortEngine {
         if (chosen != null) { B.uS = chosen; B.src = 'configuration'; } else { B.uS = B.pooled; B.src = 'pooled anchor replicates'; }
         B.ok = true;
         const uS = B.uS;
+        // ea_irms 1.4.12 (finding W-10): a material analyzed once takes the repeatability in use for the
+        // error of its mean, where before it counted as 0
+        for (const g of B.groups) if (g.sd == null) g.uMean = uS != null ? uS / Math.sqrt(g.n) : 0;
         B.at = (x) => {
           let tot = (uS * m) ** 2;
           const parts = { rep: (uS * m) ** 2, acc: 0, mean: 0 };
@@ -366,6 +372,8 @@ class PortEngine {
         if (q.rej) fl.push('CO2 peak rejected as a reference pulse');
       } else if (L.min_c && q.aC < L.min_c) fl.push('C below linearity range');
       else if (L.max_c && q.aC > L.max_c) fl.push('C above linearity range');
+      // ea_irms 1.4.12 (finding W-09): the CO2 peak next to the designated pulse was taken
+      if (q.aC != null && q.cpre) fl.push(q.cpre + ' CO2 peaks before the reference pulse, the last one used');
       for (const [v, f, name] of [[q.n.fin, M.cal.n, 'd15N'], [q.c.fin, M.cal.c, 'd13C']]) {
         if (v != null && (q.role === 'S' || q.role === 'K') && f.accMin != null && !(f.accMin <= v && v <= f.accMax)) {
           fl.push(name + ' outside anchor range');

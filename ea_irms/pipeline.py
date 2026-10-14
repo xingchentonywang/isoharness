@@ -125,12 +125,23 @@ class Config:
     # matches the designated reference pulses is a pulse, not the sample
     ref_pulse_ampl_tol: float | None = 0.02   # fraction of the designated pulses' amplitude at that position; None = off
     ref_pulse_d13c_window: float = 0.75       # permil around the designated pulses' mean d13C
+    # 1.4.12 (Tony, 2026-10-14; finding W-03): before the first and after the last position with a designated
+    # pulse the yardstick is held flat and cannot follow the pulses' drift, so the tolerance there is wider.
+    # None = the tolerance above everywhere.
+    ref_pulse_ampl_tol_outside: float | None = 0.05
     # 1.4.4: rerun marks. A position's undesignated reference pulse is off when it lies more than
     # this many robust SDs from the run's median (None = off), and a reference-gas SD at or above
     # ref_gas_sd_limit (permil; the FIRMS guide's zero-enrichment limit, None = off) is a run-level
     # problem on the Rerun sheet.
     ref_pulse_off_sd: float | None = 4.0
     ref_gas_sd_limit: float | None = 0.1
+    # 1.4.12 (Tony, 2026-10-14; finding W-02): the calibration line itself. A slope further from 1 than
+    # cal_slope_note, or an anchor residual SD above cal_sd_note (permil), is a Note; beyond the caution
+    # limits a Caution. Either level is a problem of the whole run on the Rerun sheet. None = that test off.
+    cal_slope_note: float | None = 0.05
+    cal_slope_caution: float | None = 0.10
+    cal_sd_note: float | None = 0.3
+    cal_sd_caution: float | None = 1.0
     # 1.4.7 (Tony, 2026-10-13): a peak above the linearity range is marked for a rerun only when its
     # amplitude reaches the instrument's largest, in mV (None: every peak above the range is marked,
     # as before 1.4.7); a peak at or above it is marked whatever the range. A sample whose final d15N
@@ -599,6 +610,44 @@ def _xl(x, places: int, sign: bool = False) -> str:
     return format(d, f"{'+' if sign else ''}.{places}f")
 
 
+def _num_text(x) -> str:
+    """x as a spreadsheet writes a number joined to text (1.4.12): up to 15 significant digits, in plain
+    decimals, trailing zeros dropped, so 0.025 stays 0.025 and 0.00005 is not 5e-05. Measured against
+    LibreOffice from 1e-14 to 1e15; outside that both spreadsheets write an exponent, each its own way."""
+    s = f"{x if x != 0 else 0.0:.15g}"
+    if "e" in s:
+        s = format(Decimal(s), "f")
+        if "." in s:
+            s = s.rstrip("0").rstrip(".")
+    return s
+
+
+def _cal_check(fit, config):
+    """The calibration line against the limits of finding W-02 (1.4.12): how far its slope is from 1, and
+    the anchors' residual SD about it. ``level`` is OK, Note or Caution, or None when nothing is calibrated;
+    ``slope_limit`` and ``sd_limit`` are the limits crossed (the caution limit before the note limit)."""
+    slope, sd = fit.get("slope"), fit.get("sd")
+    out = {"level": None, "slope": slope, "slope_off": None, "sd": sd,
+           "slope_level": None, "slope_limit": None, "sd_level": None, "sd_limit": None}
+    if not fit.get("calibrated") or slope is None:
+        return out
+
+    def crossed(value, note, caution):
+        if value is None:
+            return None, None
+        if caution is not None and _above(value, caution):
+            return "Caution", caution
+        if note is not None and _above(value, note):
+            return "Note", note
+        return None, None
+    out["slope_off"] = abs(slope - 1.0)
+    out["slope_level"], out["slope_limit"] = crossed(out["slope_off"], config.cal_slope_note, config.cal_slope_caution)
+    out["sd_level"], out["sd_limit"] = crossed(sd, config.cal_sd_note, config.cal_sd_caution)
+    levels = {out["slope_level"], out["sd_level"]}
+    out["level"] = "Caution" if "Caution" in levels else "Note" if "Note" in levels else "OK"
+    return out
+
+
 def _k_sigma(k):
     """k x 1 sigma as the checks name it: '2σ' for the default k = 2 (1.4.5)."""
     return f"{k:.15g}σ"
@@ -766,6 +815,16 @@ def _rerun_marks(positions, F, config):
                          "needs two materials with different values")
         elif any(p.role == "Sample" and getattr(p, drifted) is not None for p in positions):
             items.append(f"no {name} calibrated: no anchor has a measured {name}")
+    # 1.4.12 (finding W-02): the calibration line itself, at the Note or Caution limit it crosses
+    for el, name in (("n", "d15N"), ("c", "d13C")):
+        c = F.get("cal_check", {}).get(el) or {}
+        # the limit as the workbook joins a number to text, and the SD to 3 decimals as Fits rows 362 and 365
+        # show it, so an SD just above a limit of 0.3 does not read 0.30
+        if c.get("slope_limit") is not None:
+            items.append(f"{name} calibration slope {_xl(c['slope'], 4)}, more than {_num_text(c['slope_limit'])} "
+                         "from 1")
+        if c.get("sd_limit") is not None:
+            items.append(f"{name} anchor residual SD {_xl(c['sd'], 3)} permil, above {_num_text(c['sd_limit'])}")
     off = [p.row for p in positions if p.role == "Check"
            and any(f.startswith(("check d15N off by", "check d13C off by")) for f in p.flags)]
     if off:
@@ -820,12 +879,24 @@ def process(positions, config=None, samples=None):
     filtered = all(p.ref_bgd_n is None for p in positions)
     desig = [(a, d) for p in positions for a, d in p.desig_c if a is not None and d is not None]
     pairs = sorted((p.row, p.desig_c[0][0]) for p in positions if p.desig_c and p.desig_c[0][0] is not None)
+    # 1.4.12 (finding W-03): before the first and after the last position with a designated pulse the
+    # tolerance is ref_pulse_ampl_tol_outside, but never narrower than ref_pulse_ampl_tol, so a configuration
+    # written before 1.4.12 with a tolerance above 0.05 rejects there what it rejected before
+    tol_in, tol_out = config.ref_pulse_ampl_tol, config.ref_pulse_ampl_tol_outside
     check = {"filtered": filtered, "n_designated": len(desig),
              "mean_ampl": sum(a for a, _ in desig) / len(desig) if desig else None,
              "mean_d13c": sum(d for _, d in desig) / len(desig) if desig else None,
-             "ampl_tol": config.ref_pulse_ampl_tol, "d13c_window": config.ref_pulse_d13c_window,
+             "ampl_tol": tol_in, "d13c_window": config.ref_pulse_d13c_window,
+             "ampl_tol_outside": tol_in if (tol_out is None or tol_in is None) else max(tol_in, tol_out),
+             "span": [pairs[0][0], pairs[-1][0]] if pairs else None,
              "active": bool(filtered and desig and pairs and config.ref_pulse_ampl_tol is not None),
              "rejected": []}
+
+    def tol_at(row):
+        # 1.4.12 (finding W-03): outside the positions with a designated pulse the yardstick is held flat
+        if pairs and (row < pairs[0][0] or row > pairs[-1][0]):
+            return check["ampl_tol_outside"]
+        return config.ref_pulse_ampl_tol
 
     def pulse_ampl_at(row):
         if row <= pairs[0][0]:
@@ -842,7 +913,7 @@ def process(positions, config=None, samples=None):
     if check["active"]:
         for p in positions:
             if (p.ampl_c is not None and p.d13c is not None
-                    and not _above(abs(p.ampl_c - p.pulse_ampl_c), config.ref_pulse_ampl_tol * p.pulse_ampl_c)
+                    and not _above(abs(p.ampl_c - p.pulse_ampl_c), tol_at(p.row) * p.pulse_ampl_c)
                     and not _above(abs(p.d13c - check["mean_d13c"]), config.ref_pulse_d13c_window)):
                 p.c_rejected = True
                 p.rejected_ampl_c, p.rejected_d13c = p.ampl_c, p.d13c
@@ -991,6 +1062,9 @@ def process(positions, config=None, samples=None):
         f = F["cal_c"]
         p.d13c_final = (None if p.d13c_drift is None or f["n"] < 2
                         else f["slope"] * p.d13c_drift + f["intercept"])
+    # 1.4.12 (Tony, 2026-10-14; finding W-02): the calibration line itself, its slope against 1 and its
+    # anchors' scatter about it, judged OK, Note or Caution
+    F["cal_check"] = {el: _cal_check(F[f"cal_{el}"], config) for el in ("n", "c")}
 
     # ---- uncertainty of the calibrated values -----------------------------
     # Inputs: each anchor material's accepted value and its measured mean, and
@@ -1019,7 +1093,7 @@ def process(positions, config=None, samples=None):
                 g["n"] = k
                 g["mean"] = sum(g["x"]) / k
                 g["sd"] = sd
-                g["u_mean"] = sd / math.sqrt(k) if sd is not None else 0.0
+                g["u_mean"] = sd / math.sqrt(k) if sd is not None else None     # set below when None
                 g["s1"] = sum(x - mx for x in g["x"])
                 # residual of each replicate against the line, minus m*(x - mean_x)
                 acc = [getattr(p, accattr) for p in anchors if p.std_index == idx
@@ -1039,6 +1113,17 @@ def process(positions, config=None, samples=None):
             else:
                 budget["u_sample"], budget["u_sample_source"] = pooled, "pooled anchor replicates"
             u_s = budget["u_sample"]
+            # 1.4.12 (Tony, 2026-10-14; finding W-10): a material analyzed once has no SD of its own, so the
+            # error of its mean takes the repeatability in use (Setup B30 or B31, else the pooled SD of the
+            # materials analyzed more than once). Before 1.4.12 it counted as 0, and the 1sigma was too small.
+            for g in groups.values():
+                if g["u_mean"] is None:
+                    g["u_mean"] = u_s / math.sqrt(g["n"]) if u_s is not None else 0.0
+            for b in budget["materials"]:
+                g = groups[b["index"]]
+                b["u_mean"] = g["u_mean"]
+                b["u_mean_source"] = ("own replicates" if b["sd"] is not None
+                                      else "repeatability in use" if u_s is not None else None)
             for p in positions:
                 x = getattr(p, xattr)
                 if x is None or u_s is None:
@@ -1304,6 +1389,9 @@ def process(positions, config=None, samples=None):
             flags.append("C below linearity range")
         elif max_c and p.area_c > max_c:
             flags.append("C above linearity range")
+        if p.area_c is not None and getattr(p, "c_before", 0) >= 2:
+            # 1.4.12 (finding W-09): the one next to the designated pulse was taken
+            flags.append(f"{p.c_before} CO2 peaks before the reference pulse, the last one used")
         for value, fit, name in ((p.d15n_final, F["cal_n"], "d15N"),
                                  (p.d13c_final, F["cal_c"], "d13C")):
             if (value is not None and p.role in ("Sample", "Check")
@@ -1437,8 +1525,13 @@ def config_to_dict(config: Config) -> dict:
         "exclude_elemental": list(config.exclude_elemental),
         "ref_pulse_ampl_tol": config.ref_pulse_ampl_tol,
         "ref_pulse_d13c_window": config.ref_pulse_d13c_window,
+        "ref_pulse_ampl_tol_outside": config.ref_pulse_ampl_tol_outside,
         "ref_pulse_off_sd": config.ref_pulse_off_sd,
         "ref_gas_sd_limit": config.ref_gas_sd_limit,
+        "cal_slope_note": config.cal_slope_note,
+        "cal_slope_caution": config.cal_slope_caution,
+        "cal_sd_note": config.cal_sd_note,
+        "cal_sd_caution": config.cal_sd_caution,
         "max_amplitude_mv": config.max_amplitude_mv,
         "rerun_max_1sigma": config.rerun_max_1sigma,
         "rerun_replicates": config.rerun_replicates,

@@ -256,8 +256,8 @@ def test_workbook_agrees_with_engine(computed, name):
     assert [rs.cell(4, c).value for c in range(17, 21)] == ["Flags", "Rerun", "Why", "Suggested mass (mg)"]
     for p in positions:
         i = 4 + p.row
-        flags = {t.strip() for t in str(rs.cell(i, head["Flags"]).value or "").split(";") if t.strip()}
-        assert flags == set(p.flags), (name, p.row, flags ^ set(p.flags))
+        flags = [t.strip() for t in str(rs.cell(i, head["Flags"]).value or "").split(";") if t.strip()]
+        assert flags == p.flags, (name, p.row, flags, p.flags)
         for h, attr in (("Rerun", "rerun"), ("Why", "rerun_why"), ("Suggested mass (mg)", "rerun_mass")):
             assert (getattr(p, attr) or "") == (rs.cell(i, head[h]).value or ""), (name, p.row, h)
         for h, attr in (("1σ(%N)", "u_pct_n"), ("1σ(d15N)", "u_d15n"), ("%N as measured", "pct_n_measured")):

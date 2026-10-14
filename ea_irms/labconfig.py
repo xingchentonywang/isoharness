@@ -84,12 +84,27 @@ SETTINGS = [
     ("ref_pulse_ampl_tol", "Reference-pulse check, amplitude tolerance (fraction)", "number_or_empty",
      "Used only in an export without N2 reference peaks, where an unflagged CO2 peak this close to the "
      "designated pulses is set aside as a reference pulse. Empty: no check."),
+    ("ref_pulse_ampl_tol_outside", "Reference-pulse check, amplitude tolerance before the first and after the last "
+     "designated pulse (fraction)", "number_or_empty",
+     "There the yardstick is held flat and cannot follow the pulses' drift, so the tolerance is wider (1.4.12). "
+     "A value below the tolerance above counts as that tolerance. Empty: the tolerance above everywhere."),
     ("ref_pulse_d13c_window", "Reference-pulse check, d13C window (permil)", "number",
      "Around the designated pulses' mean d13C."),
     ("ref_pulse_off_sd", "Reference pulse off at a position, robust SDs from the run's median",
      "number_or_empty", "Marks that sample for a rerun of that element. Empty: no check."),
     ("ref_gas_sd_limit", "Reference-gas SD that is a problem for the whole run (permil)", "number_or_empty",
      "The FIRMS guide gives 0.1 permil for its zero-enrichment test (section 4.3.2). Empty: no check."),
+    (None, "Calibration line (1.4.12)", None, None),
+    ("cal_slope_note", "Calibration slope further from 1 than this is a Note", "number_or_empty",
+     "The calibration line's slope is close to 1 when the instrument is working well; the limits are the lab's "
+     "to set. Empty: no check."),
+    ("cal_slope_caution", "Calibration slope further from 1 than this is a Caution", "number_or_empty",
+     "Either level is a problem of the whole run on the Rerun sheet. Empty: no check."),
+    ("cal_sd_note", "Anchor residual SD about the calibration line above this is a Note (permil)", "number_or_empty",
+     "The scatter of every anchor analysis about the line, which grows with the replicates' scatter and with a "
+     "material that sits off the line. It is not the repeatability 1σ uses. Empty: no check."),
+    ("cal_sd_caution", "Anchor residual SD about the calibration line above this is a Caution (permil)",
+     "number_or_empty", "Empty: no check."),
     (None, "Rerun marks (1.4.7 and 1.4.8)", None, None),
     ("max_amplitude_mv", "Largest peak amplitude the instrument measures (mV)", "number_or_empty",
      "A peak above the linearity range is marked for a rerun only at or above this amplitude, and a peak at or "
@@ -316,6 +331,9 @@ RANGES = {
     "max_area_c": (0.0, None, True, None), "min_blank_multiple": (0.0, None, True, None),
     "settled_threshold": (0.0, 1.0, False, True), "carryover_mv": (0.0, None, True, None),
     "ref_pulse_ampl_tol": (0.0, None, True, None), "ref_pulse_d13c_window": (0.0, None, True, None),
+    "ref_pulse_ampl_tol_outside": (0.0, None, True, None),
+    "cal_slope_note": (0.0, None, True, None), "cal_slope_caution": (0.0, None, True, None),
+    "cal_sd_note": (0.0, None, True, None), "cal_sd_caution": (0.0, None, True, None),
     "ref_pulse_off_sd": (0.0, None, False, None), "ref_gas_sd_limit": (0.0, None, False, None),
     "max_amplitude_mv": (0.0, None, False, None), "rerun_max_1sigma": (0.0, None, False, None),
     "u_sample_n": (0.0, None, True, None), "u_sample_c": (0.0, None, True, None),

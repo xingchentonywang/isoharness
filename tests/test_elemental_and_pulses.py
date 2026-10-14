@@ -235,4 +235,4 @@ def test_workbook_agrees_with_engine_on_the_new_columns(tmp_path):
             theirs = theirs if isinstance(theirs, (int, float)) else None
             assert (mine is None) == (theirs is None) and (mine is None or abs(mine - theirs) < 1e-9 * max(1.0, abs(mine)))
         text = rs.cell(4 + p.row, rhead["Flags"]).value or ""
-        assert set(p.flags) == {t.strip() for t in text.split(";") if t.strip()}, p.row
+        assert p.flags == [t.strip() for t in text.split(";") if t.strip()], p.row

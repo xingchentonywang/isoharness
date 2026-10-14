@@ -1298,6 +1298,8 @@ class Component extends DCLogic {
       ['ran before the background settled', 'Unsettled'], ['no N peak', 'No N2 peak'], ['no C peak', 'No CO2 peak'],
       ['CO2 peak rejected as a reference pulse', 'CO2 was a pulse']];
     for (const [a, b] of t) if (s === a) return b;
+    const two = /^(\d+) CO2 peaks before the reference pulse, the last one used$/.exec(s);      // ea_irms 1.4.12
+    if (two) return two[1] + ' CO2 peaks';
     const m = /^(N|C) peak only ([\d.]+)x the blank$/.exec(s);
     if (m) return (m[1] === 'N' ? 'N2 ' : 'CO2 ') + m[2] + '× blank';
     return this.ftext(s);
@@ -2284,6 +2286,34 @@ class Component extends DCLogic {
       const f = M.cal[el];
       if (!f.calibrated && f.values === 1) add('cal', { s: 'caution', title: 'Calibration of ' + this.iso(el),
         t: 'Every anchor analysis carries the same accepted ' + this.iso(el) + ', ' + this.fx(f.accMin, 2) + '‰, so the line through them is flat and would give every sample that value. A scale needs anchors of two materials with different accepted values; until the run has them, no ' + this.iso(el) + ' is reported.' });
+    }
+    // ea_irms 1.4.12 (finding W-02): the calibration line itself, its slope against 1 and the anchors'
+    // residual SD about it, at the lab configuration's Note and Caution limits
+    {
+      const beyond = (v, lim) => v != null && lim != null && v - lim > 1e-9 * Math.max(1, Math.abs(lim));
+      const level = (v, note, caution) => (beyond(v, caution) ? 2 : beyond(v, note) ? 1 : 0);
+      const parts = [];
+      let worst = 0;
+      for (const el of ['n', 'c']) {
+        const f = M.cal[el];
+        if (!f.calibrated || f.slope == null) continue;
+        const off = Math.abs(f.slope - 1);
+        worst = Math.max(worst, level(off, set.calSlopeNote, set.calSlopeCaution), level(f.sd, set.calSdNote, set.calSdCaution));
+        parts.push(this.iso(el) + ' slope ' + this.fx(f.slope, 4) + ', ' + this.fx(off, 4) + ' from 1, '
+          + (f.sd == null ? 'with no residual SD from two anchor analyses' : 'anchor residual SD ' + this.fx(f.sd, 3) + '‰'));
+      }
+      if (parts.length) {
+        const rule = (name, slope, sd) => {
+          const r = [];
+          if (slope != null) r.push('a slope more than ' + this.num(slope) + ' from 1');
+          if (sd != null) r.push('a residual SD above ' + this.num(sd) + '‰');
+          return r.length ? name + ' at ' + r.join(' or ') : '';
+        };
+        const rules = [rule('Note', set.calSlopeNote, set.calSdNote), rule('Caution', set.calSlopeCaution, set.calSdCaution)].filter((x) => x);
+        add('cal', { s: ['ok', 'note', 'caution'][worst], title: 'Calibration line',
+          t: parts.join('; ') + '.' + (rules.length ? ' ' + rules.join('; ') + '.' : ' No limits are set for this check.')
+            + (worst === 2 ? ' At this level the calibration itself is in doubt, which 1σ does not show.' : '') });
+      }
     }
     if (S.length) {
       // each element counted over the samples that have its final value
