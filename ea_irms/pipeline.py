@@ -122,6 +122,13 @@ class Config:
     # problem on the Rerun sheet.
     ref_pulse_off_sd: float | None = 4.0
     ref_gas_sd_limit: float | None = 0.1
+    # 1.4.7 (Tony, 2026-10-13): a peak above the linearity range is marked for a rerun only when its
+    # amplitude reaches the instrument's largest, in mV (None: every peak above the range is marked,
+    # as before 1.4.7); a peak at or above it is marked whatever the range. A sample whose final d15N
+    # or d13C has a 1 sigma above rerun_max_1sigma (permil) is marked for a rerun of that element
+    # (None = off).
+    max_amplitude_mv: float | None = 50000.0
+    rerun_max_1sigma: float | None = 0.5
 
     def __post_init__(self):
         # Older configurations stored the switches as booleans.
@@ -459,10 +466,31 @@ def _median(values):
     return vals[m] if len(vals) % 2 else (vals[m - 1] + vals[m]) / 2
 
 
-def _reason(flag):
-    """Is this flag one that the rerun marks read?"""
+def _reason(flag, config=None):
+    """Is this flag one that the rerun marks read? From 1.4.7 a peak above the linearity range is
+    not, when the configuration gives the instrument's largest amplitude (max_amplitude_mv)."""
+    if config is not None and config.max_amplitude_mv is not None and flag in (_SIZE["n"][1], _SIZE["c"][1]):
+        return False
     return (flag in _PLAIN or flag in _SIZE["n"] or flag in _SIZE["c"]
             or flag.startswith(_PREFIX["n"]) or flag.startswith(_PREFIX["c"]))
+
+
+def _extra_reasons(p, config):
+    """The rerun reasons that are not flags (1.4.7), one per element: a peak at or above the
+    instrument's largest amplitude, and a final delta value whose 1 sigma is above the limit. In the
+    order the workbook writes them: amplitude N, amplitude C, 1 sigma N, 1 sigma C."""
+    out = {"n": [], "c": []}
+    lim = config.max_amplitude_mv
+    if lim is not None:
+        for el, area, ampl, gas in (("n", p.area_n, p.ampl_n, "N2"), ("c", p.area_c, p.ampl_c, "CO2")):
+            if area is not None and ampl is not None and not _above(lim, ampl):
+                out[el].append(f"{gas} peak at or above {lim:.0f} mV")
+    usig = config.rerun_max_1sigma
+    if usig is not None:
+        for el, u, name in (("n", p.u_d15n, "d15N"), ("c", p.u_d13c, "d13C")):
+            if u is not None and _above(u, usig):
+                out[el].append(f"1σ({name}) {u:.2f} above {usig:.2f}")
+    return out
 
 
 def _mass_window(p, el, lo_area, hi_area):
@@ -505,7 +533,9 @@ def _rerun_marks(positions, F, config):
             continue
         fl = p.flags
         no_n, no_c = "no N peak" in fl, "no C peak" in fl
-        need = {el: any(f in _SIZE[el] or f.startswith(_PREFIX[el]) for f in fl) for el in ("n", "c")}
+        extra = _extra_reasons(p, config)
+        need = {el: any(_reason(f, config) and (f in _SIZE[el] or f.startswith(_PREFIX[el])) for f in fl)
+                or bool(extra[el]) for el in ("n", "c")}
         both = "possible carryover from an oversized sample" in fl or (no_n and no_c)
         check = "ran before the background settled" in fl or no_n != no_c
         if both or (need["n"] and need["c"]):
@@ -519,7 +549,9 @@ def _rerun_marks(positions, F, config):
         else:
             continue
         p.rerun = mark
-        p.rerun_why = "; ".join(f for f in fl if _reason(f))
+        p.rerun_why = "; ".join([f for f in fl if _reason(f, config)]
+                                + [r for kind in (0, 1) for el in ("n", "c")
+                                   for r in extra[el] if r.startswith("1σ(") == bool(kind)])
         counts[mark] += 1
         if mark == "Check":
             continue
@@ -1165,6 +1197,8 @@ def config_to_dict(config: Config) -> dict:
         "ref_pulse_d13c_window": config.ref_pulse_d13c_window,
         "ref_pulse_off_sd": config.ref_pulse_off_sd,
         "ref_gas_sd_limit": config.ref_gas_sd_limit,
+        "max_amplitude_mv": config.max_amplitude_mv,
+        "rerun_max_1sigma": config.rerun_max_1sigma,
     }
 
 

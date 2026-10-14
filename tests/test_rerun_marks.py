@@ -1,12 +1,15 @@
-"""ea_irms 1.4.4: rerun marks, in the engine and in the workbook.
+"""ea_irms 1.4.4 and 1.4.7: rerun marks, in the engine and in the workbook.
 
-A sample is marked only for what a rerun can fix: a peak outside the linearity
-range or under the blank multiple, carryover from an oversized sample, or the
-reference pulse at its position off; and for a check when it ran before the
-background settled or lacks one element's peak. The engine's marks are checked
-against those rules on the 2026-09-15 test run and on copies of it with masses
-and shifted reference pulses, and the workbook against the engine under six
-configurations, after LibreOffice has computed the formulas (skipped without it).
+A sample is marked for what a rerun can fix: a peak below the linearity range or
+under the blank multiple, carryover from an oversized sample, or the reference
+pulse at its position off; and for a check when it ran before the background
+settled or lacks one element's peak. From 1.4.7 (Tony, 2026-10-13) a peak above
+the linearity range is marked only when its amplitude reaches the instrument's
+largest (50,000 mV by default), and a final d15N or d13C whose 1 sigma is above
+0.5 permil marks that element. The engine's marks are checked against those rules
+on the 2026-09-15 test run and on copies of it with masses and shifted reference
+pulses, and the workbook against the engine under eight configurations, after
+LibreOffice has computed the formulas (skipped without it).
 """
 import csv
 import io
@@ -56,15 +59,21 @@ def check_config(offset):
 def test_marks_on_the_test_run():
     positions, F = process(parse_export(RUN), Config())
     marks = {p.row: p.rerun for p in positions if p.rerun}
-    assert marks == {20: "Check", 21: "Check", 23: "N and C", 24: "Check", 25: "Check", 29: "C",
-                     33: "N and C", 40: "N and C", 41: "N and C", 43: "N and C", 44: "N and C",
+    assert marks == {20: "Check", 21: "Check", 23: "C", 24: "Check", 25: "Check",
+                     40: "N and C", 41: "N and C", 43: "N and C", 44: "N and C",
                      45: "N and C", 47: "N and C", 53: "N"}
     assert all(p.rerun is None for p in positions if p.role != "Sample")
     p53 = next(p for p in positions if p.row == 53)
     assert p53.rerun_why == "N below linearity range; no C peak; N peak only 0.7x the blank"
     assert all(p.rerun_mass is None for p in positions)          # its samples carry no mass
-    assert F["rerun"]["counts"] == {"N": 1, "C": 1, "N and C": 8, "Check": 4}
+    assert F["rerun"]["counts"] == {"N": 1, "C": 1, "N and C": 6, "Check": 4}
     assert F["rerun"]["run_level_text"] == "none found"
+    # 1.4.7: peaks above the linearity range, all under 50,000 mV, are flagged and not marked
+    p23, p29, p33 = (next(p for p in positions if p.row == r) for r in (23, 29, 33))
+    assert "N above linearity range" in p23.flags and p23.rerun_why == ("C below linearity range; "
+                                                                        "ran before the background settled")
+    assert "C above linearity range" in p29.flags and p29.rerun is None
+    assert {"N above linearity range", "C above linearity range"} <= set(p33.flags) and p33.rerun is None
     # δ outside the anchor range is a flag, never a mark on its own
     outside = [p for p in positions if p.role == "Sample" and p.flags == ["d15N outside anchor range"]]
     assert outside and all(p.rerun is None for p in outside)
@@ -86,6 +95,39 @@ def test_a_reference_pulse_off_marks_its_element(tmp_path):
     assert next(p for p in quiet if p.row == 20).rerun == "Check"
 
 
+def test_large_peaks_are_marked_only_at_the_instrument_limit():
+    old, _ = process(parse_export(RUN), config_from_dict({"max_amplitude_mv": None}))
+    assert {p.row: p.rerun for p in old if p.row in (23, 29, 33)} == {23: "N and C", 29: "C", 33: "N and C"}
+    # CO2 at position 29 reads 10,125 mV and at 33 12,392 mV; N2 at 29 reads 3,000 mV, inside the range
+    positions, F = process(parse_export(RUN), config_from_dict({"max_amplitude_mv": 10000}))
+    by = {p.row: p for p in positions}
+    assert by[29].rerun == "C" and by[29].rerun_why == "CO2 peak at or above 10000 mV"
+    assert by[33].rerun == "C" and by[33].rerun_why == "CO2 peak at or above 10000 mV"
+    at, _ = process(parse_export(RUN), config_from_dict({"max_amplitude_mv": 3000}))
+    p29 = next(p for p in at if p.row == 29)
+    assert p29.ampl_n == 3000.0 and "N2 peak at or above 3000 mV" in p29.rerun_why      # at the limit counts
+    assert p29.rerun == "N and C" and "N above linearity range" not in p29.rerun_why
+    assert all(p.rerun is None or "linearity range" not in p.rerun_why
+               or "below linearity range" in p.rerun_why for p in at)
+
+
+def test_a_1sigma_above_the_limit_marks_its_element():
+    positions, _ = process(parse_export(RUN), Config())
+    samples = [p for p in positions if p.role == "Sample"]
+    assert max(p.u_d15n for p in samples if p.u_d15n is not None) < 0.5        # 0.299 at most
+    assert not any("1σ(" in (p.rerun_why or "") for p in samples)
+    tight, _ = process(parse_export(RUN), config_from_dict({"rerun_max_1sigma": 0.25}))
+    for p in (q for q in tight if q.role == "Sample"):
+        over_n = p.u_d15n is not None and p.u_d15n > 0.25
+        assert (f"1σ(d15N) {p.u_d15n:.2f} above 0.25" in (p.rerun_why or "")) == over_n, p.row
+        if over_n:
+            assert p.rerun in ("N", "N and C")
+    assert sum(1 for p in tight if p.rerun_why and "1σ(d15N)" in p.rerun_why) > 0
+    off, _ = process(parse_export(RUN), config_from_dict({"rerun_max_1sigma": None, "max_amplitude_mv": None}))
+    old = {p.row: (p.rerun, p.rerun_why) for p in off}
+    assert old[29] == ("C", "C above linearity range")
+
+
 def test_mass_window_by_hand():
     class P:
         area_n, amount = 20.0, 0.5
@@ -97,7 +139,8 @@ def test_mass_window_by_hand():
 
 def test_suggested_mass_from_the_linearity_range(tmp_path):
     weighed = variant(tmp_path, "mass", masses=True)
-    positions, F = process(parse_export(weighed), Config())
+    # the rule before 1.4.7, under which a peak above the linearity range is marked
+    positions, F = process(parse_export(weighed), config_from_dict({"max_amplitude_mv": None}))
     L, mult = F["size_limits"], Config().min_blank_multiple
 
     def window(p, el):
@@ -139,12 +182,15 @@ def test_results_table_carries_the_mark_after_flags():
 
 def test_configuration_round_trip_keeps_the_new_settings():
     assert Config().ref_pulse_off_sd == 4.0 and Config().ref_gas_sd_limit == 0.1
-    cfg = config_from_dict({"ref_pulse_off_sd": 3.0, "ref_gas_sd_limit": None})
+    assert Config().max_amplitude_mv == 50000.0 and Config().rerun_max_1sigma == 0.5
+    cfg = config_from_dict({"ref_pulse_off_sd": 3.0, "ref_gas_sd_limit": None,
+                            "max_amplitude_mv": None, "rerun_max_1sigma": 0.3})
     back = config_from_dict(config_to_dict(cfg))
     assert back.ref_pulse_off_sd == 3.0 and back.ref_gas_sd_limit is None
+    assert back.max_amplitude_mv is None and back.rerun_max_1sigma == 0.3
 
 
-CASES = ("default", "masses", "pulses", "off", "run_level", "check")
+CASES = ("default", "masses", "pulses", "off", "run_level", "check", "limits", "before_147")
 
 
 @pytest.fixture(scope="module")
@@ -162,6 +208,11 @@ def computed(tmp_path_factory):
         "run_level": (variant(folder, "run_level", masses=True),
                       config_from_dict({"coverage_k": 0.5, "ref_gas_sd_limit": 0.05, "ref_pulse_off_sd": 2.0})),
         "check": (RUN, check_config(0.05)),
+        # 1.4.7: a low amplitude limit and a tight 1σ, so both rules mark samples; then both switched off
+        "limits": (variant(folder, "limits", masses=True),
+                   config_from_dict({"max_amplitude_mv": 3000, "rerun_max_1sigma": 0.25})),
+        "before_147": (variant(folder, "before_147", masses=True),
+                       config_from_dict({"max_amplitude_mv": None, "rerun_max_1sigma": None})),
     }
     files = []
     for name, (export, cfg) in cases.items():

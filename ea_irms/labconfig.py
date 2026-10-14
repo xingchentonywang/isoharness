@@ -83,6 +83,14 @@ SETTINGS = [
      "number_or_empty", "Marks that sample for a rerun of that element. Empty: no check."),
     ("ref_gas_sd_limit", "Reference-gas SD that is a problem for the whole run (permil)", "number_or_empty",
      "The FIRMS guide gives 0.1 permil for its zero-enrichment test (section 4.3.2). Empty: no check."),
+    (None, "Rerun marks (1.4.7)", None, None),
+    ("max_amplitude_mv", "Largest peak amplitude the instrument measures (mV)", "number_or_empty",
+     "A peak above the linearity range is marked for a rerun only at or above this amplitude, and a peak at or "
+     "above it is marked whatever the range. Empty: every peak above the linearity range is marked, as before "
+     "1.4.7."),
+    ("rerun_max_1sigma", "Largest 1σ of the final d15N or d13C before a rerun (permil)", "number_or_empty",
+     "A sample whose final d15N or d13C has a 1σ above this is marked for a rerun of that element. The 1σ leaves "
+     "out the blank, linearity, and drift corrections. Empty: no check."),
     (None, "Uncertainty", None, None),
     ("u_sample_n", "Sample repeatability, d15N (1σ, permil)", "number_or_empty",
      "Empty: the pooled scatter of the anchor replicates in each run."),

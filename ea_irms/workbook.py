@@ -21,7 +21,7 @@ from openpyxl.formatting.rule import FormulaRule
 from .parse import _read_rows
 from .pipeline import DEFAULT_STANDARDS, MAX_STANDARDS, MIN_OUTLIER_MONITORS, Config
 
-VERSION = "1.4.6"
+VERSION = "1.4.7"
 NSTD = MAX_STANDARDS      # rows in the Setup standards table (16 from 1.4.2, 13 before)
 
 
@@ -244,15 +244,18 @@ def build_workbook(export_path, out_path, config: Config | None = None,
               'reports the position without a carbon value, and says so in Flags. Leave B39 empty to switch the '
               'check off.')
     r += 1
-    r = rd(r, 'Rerun marks (1.4.4)', F_H1)
-    r = rd(r, 'A sample is marked only for what measuring it again can fix: the amount, the peak, or the state of '
-              'the instrument at its position, never its value. It is marked for a rerun of N, C, or both when its '
-              'peak lies outside the range of the linearity standards (Fits rows 81 to 104) or under the blank '
-              'multiple in Setup B25; when it follows an oversized sample and its background rose (Setup B28); or '
-              'when the reference pulse at its position is off, further than Setup B67 robust SDs from the median '
-              'of the run\'s pulses. It is marked for a check when it ran before the background settled or has the '
-              'peak of only one element. A value outside the anchors\' range is not marked, because a rerun would '
-              'extrapolate the same way; the fix is an anchor that brackets it.')
+    r = rd(r, 'Rerun marks (1.4.4, 1.4.7)', F_H1)
+    r = rd(r, 'A sample is marked for what measuring it again can fix: the amount, the peak, or the state of '
+              'the instrument at its position. It is marked for a rerun of N, C, or both when its peak lies below '
+              'the range of the linearity standards (Fits rows 81 to 104) or under the blank multiple in Setup B25; '
+              'when its peak reaches the instrument\'s largest amplitude, Setup B69 (1.4.7; a peak above the '
+              'linearity range but under it is not marked, and with B69 empty every peak above the range is, as '
+              'before 1.4.7); when it follows an oversized sample and its background rose (Setup B28); when the '
+              'reference pulse at its position is off, further than Setup B67 robust SDs from the median of the '
+              'run\'s pulses; or when the 1σ of its final d15N or d13C is above Setup B70 (1.4.7), which a run '
+              'with better anchors can fix. It is marked for a check when it ran before the background settled or '
+              'has the peak of only one element. A value outside the anchors\' range is not marked, because a '
+              'rerun would extrapolate the same way; the fix is an anchor that brackets it.')
     r = rd(r, 'The suggested mass puts each peak inside the linearity range and above the blank multiple, read from '
               'this analysis\'s own peak area per mg. When no one mass does that for both N and C, the two '
               'elements need two capsules and both ranges are given. Problems of the whole run, a check standard '
@@ -512,6 +515,18 @@ def build_workbook(export_path, out_path, config: Config | None = None,
                        'pulses in its zero-enrichment test (section 4.3.2). At or above this the Rerun sheet says '
                        'so once. Leave empty to switch it off.', F_NOTE, 7)
     S_POFF, S_RGSD = f'Setup!$B${SLAST+7}', f'Setup!$B${SLAST+8}'
+    # 1.4.7 (Tony, 2026-10-13): the instrument's largest amplitude, and the largest 1σ before a rerun
+    lab(st, SLAST + 9, 'Largest peak amplitude the instrument measures (mV)', F_SM)
+    inp(st, SLAST + 9, 2, '' if _CFG.max_amplitude_mv is None else _CFG.max_amplitude_mv, '0')
+    lab(st, SLAST + 9, 'A peak above the linearity range is marked for a rerun only at or above this amplitude, and '
+                       'a peak at or above it is marked whatever the range (1.4.7). Leave empty to mark every peak '
+                       'above the linearity range, as before 1.4.7.', F_NOTE, 7)
+    lab(st, SLAST + 10, 'Largest 1σ of the final d15N or d13C before a rerun (permil)', F_SM)
+    inp(st, SLAST + 10, 2, '' if _CFG.rerun_max_1sigma is None else _CFG.rerun_max_1sigma, '0.00')
+    lab(st, SLAST + 10, 'A sample whose final d15N or d13C has a 1σ above this is marked for a rerun of that '
+                        'element (1.4.7). The 1σ leaves out the blank, linearity, and drift corrections. Leave '
+                        'empty to switch it off.', F_NOTE, 7)
+    S_AMAX, S_USIG = f'Setup!$B${SLAST+9}', f'Setup!$B${SLAST+10}'
 
     S_BLANK, S_LIN, S_DRIFT, S_DM = 'Setup!$B$10', 'Setup!$B$11', 'Setup!$B$12', 'Setup!$B$13'
     S_LINC = 'IF(Setup!$B$18<>"",Setup!$B$18,Setup!$B$11)'   # carbon switch, empty = follow B11 (1.4.1)
@@ -632,6 +647,12 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     first_rerun_col = first_unc_col + len(UNC_NAMES)
     RX = {name: gcl(first_rerun_col + k) for k, name in enumerate(RERUN_NAMES)}
     COLS += [(name, RX[name], 12 if name in ROUT else 7, 'o' if name in ROUT else 'h') for name in RERUN_NAMES]
+    # 1.4.7: Tony's two rules, after everything else so no earlier column moves: a peak at or above the
+    # instrument's largest amplitude (Setup B69), a 1σ above Setup B70, and the size flags that count.
+    RERUN2_NAMES = ['fl amplN', 'fl amplC', 'fl uN', 'fl uC', 'why sizeN', 'why sizeC']
+    first_rerun2_col = first_rerun_col + len(RERUN_NAMES)
+    RX.update({name: gcl(first_rerun2_col + k) for k, name in enumerate(RERUN2_NAMES)})
+    COLS += [(name, RX[name], 7, 'h') for name in RERUN2_NAMES]
     GROUPS = [('A','D','identification'),('E','G','mass'),('H','K','peak lookup'),('L','R','as measured'),
               ('S','V','from the standards table'),('W','AA','nitrogen corrections'),
               ('AB','AF','carbon corrections'),('AG','AL','elemental content'),
@@ -647,7 +668,8 @@ def build_workbook(export_path, out_path, config: Config | None = None,
               (UX['inU N'],UX['inU CN'],'within k x 1σ, for QC'),
               (RX['pdev N'],RX['rr check'],'rerun marks: helpers, ignore'),
               (RX['rerun'],RX['suggested mass'],'rerun marks'),
-              (RX['rerun rank'],RX['rerun rank'],'helper')]
+              (RX['rerun rank'],RX['rerun rank'],'helper'),
+              (RX['fl amplN'],RX['why sizeC'],'rerun marks (1.4.7): helpers, ignore')]
     for a, b, t in GROUPS:
         wk.cell(4, wk[a + '1'].column, t).font = F_GRP
         wk.cell(4, wk[a + '1'].column).fill = FILL_GRP
@@ -1067,6 +1089,16 @@ def build_workbook(export_path, out_path, config: Config | None = None,
         for el, name in (('N', 'N2'), ('C', 'CO2')):
             f[RX[f'fl pulse{el}']] = (f'=IF($B{i}="","",IF({R_(f"poff {el}")}=1,"{name} reference pulse off by "'
                                       f'&TEXT({R_(f"pdev {el}")},"+0.00;-0.00")&"; ",""))')
+        for el, gas, area, ampl in (('N', 'N2', 'L', 'M'), ('C', 'CO2', 'P', 'Q')):
+            f[RX[f'fl ampl{el}']] = (f'=IF($B{i}="","",IF(NOT(ISNUMBER({S_AMAX})),"",IF(${area}{i}="","",'
+                                     f'IF(NOT(ISNUMBER(${ampl}{i})),"",IF(${ampl}{i}>={S_AMAX},'
+                                     f'"{gas} peak at or above "&TEXT({S_AMAX},"0")&" mV; ","")))))')
+        for el, name, ucol in (('N', 'd15N', 'CL'), ('C', 'd13C', 'CN')):
+            f[RX[f'fl u{el}']] = (f'=IF($B{i}="","",IF(NOT(ISNUMBER({S_USIG})),"",IF(NOT(ISNUMBER(${ucol}{i})),"",'
+                                  f'IF(${ucol}{i}>{S_USIG},"1σ({name}) "&TEXT(${ucol}{i},"0.00")&" above "'
+                                  f'&TEXT({S_USIG},"0.00")&"; ",""))))')
+            f[RX[f'why size{el}']] = (f'=IF(OR(LEFT({R_(f"fl size{el}")},7)="{el} below",NOT(ISNUMBER({S_AMAX}))),'
+                                      f'{R_(f"fl size{el}")},"")')
         f[RX['chk off']] = f'=IF(AND($B{i}<>"",OR({R_("fl checkN")}<>"",{R_("fl checkC")}<>"")),1,0)'
         if n == 0:
             f[RX['chk list']] = f'=IF({R_("chk off")}=1,$A{i}&"","")'
@@ -1082,10 +1114,10 @@ def build_workbook(export_path, out_path, config: Config | None = None,
             f[RX[f'hi {el}']] = f'=IF({R_(f"lo {el}")}="","",Fits!{hia}/{per})'
         f[RX['mass lo']] = f'=IF(AND({R_("lo N")}="",{R_("lo C")}=""),"",MAX({R_("lo N")},{R_("lo C")}))'
         f[RX['mass hi']] = f'=IF(AND({R_("hi N")}="",{R_("hi C")}=""),"",MIN({R_("hi N")},{R_("hi C")}))'
-        f[RX['rr N']] = (f'=IF($D{i}<>"Sample",0,IF(OR({R_("fl sizeN")}<>"",{R_("fl blankN")}<>"",'
-                         f'{R_("fl pulseN")}<>""),1,0))')
-        f[RX['rr C']] = (f'=IF($D{i}<>"Sample",0,IF(OR({R_("fl sizeC")}<>"",{R_("fl blankC")}<>"",'
-                         f'{R_("fl pulseC")}<>""),1,0))')
+        f[RX['rr N']] = (f'=IF($D{i}<>"Sample",0,IF(OR({R_("why sizeN")}<>"",{R_("fl blankN")}<>"",'
+                         f'{R_("fl pulseN")}<>"",{R_("fl amplN")}<>"",{R_("fl uN")}<>""),1,0))')
+        f[RX['rr C']] = (f'=IF($D{i}<>"Sample",0,IF(OR({R_("why sizeC")}<>"",{R_("fl blankC")}<>"",'
+                         f'{R_("fl pulseC")}<>"",{R_("fl amplC")}<>"",{R_("fl uC")}<>""),1,0))')
         f[RX['rr both']] = (f'=IF($D{i}<>"Sample",0,IF(OR({R_("fl carry")}<>"",'
                             f'AND({R_("fl noN")}<>"",{R_("fl noC")}<>"")),1,0))')
         f[RX['rr check']] = (f'=IF($D{i}<>"Sample",0,IF(OR({R_("fl settle")}<>"",'
@@ -1093,8 +1125,9 @@ def build_workbook(export_path, out_path, config: Config | None = None,
         f[RX['rerun']] = (f'=IF($D{i}<>"Sample","",IF(OR({R_("rr both")}=1,AND({R_("rr N")}=1,{R_("rr C")}=1)),'
                           f'"N and C",IF({R_("rr N")}=1,"N",IF({R_("rr C")}=1,"C",IF({R_("rr check")}=1,"Check","")))))')
         f[RX['why raw']] = (f'=IF({R_("rerun")}="","",' + '&'.join(
-            R_(k) for k in ('fl noN', 'fl sizeN', 'fl noC', 'fl rejC', 'fl sizeC', 'fl blankN', 'fl blankC',
-                            'fl settle', 'fl carry', 'fl pulseN', 'fl pulseC')) + ')')
+            R_(k) for k in ('fl noN', 'why sizeN', 'fl noC', 'fl rejC', 'why sizeC', 'fl blankN', 'fl blankC',
+                            'fl settle', 'fl carry', 'fl pulseN', 'fl pulseC',
+                            'fl amplN', 'fl amplC', 'fl uN', 'fl uC')) + ')')
         f[RX['why']] = f'=IF({R_("why raw")}="","",LEFT({R_("why raw")},LEN({R_("why raw")})-2))'
         f[RX['suggested mass']] = (
             f'=IF(OR({R_("rerun")}="",{R_("rerun")}="Check",{R_("mass lo")}=""),"",'
@@ -1596,10 +1629,11 @@ def build_workbook(export_path, out_path, config: Config | None = None,
         rr.column_dimensions[col].width = w
     rr.cell(1, 1, 'Rerun').font = F_TITLE
     rr.cell(2, 1, 'Samples to measure again (Rerun: N, C, or N and C) and to check first, in the order they ran. '
-                  'A mark reads only what a rerun can fix; README, Rerun marks, says which flags count. The '
-                  'suggested mass puts the peaks inside the linearity range, from this analysis\'s area per mg.'
+                  'A mark reads what a rerun can fix; README, Rerun marks, says which flags count (from 1.4.7 a '
+                  'peak above the linearity range only at Setup B69, and a 1σ above Setup B70). The suggested mass '
+                  'puts the peaks inside the linearity range, from this analysis\'s area per mg.'
                   ).font = F_NOTE
-    rr.merge_cells('A2:G2'); rr.row_dimensions[2].height = 30
+    rr.merge_cells("A2:G2"); rr.row_dimensions[2].height = 44
     rr['A2'].alignment = Alignment(wrap_text=True, vertical='top')
     rr.cell(4, 1, 'Problems of the whole run').font = F_H1
     rr.cell(5, 1, '=Fits!$B$356').font = F_SM
