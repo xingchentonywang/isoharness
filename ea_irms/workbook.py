@@ -24,7 +24,7 @@ from .cells import as_text, put
 from .parse import _read_rows, parse_export
 from .pipeline import DEFAULT_STANDARDS, MAX_STANDARDS, MIN_OUTLIER_MONITORS, Config, assign_roles
 
-VERSION = "1.4.10"
+VERSION = "1.4.11"
 NSTD = MAX_STANDARDS      # rows in the Setup standards table (16 from 1.4.2, 13 before)
 # 1.4.10: the largest export the workbook is built for. Before 1.4.10 it held positions 1 to 120 and
 # 1,000 peak records and left out the rest without a word; it now grows to fit, up to these.

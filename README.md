@@ -1,6 +1,6 @@
 # isoharness
 
-isoharness is a website for stable isotope data reduction, one instrument at a time. EA-IRMS comes first: it corrects Thermo EA-IRMS carbon and nitrogen runs, with numbers from ea_irms, the Python engine behind the lab's EA-IRMS correction workbook, which this repository carries at version 1.4.10. GasBench N₂O (nitrate by the denitrifier method, and organic nitrogen after persulfate oxidation) and GasBench carbonate are planned.
+isoharness is a website for stable isotope data reduction, one instrument at a time. EA-IRMS comes first: it corrects Thermo EA-IRMS carbon and nitrogen runs, with numbers from ea_irms, the Python engine behind the lab's EA-IRMS correction workbook, which this repository carries at version 1.4.11. GasBench N₂O (nitrate by the denitrifier method, and organic nitrogen after persulfate oxidation) and GasBench carbonate are planned.
 
 ## Where it stands
 
@@ -10,8 +10,8 @@ Phase one put the engine behind a web API, LibreOffice in the container image to
 
 | Path | What it is |
 | --- | --- |
-| `ea_irms/` | The engine, 1.4.10 (parsing, the corrections, the workbook, and the Postgres store that phase three will use); 1.4.3 adds the uncertainty of %N, %C, and C:N and puts each value's uncertainty beside it on the Results sheet, 1.4.4 marks the samples to measure again, 1.4.5 reports every uncertainty as 1σ, 1.4.6 reads and writes the lab configuration as an Excel file, 1.4.7 changes two rerun rules, 1.4.8 reads a sample sheet and compares replicates (`metadata.py`), 1.4.9 rewords the text of the workbook and the two templates, and 1.4.10 fixes what the review of 2026-10-14 found (`xlsxguard.py` and `cells.py` are new) |
-| `isoharness/` | The web API (FastAPI), 0.4.1; 0.2.0 adds several runs at once (`batch.py`, the combined results), 0.3.0 the run information and the sample sheet, 0.4.0 the explanations in each step of the page, and 0.4.1 the fixes from the review of 2026-10-14 |
+| `ea_irms/` | The engine, 1.4.11 (parsing, the corrections, the workbook, and the Postgres store that phase three will use); 1.4.3 adds the uncertainty of %N, %C, and C:N and puts each value's uncertainty beside it on the Results sheet, 1.4.4 marks the samples to measure again, 1.4.5 reports every uncertainty as 1σ, 1.4.6 reads and writes the lab configuration as an Excel file, 1.4.7 changes two rerun rules, 1.4.8 reads a sample sheet and compares replicates (`metadata.py`), 1.4.9 rewords the text of the workbook and the two templates, 1.4.10 fixes what the review of 2026-10-14 found (`xlsxguard.py` and `cells.py` are new), and 1.4.11 reads each position's peaks in Peak Nr order |
+| `isoharness/` | The web API (FastAPI), 0.4.2; 0.2.0 adds several runs at once (`batch.py`, the combined results), 0.3.0 the run information and the sample sheet, 0.4.0 the explanations in each step of the page, 0.4.1 the fixes from the review of 2026-10-14, and 0.4.2 serves ea_irms 1.4.11 |
 | `web/` | The pages the API serves: `index.html`, the home page at `/`, which lists the instruments; `ea-irms.html`, the EA-IRMS page at `/ea-irms` (the approved prototype's markup, as a template); `dc.js` (draws the template), `logic.js` (the views), and Preact 10.29.8 in `vendor/preact/` with its MIT license |
 | `port/` | The preview port (the steps that depend on a user's choices, in JavaScript) and its test |
 | `scripts/` | `port_cases.py` (engine outputs for the port test), `smoke.py` (checks a running service), `e2e_web.py` (the page in Chromium against a service it starts), `reference_check.py` (the engine check on reference runs kept outside this repository) |
@@ -111,6 +111,10 @@ The page:
 - R-17. With a run on the page, the browser asks before the page is left or reloaded, since the runs live only in that tab.
 - R-18. A message that something failed is an alert, and it sits in view at the bottom of the screen on a phone.
 - R-19. In Windows high-contrast mode the chosen setting of each switch and the sequence strip keep their marks.
+
+## Peaks in Peak Nr order (isoharness 0.4.2, ea_irms 1.4.11)
+
+An export can list each position's peaks from the last to the first, with the TCD rows after them, and a run tested on 2026-10-14 did so at every position. Up to 1.4.10 the engine read a position's peaks in the order of the file, so in such an export it took an undesignated reference pulse for the sample N2 peak and another for the sample CO2 peak. From 1.4.11 each position's peaks are put in Peak Nr order before they are identified, and they are identified as before, by the Is Ref flag and by which amplitude column is filled; Peak Nr sets the order and never says which peak is which. The workbook needed no change, because its formulas find each peak by its Peak Nr value (the Key column on Raw); its Raw sheet keeps the records in the export's order. `tests/test_peak_order.py` writes the 2026-09-15 run with each position's records reversed, and shuffled with five seeds, and holds the parser, the corrections, `/api/process`, and the workbook to the run as exported; with the 1.4.10 parser, 9 of its 11 tests fail. On 15 other exports, whose peaks run in Peak Nr order, 1.4.11 reads the same peaks as 1.4.10, so every value is unchanged.
 
 ## Uncertainty of %N, %C, and C:N (ea_irms 1.4.3)
 

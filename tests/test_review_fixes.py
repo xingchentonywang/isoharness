@@ -29,7 +29,7 @@ from ea_irms.metadata import read_sample_sheet                                  
 from ea_irms.parse import ExportFormatError, parse_export                                          # noqa: E402
 from ea_irms.pipeline import (DEFAULT_STANDARDS, MONITORS, Config, _xl, config_from_dict,          # noqa: E402
                               config_to_dict, process, run_key, scope_to_run)
-from ea_irms.workbook import MAX_POSITION, MAX_RECORDS, bake_values, build_workbook               # noqa: E402
+from ea_irms.workbook import MAX_POSITION, MAX_RECORDS, VERSION, bake_values, build_workbook      # noqa: E402
 from ea_irms.xlsxguard import MAX_READ_ROWS, UploadTooLarge, check_xlsx                            # noqa: E402
 from isoharness.app import app, limiter                                                           # noqa: E402
 from isoharness.serialize import results_csv                                                      # noqa: E402
@@ -250,7 +250,7 @@ def test_r07_switches_in_any_case_and_positions_as_text():
                                    "exclude_drift_n": "40 47", "exclude_drift_c": "40; 47", "colour": 1})
     assert cfg.linearity_correction == "Off" and cfg.drift_model == "Background"
     assert cfg.exclude_drift_n == [40, 47] and cfg.exclude_drift_c == [40, 47]
-    assert notes == ["colour is not a setting ea_irms 1.4.10 reads, so it was left out"]
+    assert notes == [f"colour is not a setting ea_irms {VERSION} reads, so it was left out"]
     assert config_from_dict({"blank_correction": "on"}).blank_correction == "On"
     for bad, word in (({"drift_model": "Linear"}, "drift_model is 'Linear'"),
                       ({"exclude_drift_n": "40, x"}, "exclude_drift_n is '40, x'"),
@@ -387,7 +387,7 @@ def test_r08_file_downloads_carry_every_note():
     cfg = json.dumps(dict(config_to_dict(Config(exclude_drift_c=[47], run_file="other.csv")), colour="red"))
     r = post("/api/results.csv", config=cfg)
     notes = json.loads(r.headers["x-isoharness-config-notes"])
-    assert notes[0] == "colour is not a setting ea_irms 1.4.10 reads, so it was left out" and len(notes) == 2
+    assert notes[0] == f"colour is not a setting ea_irms {VERSION} reads, so it was left out" and len(notes) == 2
     files = [("files", ("20260915_raw.csv", RUN.read_bytes())), ("files", ("copy.csv", RUN.read_bytes()))]
     one = json.dumps(config_to_dict(Config(exclude_drift_c=[47])))          # names no run, for both at once
     for path in ("/api/batch/results.csv", "/api/batch/results.xlsx"):

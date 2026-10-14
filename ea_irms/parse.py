@@ -4,6 +4,13 @@ Peak position in the export is not a reliable identifier. A position with no
 sample peak leaves the usual index pointing at a reference-gas peak, and the
 2026-09-15 run has five of those. Everything here keys on the ``Is Ref _`` flag
 and on which amplitude column is populated.
+
+From 1.4.11 each position's peaks are first put in Peak Nr order, because an
+export can list a position's peaks from the last to the first, and read in file
+order such an export's reference pulses were taken for the sample peaks. Peak Nr
+sets the order of the peaks and never says which peak is which. The workbook's
+formulas find each peak by its Peak Nr value (the Key column on Raw), whatever
+the order of the rows, so the workbook needed no change.
 """
 from __future__ import annotations
 
@@ -162,7 +169,11 @@ def parse_export(path: str | Path) -> list[Position]:
 
     out: list[Position] = []
     for row, records in grouped.items():
-        peaks = [r for r in records if _num(cell(r, "Peak Nr")) is not None]
+        # 1.4.11: in Peak Nr order, whatever order the export lists them in (the sort is stable, so
+        # two peaks with one Peak Nr keep the export's order). Records without a Peak Nr, the TCD rows,
+        # are not peaks here; the identifier and amount still come from the position's first record.
+        peaks = sorted((r for r in records if _num(cell(r, "Peak Nr")) is not None),
+                       key=lambda r: _num(cell(r, "Peak Nr")))
         mass28 = [r for r in peaks if _num(cell(r, "Ampl  28")) is not None]
         mass44 = [r for r in peaks if _num(cell(r, "Ampl  44")) is not None]
         is_ref = lambda r: _num(cell(r, "Is Ref _")) == 1.0   # noqa: E731
