@@ -133,8 +133,21 @@ def test_mass_window_by_hand():
         area_n, amount = 20.0, 0.5
     assert _mass_window(P, "n", 10.0, 50.0) == (0.25, 1.25)
     assert _mass_window(P, "n", 60.0, 50.0) is None              # no mass reaches the range
+    # 1.4.10: the yield above the blank, (20 - 4) / 0.5 = 32 per mg, sets the masses
+    assert _mass_window(P, "n", 10.0, 50.0, 4.0) == ((10.0 - 4.0) / 32.0, (50.0 - 4.0) / 32.0)
+    assert _mass_window(P, "n", 10.0, 50.0, 20.0) is None        # a peak no larger than the blank
     P.amount = None
     assert _mass_window(P, "n", 10.0, 50.0) is None
+
+
+def test_suggested_mass_reads_the_yield_above_the_blank():
+    """Finding R-10 of the 2026-10-14 review: PanamaSids2 position 25, 1.808 Vs of N2 from 18.642 mg over a
+    blank of 1.7268 Vs, needs about 1,728 mg to reach 9.253 Vs, where the area per mg without the blank
+    suggested 95.4 mg; and a mass above every capsule of the run says so."""
+    class P:
+        area_n, amount = 1.808, 18.642
+    lo, hi = _mass_window(P, "n", 9.253, 20.0, 1.7268)
+    assert abs(lo - (9.253 - 1.7268) / ((1.808 - 1.7268) / 18.642)) < 1e-9 and 1727 < lo < 1729
 
 
 def test_suggested_mass_from_the_linearity_range(tmp_path):
@@ -144,9 +157,10 @@ def test_suggested_mass_from_the_linearity_range(tmp_path):
     L, mult = F["size_limits"], Config().min_blank_multiple
 
     def window(p, el):
-        per_mg = getattr(p, f"area_{el}") / p.amount
-        lo = max(L[f"min_{el}"], mult * F[f"blank_{el}"]["area"])
-        return lo / per_mg, L[f"max_{el}"] / per_mg
+        ab = F[f"blank_{el}"]["area"]                  # 1.4.10: the yield above the blank
+        per_mg = (getattr(p, f"area_{el}") - ab) / p.amount
+        lo = max(L[f"min_{el}"], mult * ab)
+        return (lo - ab) / per_mg, (L[f"max_{el}"] - ab) / per_mg
 
     p29 = next(p for p in positions if p.row == 29)                 # C above the range
     (ln, hn), (lc, hc) = window(p29, "n"), window(p29, "c")

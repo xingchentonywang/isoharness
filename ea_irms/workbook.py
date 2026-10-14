@@ -20,14 +20,24 @@ from openpyxl.formatting.rule import FormulaRule
 
 from .metadata import (NOT_MATCHED, REPLICATE_COLUMN, RUN_FIELDS, clean_run_info, critical_range_factor,
                        excel_trim, match_positions, match_summary, output_columns, output_header, summary_text)
+from .cells import as_text, put
 from .parse import _read_rows, parse_export
 from .pipeline import DEFAULT_STANDARDS, MAX_STANDARDS, MIN_OUTLIER_MONITORS, Config, assign_roles
 
-VERSION = "1.4.9"
+VERSION = "1.4.10"
 NSTD = MAX_STANDARDS      # rows in the Setup standards table (16 from 1.4.2, 13 before)
+# 1.4.10: the largest export the workbook is built for. Before 1.4.10 it held positions 1 to 120 and
+# 1,000 peak records and left out the rest without a word; it now grows to fit, up to these.
+MAX_POSITION = 400
+MAX_RECORDS = 4000
 
 
-def bake_values(path) -> bool:
+# 1.4.10: how long LibreOffice may take over one workbook, in seconds (600 before). The workbooks of
+# the nine reference runs took 4 to 9 s, and one of 400 positions and 3,474 peak records 14 s.
+BAKE_TIMEOUT_S = 120.0
+
+
+def bake_values(path, timeout: float | None = None) -> bool:
     """Have LibreOffice compute every formula and store the results in the file.
 
     openpyxl writes formulas without cached values. Excel computes them when it
@@ -35,9 +45,13 @@ def bake_values(path) -> bool:
     that does not calculate shows every formula cell empty. When LibreOffice is
     on the PATH this recalculates the workbook in place, keeping every formula,
     chart, validation and format, so the numbers show anywhere. Returns whether
-    it ran.
+    it ran. From 1.4.10 LibreOffice runs in a process group of its own, and the
+    whole group is stopped after ``timeout`` seconds (BAKE_TIMEOUT_S), so no
+    soffice.bin is left holding the profile.
     """
+    import os
     import shutil
+    import signal
     import subprocess
     import tempfile
     soffice = shutil.which("soffice") or shutil.which("libreoffice")
@@ -46,10 +60,21 @@ def bake_values(path) -> bool:
     path = Path(path)
     with tempfile.TemporaryDirectory() as tmp:
         try:
-            subprocess.run([soffice, "--headless", "--calc", "--convert-to", "xlsx",
-                            "--outdir", tmp, str(path)],
-                           check=True, capture_output=True, timeout=600)
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+            proc = subprocess.Popen([soffice, "--headless", "--calc", "--convert-to", "xlsx",
+                                     "--outdir", tmp, str(path)],
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        except OSError:
+            return False
+        try:
+            proc.communicate(timeout=BAKE_TIMEOUT_S if timeout is None else timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            proc.communicate()
+            return False
+        if proc.returncode != 0:
             return False
         produced = Path(tmp) / path.name
         if not produced.exists() or produced.stat().st_size == 0:
@@ -61,7 +86,7 @@ def bake_values(path) -> bool:
 def build_workbook(export_path, out_path, config: Config | None = None,
                    run_name: str | None = None, run_date: str | None = None,
                    recalc: bool = False, samples=None, run_info: dict | None = None,
-                   file_name: str | None = None):
+                   file_name: str | None = None, config_notes: list | None = None):
     """Build the workbook from an Isodat export. Returns ``out_path``.
 
     With ``recalc`` the finished file is passed through :func:`bake_values` when
@@ -69,6 +94,8 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     From 1.4.8 ``samples`` (an ea_irms.metadata.SampleSheet) is matched to the run's samples, its
     rows written to a Metadata sheet and after the Results columns, and the replicates it names
     compared on a Replicates sheet; ``run_info`` holds Operator, Instrument, Project, and Notes.
+    From 1.4.10 ``config_notes`` (what ea_irms.pipeline.scope_to_run said about the configuration) is
+    written under the Setup sheet's title.
     """
     config = config or Config()
     if len(config.standards) > NSTD:
@@ -88,9 +115,23 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     _GROUPS = match_positions(_META, samples)
     _MATCH = match_summary(_META, samples)
     _MCOLS = output_columns(samples, [_META])
+    header, records = _read_rows(SRC)
 
-    MAXRAW = 1000          # raw data rows 2..1001
-    R0, NSAMP = 6, 120     # Work data rows 6..125
+    # 1.4.10: the Raw and Work sheets are sized from the export, at least as large as before:
+    # Work has one row per position number from 1, so a run numbered 101 to 156 needs 156.
+    # Up to the limits below; a larger export is refused rather than cut short.
+    if any(q.row < 1 for q in _META):
+        raise ValueError("the export has a position numbered below 1; the workbook numbers its rows "
+                         "from position 1")
+    top_pos = max((q.row for q in _META), default=0)
+    if top_pos > MAX_POSITION:
+        raise ValueError(f"the export's positions run to {top_pos}, and the workbook holds positions 1 "
+                         f"to {MAX_POSITION}")
+    if len(records) > MAX_RECORDS:
+        raise ValueError(f"the export has {len(records)} peak records, and the workbook holds "
+                         f"{MAX_RECORDS}")
+    MAXRAW = max(1000, len(records))     # raw data rows 2..MAXRAW+1 (1001 before 1.4.10)
+    R0, NSAMP = 6, max(120, top_pos)    # Work data rows 6..NSAMP+5 (125 before 1.4.10)
     UT_N, UT_C = 261, 281  # first data row of the two uncertainty tables on Fits (1.4.2: moved to the end)
 
     # ---------------------------------------------------------------- styling
@@ -133,9 +174,11 @@ def build_workbook(export_path, out_path, config: Config | None = None,
               f'%C, %N, C:N, delta-13C, and delta-15N, with every correction visible as a live formula. ea_irms {VERSION}.')
     r += 1
     r = rd(r, 'How to use it', F_H1)
-    r = rd(r, '1.  Open the Raw sheet. Select rows 2 to 1001 and press Delete, then paste your Isodat export '
+    r = rd(r, f'1.  Open the Raw sheet. Select rows 2 to {MAXRAW + 1} and press Delete, then paste your Isodat export '
               'starting in cell A2. Do not paste over row 1, whose headers every other sheet looks for. The sheet '
-              f'comes loaded with the export this workbook was built from ({_FILE}), so delete that first.')
+              f'comes loaded with the export this workbook was built from ({_FILE}), so delete that first. This '
+              f'workbook has room for {MAXRAW} peak records and positions 1 to {NSAMP}; build a new one for an '
+              'export that needs more.')
     r = rd(r, '2.  Open Setup and check the standards table against the certificates and against the names the '
               'sequence used. A material is recognized when the text in column A appears anywhere in Identifier 1, '
               'ignoring case, so "Ace Drift" catches Ace Drift1 through Ace Drift 13. When two rows match, the lower '
@@ -163,7 +206,8 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     r += 1
     r = rd(r, 'What the sheets do', F_H1)
     for a, b in [
-        ('Raw',     'Paste target, unaltered. Two gray helper columns label each peak record by channel and give it a key.'),
+        ('Raw',     'Paste target, unaltered. Gray helper columns label each peak record by channel and give it a key, '
+                    'and, from 1.4.10, pick out each reference pulse Isodat did not designate (columns U to AD).'),
         ('Setup',   'Everything you are meant to change: processing switches, the standards table, and flag thresholds.'),
         ('Work',    'One row per autosampler position. Reads left to right: parsed peaks, then blank, linearity, '
                     'drift, and calibration corrections, then elemental content.'),
@@ -183,7 +227,9 @@ def build_workbook(export_path, out_path, config: Config | None = None,
               'twice a size dependence that the blank already explains.')
     r = rd(r, 'Calibration regresses accepted values on measured values and applies that line as it is. A line '
               'fitted the other way, measured on accepted, has to be inverted, and subtracting its intercept over '
-              'its slope from each value shifts every value by a constant without applying the slope.')
+              'its slope from each value shifts every value by a constant without applying the slope. The line '
+              'needs anchors of two materials with different accepted values; when every anchor carries the same '
+              'value, nothing is calibrated, and the top line of Rerun says why (1.4.10).')
     r = rd(r, 'Drift is fitted twice, against autosampler position, the default, and against the mass-28 background '
               'on the reference peaks, and QC reports the residual scatter of both. Residual scatter cannot decide '
               'between the two, since both were fitted to the same drift standards, so run labeled check standards '
@@ -212,7 +258,9 @@ def build_workbook(export_path, out_path, config: Config | None = None,
               'can miss a slope that is there; set the switch to On to apply it regardless. Setup B11 sets linearity for both '
               'elements unless B18 sets carbon on its own. Each drift monitor is also compared with the line through '
               'the others, and one that sits far off is flagged and kept in the fit; if the capsule was the cause, '
-              'list its position in Setup B16 or B17 and that element\'s fit leaves it out.')
+              'list its position in Setup B16 or B17 and that element\'s fit leaves it out. Those lists, B14, and '
+              'B37 belong to this run: a lab configuration made for another run leaves them empty here, and the '
+              'line under the title of Setup says so (1.4.10).')
     r += 1
     r = rd(r, 'Uncertainty', F_H1)
     r = rd(r, 'Results gives every calibrated value with its uncertainty beside it as one standard deviation, 1σ '
@@ -226,7 +274,9 @@ def build_workbook(export_path, out_path, config: Config | None = None,
               'an in-house standard measures.')
     r = rd(r, 'Elemental content comes from a regression of peak area on micrograms of C or N across every standard '
               'with both a known mass and a known composition. The intercept of that line is the area blank and is '
-              'subtracted, so the k-factor is not forced through the origin.')
+              'subtracted, so the k-factor is not forced through the origin. A peak at or below the intercept holds '
+              'no N or C that the line can detect, so that position has no %N (or %C) and no C:N, and Flags says '
+              'below detection (1.4.10).')
     r = rd(r, 'From 1.4.3 Results also carries the 1σ of %N, %C, and C:N, each from five terms combined in '
               'quadrature (Fits row 300 onwards): the instrument\'s repeatability, from the drift monitors\' measured '
               'over certified ratios by successive differences in position, less the part their own weighing '
@@ -267,21 +317,28 @@ def build_workbook(export_path, out_path, config: Config | None = None,
               'the range of the linearity standards (Fits rows 81 to 104) or under the blank multiple in Setup B25; '
               'when its peak reaches the instrument\'s largest amplitude, Setup B69 (1.4.7; a peak above the '
               'linearity range but under it is not marked, and with B69 empty every peak above the range is, as '
-              'before 1.4.7); when it follows an oversized sample and its background rose (Setup B28); when the '
+              'before 1.4.7); when it follows an oversized sample and its background rose (Setup B28); when a '
               'reference pulse at its position is off, further than Setup B67 robust SDs from the median of the '
-              'run\'s pulses; when the 1σ of its final d15N or d13C is above Setup B70 (1.4.7), which a run '
+              'run\'s pulses (from 1.4.10 every pulse Isodat did not designate counts, two of CO2 at each position '
+              'in a full export); when the 1σ of its final d15N or d13C is above Setup B70 (1.4.7), which a run '
               'with better anchors can fix; or when it has replicates in the run whose range is above the critical '
               'range of ISO 5725-6 (1.4.8, Replicates sheet, switched by Setup B71). It is marked for a check when it '
               'ran before the background settled or has the peak of only one element. A value outside the anchors\' '
               'range is not marked, because a rerun would extrapolate the same way; the fix is an anchor that '
               'brackets it.')
     r = rd(r, 'The suggested mass puts each peak inside the linearity range and above the blank multiple, read from '
-              'this analysis\'s own peak area per mg. When no one mass does that for both N and C, the two '
+              'this analysis\'s own peak area per mg above the blank (from 1.4.10; a peak near the blank\'s size is '
+              'mostly blank, and counting all of it as sample suggested far too little), and it says when it is more '
+              'than the heaviest capsule in this run. When no one mass does that for both N and C, the two '
               'elements need two capsules and both ranges are given. Problems of the whole run, a check standard '
-              'off, anchors outside k x 1σ, or a reference-gas SD at or above Setup B68 (the FIRMS guide\'s '
-              'zero-enrichment limit, section 4.3.2), are listed once at the top of Rerun and not on every sample.')
-    r = rd(r, 'Replicates are the analyses of one sample in this run as the sample sheet names them, that is, the '
-              'samples matched to it with the same name or the same Replicate of. Their range is compared with '
+              'off, anchors outside k x 1σ, a reference-gas SD at or above Setup B68 (the FIRMS guide\'s '
+              'zero-enrichment limit, section 4.3.2), or an element with no calibration (1.4.10), are listed once '
+              'at the top of Rerun and not on every sample.')
+    r = rd(r, 'Replicates are the analyses of one sample in this run as the sample sheet names them: samples matched '
+              'to the sheet with the same name, and samples whose own row gives the same Replicate of. A sample '
+              'matched by an ID its name begins with, such as CI 2-2-H+S by the row CI 2-2-H, takes that row\'s '
+              'columns but not its Replicate of, so it is a replicate only of samples with its own name (1.4.10). '
+              'Their range is compared with '
               'f(n) x s, the critical range of ISO 5725-6 (section 5.2), where s is the repeatability of one analysis '
               'in use times the calibration slope and f(n) is 2.77 for two analyses (the 2.8 of r = 2.8 s, '
               'unrounded), 3.31 for three, and 3.63 for four. When the range is above it, every one of them is '
@@ -323,7 +380,6 @@ def build_workbook(export_path, out_path, config: Config | None = None,
         c.alignment = Alignment(horizontal='center')
     raw.cell(1, 20, 'gray helper columns, computed').font = F_NOTE
 
-    header, records = _read_rows(SRC)
     order = [header.index(h) if h in header else None for h in RAW_HDR]
     for i, record in enumerate(records, start=1):
         for j, src_j in enumerate(order):
@@ -333,7 +389,7 @@ def build_workbook(export_path, out_path, config: Config | None = None,
             if j in (0, 3, 4, 5, 6, 7, 8, 9, 10, 13, 14) and isinstance(v, str):
                 try: v = float(v)                 # csv exports and BGD 28 come as text
                 except ValueError: pass
-            c = raw.cell(i + 1, j + 1, v); c.font = F_SM
+            c = put(raw, i + 1, j + 1, v); c.font = F_SM     # text stays text (1.4.10)
     NRAW_USED = len(records)
     # 1.4.8: the identifier each Work row shows (the first Raw record of its position)
     RAW_ID = {}
@@ -357,15 +413,45 @@ def build_workbook(export_path, out_path, config: Config | None = None,
         for row_ in g_['rows']:
             REP_OF[row_] = g_['group']
 
+    # 1.4.10: every reference pulse Isodat did not designate, one record at a time (columns U to AD):
+    # an unflagged mass-28 peak before the position's last one, and an unflagged mass-44 peak after its
+    # first designated one, with the position for the trend, the distance from the run's median (Fits
+    # B340 and B344) and a chart feed. Before 1.4.10 the checks read only the first such pulse.
+    WKA = f'Work!$A${R0}:$A${R0 + NSAMP - 1}'
+    at = lambda col, i: f'INDEX(Work!${col}${R0}:${col}${R0 + NSAMP - 1},MATCH($A{i},{WKA},0))'   # noqa: E731
+    PULSE_HDR = ['pulse d15N', 'pulse x N', 'pulse d13C', 'pulse x C', 'pulse dev N', 'pulse adev N',
+                 'pulse dev C', 'pulse adev C', 'chart pulse N', 'chart pulse C']
+    for j, h in enumerate(PULSE_HDR, start=21):
+        c = raw.cell(1, j, h); c.font = F_GRP; c.fill = FILL_HELP
+        c.alignment = Alignment(horizontal='center', wrap_text=True)
     for i in range(2, MAXRAW + 2):
         c = raw.cell(i, 18, f'=IF($D{i}="","",IF($F{i}<>"","N",IF($J{i}<>"","C","")))')
         c.font = F_SM; c.fill = FILL_HELP
         c = raw.cell(i, 19, f'=IF($R{i}="","",$A{i}&"|"&$R{i}&"|"&$D{i})')
         c.font = F_SM; c.fill = FILL_HELP
+        hN, fC = at('H', i), at('BU', i)
+        cells = [
+            f'=IF(AND($R{i}="N",$I{i}=0,ISNUMBER($N{i})),IF($D{i}<IFERROR({hN},0),$N{i},""),"")',
+            f'=IF($U{i}="","",$A{i})',
+            f'=IF(AND($R{i}="C",$I{i}=0,ISNUMBER($O{i})),IF(AND(ISNUMBER(IFERROR({fC},"")),'
+            f'IFERROR({fC},9999)<>9999,$D{i}>IFERROR({fC},9999)),$O{i},""),"")',
+            f'=IF($W{i}="","",$A{i})',
+            f'=IF(OR($U{i}="",Fits!$B$340=""),0,$U{i}-Fits!$B$340)',
+            f'=IF(OR($U{i}="",Fits!$B$340=""),"",ABS($U{i}-Fits!$B$340))',
+            f'=IF(OR($W{i}="",Fits!$B$344=""),0,$W{i}-Fits!$B$344)',
+            f'=IF(OR($W{i}="",Fits!$B$344=""),"",ABS($W{i}-Fits!$B$344))',
+            f'=IF($U{i}="",NA(),$U{i})',
+            f'=IF($W{i}="",NA(),$W{i})',
+        ]
+        for j, v in enumerate(cells, start=21):
+            c = raw.cell(i, j, v); c.font = F_SM; c.fill = FILL_HELP
+            if j in (21, 23, 25, 26, 27, 28): c.number_format = '0.000'
     raw.freeze_panes = 'A2'
     for col, w in zip('ABCDEFGHIJKLMNOPQRS',
                       [6,16,11,8,9,9,8,9,8,9,9,11,12,11,11,11,3,9,13]):
         raw.column_dimensions[col].width = w
+    for k in range(21, 31):
+        raw.column_dimensions[gcl(k)].width = 9
 
     # ================================================================ Setup
     st = wb.create_sheet('Setup')
@@ -377,12 +463,19 @@ def build_workbook(export_path, out_path, config: Config | None = None,
         c = ws_.cell(r_, col, txt); c.font = style; return c
 
     def inp(ws_, r_, col, val, fmt=None):
-        c = ws_.cell(r_, col, val); c.font = F_IN; c.fill = FILL_IN; c.border = BOX
+        c = put(ws_, r_, col, val); c.font = F_IN; c.fill = FILL_IN; c.border = BOX
         if fmt: c.number_format = fmt
         return c
 
     st.cell(1, 1, 'Setup').font = F_TITLE
     st.cell(2, 1, 'Yellow cells are yours. Everything else on this sheet is a label.').font = F_NOTE
+    if config_notes:
+        # 1.4.10: what the configuration set for another run, or for no run named, and how it was used here
+        c = put(st, 3, 1, 'From the configuration: ' + '; '.join(str(t) for t in config_notes) + '.')
+        c.font = Font(name='Arial', size=9, bold=True, color='A33A00')
+        c.alignment = Alignment(wrap_text=True, vertical='top')
+        st.merge_cells('A3:G3')
+        st.row_dimensions[3].height = 15 * max(2, min(8, 1 + len(c.value) // 150))
 
     lab(st, 4, 'Run information', F_H1)
     for i, (k, v) in enumerate([('Run name', _RUN), ('Run date', _DATE), ('Operator', _INFO.get('Operator', ''))]):
@@ -537,7 +630,7 @@ def build_workbook(export_path, out_path, config: Config | None = None,
             if j in (3, 4, 5, 6, 8, 9, 10, 11): c.number_format = '0.00'
         if i < len(STD_ROWS):
             for j, v in enumerate(STD_ROWS[i][:11], start=1):
-                st.cell(SFIRST + i, j, v if v != '' else None)
+                put(st, SFIRST + i, j, v if v != '' else None)
     dv_role = DataValidation(type='list', formula1='"Anchor,Check,Drift,Linearity,Blank,Exclude,Sample"',
                              allow_blank=True)
     st.add_data_validation(dv_role); dv_role.add(f'B{SFIRST}:B{SLAST}')
@@ -716,6 +809,11 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     first_rep_col = first_rerun2_col + len(RERUN2_NAMES)
     RX.update({name: gcl(first_rep_col + k) for k, name in enumerate(REP_NAMES)})
     COLS += [(name, RX[name], 7, 'h') for name in REP_NAMES]
+    # 1.4.10: each position's reference pulses, all of them (Raw columns U to AB)
+    PULSE_NAMES = ['np N', 'pmax N', 'pmin N', 'np C', 'pmax C', 'pmin C']
+    first_pulse_col = first_rep_col + len(REP_NAMES)
+    RX.update({name: gcl(first_pulse_col + k) for k, name in enumerate(PULSE_NAMES)})
+    COLS += [(name, RX[name], 7, 'h') for name in PULSE_NAMES]
     GROUPS = [('A','D','identification'),('E','G','mass'),('H','K','peak lookup'),('L','R','as measured'),
               ('S','V','from the standards table'),('W','AA','nitrogen corrections'),
               ('AB','AF','carbon corrections'),('AG','AL','elemental content'),
@@ -733,7 +831,8 @@ def build_workbook(export_path, out_path, config: Config | None = None,
               (RX['rerun'],RX['suggested mass'],'rerun marks'),
               (RX['rerun rank'],RX['rerun rank'],'helper'),
               (RX['fl amplN'],RX['why sizeC'],'rerun marks (1.4.7): helpers, ignore'),
-              (RX['rep group'],RX['fl repC'],'replicates (1.4.8): helpers, ignore')]
+              (RX['rep group'],RX['fl repC'],'replicates (1.4.8): helpers, ignore'),
+              (RX['np N'],RX['pmin C'],'reference pulses (1.4.10): helpers, ignore')]
     for a, b, t in GROUPS:
         wk.cell(4, wk[a + '1'].column, t).font = F_GRP
         wk.cell(4, wk[a + '1'].column).fill = FILL_GRP
@@ -849,19 +948,22 @@ def build_workbook(export_path, out_path, config: Config | None = None,
         f['X'] = f'=IF($W{i}="","",$W{i}-Fits!$B$20*($L{i}-Fits!$B$16))'
         f['Y'] = f'=IF($W{i}="","",IF(OR(Fits!$B$38="Row",$BI{i}=""),$A{i},$BI{i}))'
         f['Z'] = f'=IF($X{i}="","",$X{i}-Fits!$B$39*($Y{i}-Fits!$B$40))'
-        f['AA'] = f'=IF(OR($Z{i}="",Fits!$B$55<2),"",Fits!$B$56*$Z{i}+Fits!$B$57)'
+        f['AA'] = (f'=IF(OR($Z{i}="",Fits!$C$55<>"Yes",NOT(ISNUMBER(Fits!$B$56))),"",'
+                   f'Fits!$B$56*$Z{i}+Fits!$B$57)')
         f['AB'] = (f'=IF($R{i}="","",IF(OR(Fits!$C$9<>"Yes",$D{i}="Blank",$P{i}<=Fits!$B$10),'
                    f'$R{i},($P{i}*$R{i}-Fits!$B$10*Fits!$B$11)/($P{i}-Fits!$B$10)))')
         f['AC'] = f'=IF($AB{i}="","",$AB{i}-Fits!$B$28*($P{i}-Fits!$B$24))'
         f['AD'] = f'=IF($AB{i}="","",IF(OR(Fits!$B$50="Row",$BI{i}=""),$A{i},$BI{i}))'
         f['AE'] = f'=IF($AC{i}="","",$AC{i}-Fits!$B$51*($AD{i}-Fits!$B$52))'
-        f['AF'] = f'=IF(OR($AE{i}="",Fits!$B$62<2),"",Fits!$B$63*$AE{i}+Fits!$B$64)'
+        f['AF'] = (f'=IF(OR($AE{i}="",Fits!$C$62<>"Yes",NOT(ISNUMBER(Fits!$B$63))),"",'
+                   f'Fits!$B$63*$AE{i}+Fits!$B$64)')
         f['AG'] = f'=IF(OR($L{i}="",Fits!$B$69<3),"",($L{i}-Fits!$B$71)/Fits!$B$70)'
         f['AH'] = f'=IF(OR($P{i}="",Fits!$B$75<3),"",($P{i}-Fits!$B$77)/Fits!$B$76)'
-        f['AI'] = f'=IF(OR($AG{i}="",$G{i}="",$G{i}=0),"",$AG{i}/($G{i}*1000)*100)'
-        f['AJ'] = f'=IF(OR($AH{i}="",$G{i}="",$G{i}=0),"",$AH{i}/($G{i}*1000)*100)'
-        f['AK'] = f'=IF(OR($AG{i}="",$AH{i}="",$AG{i}<=0),"",($AH{i}/{AMC})/($AG{i}/{AMN}))'
-        f['AL'] = f'=IF(OR($AG{i}="",$AH{i}="",$AG{i}<=0),"",$AH{i}/$AG{i})'
+        # 1.4.10: no %N, %C or C:N where the peak is at or below the k-factor line's intercept
+        f['AI'] = f'=IF(OR($AG{i}="",$G{i}="",$G{i}<=0,$AG{i}<=0),"",$AG{i}/($G{i}*1000)*100)'
+        f['AJ'] = f'=IF(OR($AH{i}="",$G{i}="",$G{i}<=0,$AH{i}<=0),"",$AH{i}/($G{i}*1000)*100)'
+        f['AK'] = f'=IF(OR($AG{i}="",$AH{i}="",$AG{i}<=0,$AH{i}<=0),"",($AH{i}/{AMC})/($AG{i}/{AMN}))'
+        f['AL'] = f'=IF(OR($AG{i}="",$AH{i}="",$AG{i}<=0,$AH{i}<=0),"",$AH{i}/$AG{i})'
         f['AM'] = f'=IF($D{i}="Linearity",IF($L{i}="","",$L{i}),"")'
         f['AN'] = f'=IF($D{i}="Linearity",IF($W{i}="","",$W{i}),"")'
         f['AO'] = f'=IF($D{i}="Linearity",IF($P{i}="","",$P{i}),"")'
@@ -936,12 +1038,12 @@ def build_workbook(export_path, out_path, config: Config | None = None,
         # Calibration helpers for the uncertainty budget.
         f['CD'] = f'=IF($AU{i}="","",1)'
         f['CE'] = f'=IF($AU{i}="","",$AU{i}-Fits!$B$133)'
-        f['CF'] = (f'=IF($AU{i}="","",($AV{i}-(Fits!$B$56*$AU{i}+Fits!$B$57))'
+        f['CF'] = (f'=IF(OR($AU{i}="",Fits!$C$55<>"Yes"),"",($AV{i}-(Fits!$B$56*$AU{i}+Fits!$B$57))'
                    f'-Fits!$B$56*($AU{i}-Fits!$B$133))')
         f['CG'] = f'=IF($AU{i}="","",$AU{i}^2)'
         f['CH'] = f'=IF($AW{i}="","",1)'
         f['CI'] = f'=IF($AW{i}="","",$AW{i}-Fits!$B$153)'
-        f['CJ'] = (f'=IF($AW{i}="","",($AX{i}-(Fits!$B$63*$AW{i}+Fits!$B$64))'
+        f['CJ'] = (f'=IF(OR($AW{i}="",Fits!$C$62<>"Yes"),"",($AX{i}-(Fits!$B$63*$AW{i}+Fits!$B$64))'
                    f'-Fits!$B$63*($AW{i}-Fits!$B$153))')
         f['CK'] = f'=IF($AW{i}="","",$AW{i}^2)'
         # Standard uncertainty of the calibrated value: the sample's own
@@ -950,7 +1052,7 @@ def build_workbook(export_path, out_path, config: Config | None = None,
         def unc(xcol, nrow, srow, irow, mrow, sxxrow, urow, t0):
             T = lambda col: f'Fits!${col}${t0}:${col}${t0+NSTD-1}'      # noqa: E731
             dx = f'(${xcol}{i}-Fits!$B${mrow})'
-            return (f'=IF(OR(${xcol}{i}="",Fits!$B${nrow}<3,Fits!$B${mrow}="",Fits!$B${sxxrow}="",'
+            return (f'=IF(OR(${xcol}{i}="",Fits!$C${nrow}<>"Yes",Fits!$B${nrow}<3,Fits!$B${mrow}="",Fits!$B${sxxrow}="",'
                     f'Fits!$B${sxxrow}=0,Fits!$B${urow}=""),"",'
                     f'SQRT((Fits!$B${urow}*Fits!$B${srow})^2'
                     f'+SUMPRODUCT(({T("J")}*({T("B")}/Fits!$B${nrow}+{T("H")}*{dx}/Fits!$B${sxxrow}))^2)'
@@ -1127,8 +1229,16 @@ def build_workbook(export_path, out_path, config: Config | None = None,
                             f'IF(ABS(${CNC}{i}-{CERTCN})<=${UXc["U CN molar"]}{i},1,0),""),"")')
         # Rerun marks (1.4.4). Fits rows 339 to 356 hold the run's numbers.
         R_ = lambda name: f'${RX[name]}{i}'      # noqa: E731
-        for el, src, med, lim in (('N', 'BT', '$B$340', '$B$342'), ('C', 'BW', '$B$344', '$B$346')):
-            f[RX[f'pdev {el}']] = f'=IF(OR(NOT(ISNUMBER(${src}{i})),Fits!{med}=""),"",${src}{i}-Fits!{med})'
+        # 1.4.10: a position's pulse furthest from the run's median, of all its pulses (Raw columns U to AB);
+        # of two equally far, the one above it
+        for el, val, dev, med in (('N', 'U', 'Y', '$B$340'), ('C', 'W', 'AA', '$B$344')):
+            sel = f'(Raw!$A${RA}:$A${RB}=$A{i})'
+            f[RX[f'np {el}']] = f'=IF($B{i}="","",COUNTIFS(Raw!$A${RA}:$A${RB},$A{i},Raw!${val}${RA}:${val}${RB},">-1E+30"))'
+            f[RX[f'pmax {el}']] = f'=IF(OR(N({R_(f"np {el}")})=0,Fits!{med}=""),"",SUMPRODUCT(MAX({sel}*Raw!${dev}${RA}:${dev}${RB})))'
+            f[RX[f'pmin {el}']] = f'=IF({R_(f"pmax {el}")}="","",SUMPRODUCT(MIN({sel}*Raw!${dev}${RA}:${dev}${RB})))'
+            f[RX[f'pdev {el}']] = (f'=IF({R_(f"pmax {el}")}="","",IF({R_(f"pmax {el}")}>=-{R_(f"pmin {el}")},'
+                                   f'{R_(f"pmax {el}")},{R_(f"pmin {el}")}))')
+        for el, med, lim in (('N', '$B$340', '$B$342'), ('C', '$B$344', '$B$346')):
             f[RX[f'apdev {el}']] = f'=IF({R_(f"pdev {el}")}="","",ABS({R_(f"pdev {el}")}))'
             f[RX[f'poff {el}']] = (f'=IF(OR({R_(f"pdev {el}")}="",Fits!{lim}=""),0,'
                                    f'IF(ABS({R_(f"pdev {el}")})>Fits!{lim},1,0))')
@@ -1169,13 +1279,16 @@ def build_workbook(export_path, out_path, config: Config | None = None,
         else:
             prev = f'${RX["chk list"]}{i-1}'
             f[RX['chk list']] = f'={prev}&IF({R_("chk off")}=1,IF({prev}="","",", ")&$A{i},"")'
-        for el, a, loa, hia in (('N', 'L', '$B$347', '$B$348'), ('C', 'P', '$B$349', '$B$350')):
+        # 1.4.10: the yield per mg above the blank (Fits B6 and B10), since a capsule of m mg gives the
+        # blank's area plus m times that yield
+        for el, a, loa, hia, bl in (('N', 'L', '$B$347', '$B$348', '$B$6'), ('C', 'P', '$B$349', '$B$350', '$B$10')):
             per = R_(f'per mg {el}')
+            ab = f'MAX(Fits!{bl},0)'
             f[RX[f'per mg {el}']] = (f'=IF(AND(ISNUMBER(${a}{i}),ISNUMBER($G{i})),'
-                                     f'IF(AND(${a}{i}>0,$G{i}>0),${a}{i}/$G{i},""),"")')
-            f[RX[f'lo {el}']] = (f'=IF(OR({per}="",Fits!{loa}<=0,Fits!{hia}<=0,Fits!{loa}>Fits!{hia}),"",'
-                                 f'Fits!{loa}/{per})')
-            f[RX[f'hi {el}']] = f'=IF({R_(f"lo {el}")}="","",Fits!{hia}/{per})'
+                                     f'IF(AND(${a}{i}-{ab}>0,$G{i}>0),(${a}{i}-{ab})/$G{i},""),"")')
+            f[RX[f'lo {el}']] = (f'=IF(OR({per}="",Fits!{loa}-{ab}<=0,Fits!{hia}-{ab}<=0,Fits!{loa}>Fits!{hia}),"",'
+                                 f'(Fits!{loa}-{ab})/{per})')
+            f[RX[f'hi {el}']] = f'=IF({R_(f"lo {el}")}="","",(Fits!{hia}-{ab})/{per})'
         f[RX['mass lo']] = f'=IF(AND({R_("lo N")}="",{R_("lo C")}=""),"",MAX({R_("lo N")},{R_("lo C")}))'
         f[RX['mass hi']] = f'=IF(AND({R_("hi N")}="",{R_("hi C")}=""),"",MIN({R_("hi N")},{R_("hi C")}))'
         pos_ = n + 1
@@ -1202,12 +1315,16 @@ def build_workbook(export_path, out_path, config: Config | None = None,
                             'fl settle', 'fl carry', 'fl pulseN', 'fl pulseC',
                             'fl amplN', 'fl amplC', 'fl uN', 'fl uC', 'fl repN', 'fl repC')) + ')')
         f[RX['why']] = f'=IF({R_("why raw")}="","",LEFT({R_("why raw")},LEN({R_("why raw")})-2))'
+        # 1.4.10: a mass above every capsule weighed in this run (Fits B358) says so
+        ml = R_("mass lo")
+        beyond = (f'IF(AND(ISNUMBER(Fits!$B$358),{ml}-Fits!$B$358>1E-9*MAX(1,ABS(Fits!$B$358))),'
+                  f'" (more than the heaviest capsule in this run)","")')
         f[RX['suggested mass']] = (
-            f'=IF(OR({R_("rerun")}="",{R_("rerun")}="Check",{R_("mass lo")}=""),"",'
-            f'IF({R_("mass lo")}<={R_("mass hi")},TEXT({R_("mass lo")},"0.000")&" to "&TEXT({R_("mass hi")},"0.000"),'
+            f'=IF(OR({R_("rerun")}="",{R_("rerun")}="Check",{ml}=""),"",'
+            f'IF({ml}<={R_("mass hi")},TEXT({ml},"0.000")&" to "&TEXT({R_("mass hi")},"0.000")&{beyond},'
             f'IF(AND({R_("lo N")}<>"",{R_("lo C")}<>""),"N "&TEXT({R_("lo N")},"0.000")&" to "'
             f'&TEXT({R_("hi N")},"0.000")&"; C "&TEXT({R_("lo C")},"0.000")&" to "&TEXT({R_("hi C")},"0.000")'
-            f'&" (two capsules)","none")))')
+            f'&" (two capsules)"&{beyond},"none")))')
         f[RX['rerun rank']] = (f'=IF({R_("rerun")}="","",COUNTIF(${RX["rerun"]}${R0}:${RX["rerun"]}{i},"?*"))')
         for name, col, width, kind in COLS:
             c = wk.cell(i, wk[col + '1'].column, f.get(col))
@@ -1301,20 +1418,23 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     fit(51, 'slope applied', f'=IF($B$128="Yes",IF($B$50="Row",$B$44,$B$47),0)')
     fit(52, 'pivot applied', '=$B$121', '0.000')
 
-    sec(54, 'Calibration, nitrogen: accepted regressed on measured')
-    fit(55, 'n anchor measurements', f'=COUNT({W("AU")})', '0')
-    fit(56, 'slope',      f'=IFERROR(SLOPE({W("AV")},{W("AU")}),"")')
-    fit(57, 'intercept',  f'=IFERROR(INTERCEPT({W("AV")},{W("AU")}),"")')
-    fit(58, 'r-squared',  f'=IFERROR(RSQ({W("AV")},{W("AU")}),"")', '0.00000')
-    fit(59, 'residual SD (permil)', f'=IFERROR(STEYX({W("AV")},{W("AU")}),"")', '0.000',
-            'Applied as accepted = slope x measured + intercept, never inverted.')
-
-    sec(61, 'Calibration, carbon: accepted regressed on measured')
-    fit(62, 'n anchor measurements', f'=COUNT({W("AW")})', '0')
-    fit(63, 'slope',      f'=IFERROR(SLOPE({W("AX")},{W("AW")}),"")')
-    fit(64, 'intercept',  f'=IFERROR(INTERCEPT({W("AX")},{W("AW")}),"")')
-    fit(65, 'r-squared',  f'=IFERROR(RSQ({W("AX")},{W("AW")}),"")', '0.00000')
-    fit(66, 'residual SD (permil)', f'=IFERROR(STEYX({W("AX")},{W("AW")}),"")', '0.000')
+    # 1.4.10: the scale needs anchors of two materials with different accepted values (column C);
+    # with one, the line is flat and would give every sample that material's value.
+    for top, el, x_, y_, lo_, hi_ in ((54, 'nitrogen', 'AU', 'AV', 138, 139), (61, 'carbon', 'AW', 'AX', 158, 159)):
+        sec(top, f'Calibration, {el}: accepted regressed on measured')
+        n_ = top + 1
+        ok = f'$C${n_}="Yes"'
+        fit(n_, 'n anchor measurements', f'=COUNT({W(x_)})', '0')
+        ft.cell(n_, 3, f'=IF(AND($B${n_}>=2,ISNUMBER($B${lo_}),ISNUMBER($B${hi_})),IF($B${hi_}>$B${lo_},"Yes","No"),"No")'
+                ).font = F_SM
+        ft.cell(n_, 3).border = BOX
+        ft.cell(n_, 4, 'Calibrated? Needs anchors of two materials with different accepted values (rows '
+                       f'{lo_} and {hi_}); otherwise no value on this scale is reported (1.4.10).').font = F_NOTE
+        fit(n_ + 1, 'slope',      f'=IF({ok},IFERROR(SLOPE({W(y_)},{W(x_)}),""),"")')
+        fit(n_ + 2, 'intercept',  f'=IF({ok},IFERROR(INTERCEPT({W(y_)},{W(x_)}),""),"")')
+        fit(n_ + 3, 'r-squared',  f'=IF({ok},IFERROR(RSQ({W(y_)},{W(x_)}),""),"")', '0.00000')
+        fit(n_ + 4, 'residual SD (permil)', f'=IF({ok},IFERROR(STEYX({W(y_)},{W(x_)}),""),"")', '0.000',
+            'Applied as accepted = slope x measured + intercept, never inverted.' if el == 'nitrogen' else '')
 
     sec(68, 'Elemental k-factor, nitrogen: Area 28 against micrograms N')
     fit(69, 'n standards used', f'=COUNT({W("AY")})', '0')
@@ -1442,8 +1562,8 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     fit(133, 'mean measured, all anchors', f'=IFERROR(AVERAGE({W("AU")}),"")', '0.0000')
     fit(134, 'Sxx',                        f'=IFERROR(DEVSQ({W("AU")}),"")', '0.0000')
     fit(135, 'pooled SD of anchor replicates',
-        f'=IFERROR(SQRT(SUMPRODUCT(($B${UT_N}:$B${UT_N+NSTD-1}-1)*($B${UT_N}:$B${UT_N+NSTD-1}>1)*$F${UT_N}:$F${UT_N+NSTD-1}^2)'
-        f'/SUMPRODUCT(($B${UT_N}:$B${UT_N+NSTD-1}-1)*($B${UT_N}:$B${UT_N+NSTD-1}>1))),"")', '0.000',
+        f'=IF($C$55<>"Yes","",IFERROR(SQRT(SUMPRODUCT(($B${UT_N}:$B${UT_N+NSTD-1}-1)*($B${UT_N}:$B${UT_N+NSTD-1}>1)*$F${UT_N}:$F${UT_N+NSTD-1}^2)'
+        f'/SUMPRODUCT(($B${UT_N}:$B${UT_N+NSTD-1}-1)*($B${UT_N}:$B${UT_N+NSTD-1}>1))),""))', '0.000',
         'Within-material scatter of the anchors, pooled. Stands in for the repeatability of a single '
         'sample analysis when Setup gives none.')
     fit(136, 'sample repeatability in use', f'=IF({S_USN}<>"",{S_USN},$B$135)', '0.000')
@@ -1457,8 +1577,8 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     fit(153, 'mean measured, all anchors', f'=IFERROR(AVERAGE({W("AW")}),"")', '0.0000')
     fit(154, 'Sxx',                        f'=IFERROR(DEVSQ({W("AW")}),"")', '0.0000')
     fit(155, 'pooled SD of anchor replicates',
-        f'=IFERROR(SQRT(SUMPRODUCT(($B${UT_C}:$B${UT_C+NSTD-1}-1)*($B${UT_C}:$B${UT_C+NSTD-1}>1)*$F${UT_C}:$F${UT_C+NSTD-1}^2)'
-        f'/SUMPRODUCT(($B${UT_C}:$B${UT_C+NSTD-1}-1)*($B${UT_C}:$B${UT_C+NSTD-1}>1))),"")', '0.000')
+        f'=IF($C$62<>"Yes","",IFERROR(SQRT(SUMPRODUCT(($B${UT_C}:$B${UT_C+NSTD-1}-1)*($B${UT_C}:$B${UT_C+NSTD-1}>1)*$F${UT_C}:$F${UT_C+NSTD-1}^2)'
+        f'/SUMPRODUCT(($B${UT_C}:$B${UT_C+NSTD-1}-1)*($B${UT_C}:$B${UT_C+NSTD-1}>1))),""))', '0.000')
     fit(156, 'sample repeatability in use', f'=IF({S_USC}<>"",{S_USC},$B$155)', '0.000')
     fit(157, 'its source', f'=IF({S_USC}<>"","Setup","pooled anchor replicates")', '@')
     fit(158, 'accepted d13C, lowest anchor',  f'=IFERROR(MIN({W("AX")}),"")', '0.00')
@@ -1470,15 +1590,17 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     ft.cell(200, 4, 'The designated reference pulse carries the assigned value by definition, so only the '
                     'other pulses can show movement. Their d values are relative to the designated pulse '
                     'of the same acquisition.').font = F_NOTE
-    for base, col, name, xcol in ((201, 'BT', 'N2', 'CQ'), (208, 'BW', 'CO2', 'CR')):
-        R = W(col); A_ = W('A')
+    # 1.4.10: every pulse Isodat did not designate (Raw columns U to X), not only the first at each position
+    for base, col, name, xcol, npc in ((201, 'U', 'N2', 'V', 'np N'), (208, 'W', 'CO2', 'X', 'np C')):
+        R = f'Raw!${col}${RA}:${col}${RB}'; A_ = rawA
         fit(base,     f'{name} pulses read',            f'=COUNT({R})', '0')
+        fit(base + 6, f'positions with such a {name} pulse', f'=COUNTIF({W(RX[npc])},">0")', '0')
         fit(base + 1, 'mean d, relative to the designated pulse', f'=IFERROR(AVERAGE({R}),"")', '0.000')
         fit(base + 2, 'SD (permil)',                     f'=IFERROR(STDEV({R}),"")', '0.000')
         fit(base + 3, 'range (permil)',                  f'=IF($B${base}<2,"",MAX({R})-MIN({R}))', '0.000')
         fit(base + 4, 'trend, permil per position',      f'=IFERROR(SLOPE({R},{A_}),"")', '0.00000')
         fit(base + 5, 'p of the trend, two-sided',
-            f'=IFERROR(TDIST(ABS($B${base+4}/(STEYX({R},{A_})/SQRT(DEVSQ({W(xcol)})))),$B${base}-2,2),"")',
+            f'=IFERROR(TDIST(ABS($B${base+4}/(STEYX({R},{A_})/SQRT(DEVSQ(Raw!${xcol}${RA}:${xcol}${RB})))),$B${base}-2,2),"")',
             '0.000')
 
     # ---- what the run offers as an independent check -------------------------
@@ -1581,16 +1703,19 @@ def build_workbook(export_path, out_path, config: Config | None = None,
 
     # 1.4.4: rerun marks
     sec(338, 'Rerun marks (1.4.4)')
-    for base, col, name in ((339, 'BT', 'N2'), (343, 'BW', 'CO2')):
-        el = 'N' if name == 'N2' else 'C'
-        fit(base, f'{name} reference pulses read', f'=COUNT({W(col)})', '0')
-        fit(base + 1, 'their median (permil)', f'=IF($B${base}<5,"",MEDIAN({W(col)}))', '0.000',
+    for base, col, adev, name in ((339, 'U', 'Z', 'N2'), (343, 'W', 'AB', 'CO2')):
+        R = f'Raw!${col}${RA}:${col}${RB}'
+        fit(base, f'{name} reference pulses read', f'=COUNT({R})', '0',
+            'Every pulse Isodat did not designate (Raw columns U and W, 1.4.10).' if name == 'N2' else '')
+        fit(base + 1, 'their median (permil)', f'=IF($B${base}<5,"",MEDIAN({R}))', '0.000',
             'Needs five pulses.')
-        fit(base + 2, 'robust SD (permil)', f'=IF($B${base+1}="","",1.482602218505602*MEDIAN({W(RX[f"apdev {el}"])}))',
+        fit(base + 2, 'robust SD (permil)', f'=IF($B${base+1}="","",1.482602218505602*MEDIAN(Raw!${adev}${RA}:${adev}${RB}))',
             '0.0000', '1.4826 x the median absolute deviation from the median.')
         fit(base + 3, 'a pulse is off beyond (permil)',
             f'=IF(OR({S_POFF}="",N({S_POFF})<=0,$B${base+2}="",N($B${base+2})<=0),"",{S_POFF}*$B${base+2})',
             '0.000', 'Setup B67 x the robust SD.')
+    fit(358, 'heaviest capsule in this run (mg)', f'=IF(COUNT({W("G")})=0,"",IF(MAX({W("G")})>0,MAX({W("G")}),""))',
+        '0.000', 'A suggested mass above it says so (1.4.10).')
     fit(347, 'smallest Area 28 a rerun aims for',
         f'=MAX(MAX($B$81,0),IF(OR({S_MULT}="",$B$6<=0),0,{S_MULT}*$B$6))', '0.000',
         'The linearity range, and the blank multiple of Setup B25.')
@@ -1617,8 +1742,16 @@ def build_workbook(export_path, out_path, config: Config | None = None,
         '=' + '&'.join(f'IF(AND({S_RGSD}<>"",$B${b}>=3,ISNUMBER($B${b+2})),IF($B${b+2}>={S_RGSD},'
                        f'"{nm} reference pulses SD "&TEXT($B${b+2},"0.00")&" permil, at or above "'
                        f'&TEXT({S_RGSD},"0.00")&"; ",""),"")' for b, nm in ((201, 'N2'), (208, 'CO2'))), '@')
-    fit(356, 'problems of the whole run',
-        '=IF($B$353&$B$354&$B$355="","none found",LEFT($B$353&$B$354&$B$355,LEN($B$353&$B$354&$B$355)-2))', '@')
+    # 1.4.10: an element the anchors cannot calibrate comes first
+    cal_parts = []
+    for n_, name, z_ in ((55, 'd15N', 'Z'), (62, 'd13C', 'AE')):
+        cal_parts.append(f'IF($C${n_}="Yes","",IF($B${n_}>=1,"no {name} calibrated: every anchor carries the same '
+                         f'accepted {name}, and the scale needs two materials with different values; ",'
+                         f'IF(COUNTIFS({W("D")},"Sample",{W(z_)},">-1E+30")>0,"no {name} calibrated: no anchor has '
+                         f'a measured {name}; ","")))')
+    fit(357, 'whole run: calibration', '=' + '&'.join(cal_parts), '@')
+    ALL = '$B$357&$B$353&$B$354&$B$355'
+    fit(356, 'problems of the whole run', f'=IF({ALL}="","none found",LEFT({ALL},LEN({ALL})-2))', '@')
 
     fit(217, 'check standards with a calibrated value',
         f'=COUNTIFS({W("D")},"Check",{W("AA")},">-1E+30")+COUNTIFS({W("D")},"Check",{W("AF")},">-1E+30")'
@@ -1654,7 +1787,7 @@ def build_workbook(export_path, out_path, config: Config | None = None,
                                       'columns that hold a value for a sample of this run.' if MHDR else '')
                   ).font = F_NOTE
     for j, (h, w_) in enumerate(RHDR, start=1):
-        c = rs.cell(4, j, h); c.font = F_HDR; c.fill = FILL_HDR
+        c = put(rs, 4, j, h); c.font = F_HDR; c.fill = FILL_HDR
         c.alignment = Alignment(horizontal='center', wrap_text=True)
         rs.column_dimensions[gcl(j)].width = w_
     for n in range(NSAMP):
@@ -1682,7 +1815,11 @@ def build_workbook(export_path, out_path, config: Config | None = None,
                  f'&Work!${RX["fl blankN"]}{k}&Work!${RX["fl blankC"]}{k}'
                  f'&IF(AND(Work!$D{k}="Drift",Work!${EX["excl E"]}{k}=1),"excluded from elemental correction; ","")'
                  f'&Work!${RX["fl settle"]}{k}&Work!${RX["fl carry"]}{k}'
-                 f'&Work!${RX["fl pulseN"]}{k}&Work!${RX["fl pulseC"]}{k})'),
+                 f'&Work!${RX["fl pulseN"]}{k}&Work!${RX["fl pulseC"]}{k}'
+                 f'&IF(AND(ISNUMBER(Work!$AG{k}),ISNUMBER(Work!$G{k})),IF(AND(Work!$AG{k}<=0,Work!$G{k}>0),'
+                 f'"%N below detection; ",""),"")'
+                 f'&IF(AND(ISNUMBER(Work!$AH{k}),ISNUMBER(Work!$G{k})),IF(AND(Work!$AH{k}<=0,Work!$G{k}>0),'
+                 f'"%C below detection; ",""),""))'),
                 f'=IF(Work!$B{k}="","",Work!${RX["rerun"]}{k})', f'=IF(Work!$B{k}="","",Work!${RX["why"]}{k})',
                 f'=IF(Work!$B{k}="","",Work!${RX["suggested mass"]}{k})',
                 f'=IF(Work!$B{k}="","",Work!${EX["elem factor N"]}{k})',
@@ -1724,7 +1861,7 @@ def build_workbook(export_path, out_path, config: Config | None = None,
                   'A mark reads what a rerun can fix; README, Rerun marks, says which flags count (from 1.4.7 a '
                   'peak above the linearity range only at Setup B69, and a 1σ above Setup B70; from 1.4.8 replicates '
                   'above the critical range, on the Replicates sheet). The suggested mass puts the peaks inside the '
-                  'linearity range, from this analysis\'s area per mg.'
+                  'linearity range, from this analysis\'s area per mg above the blank (1.4.10).'
                   ).font = F_NOTE
     rr.merge_cells("A2:G2"); rr.row_dimensions[2].height = 44
     rr['A2'].alignment = Alignment(wrap_text=True, vertical='top')
@@ -1770,9 +1907,9 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     NF = max([20] + [len(g_['rows']) for g_ in _GROUPS])
     FT = f'$R$4:$R${4 + NF - 2}'
     for r_, (k_, v_, note_) in enumerate((
-            ('s, d15N (permil)', '=IF(OR(Fits!$B$55<3,Fits!$B$134="",Fits!$B$134=0,Fits!$B$136=""),"",'
+            ('s, d15N (permil)', '=IF(OR(Fits!$C$55<>"Yes",Fits!$B$55<3,Fits!$B$134="",Fits!$B$134=0,Fits!$B$136=""),"",'
                                  'Fits!$B$136*ABS(Fits!$B$56))', 'Fits B136 x |Fits B56|'),
-            ('s, d13C (permil)', '=IF(OR(Fits!$B$62<3,Fits!$B$154="",Fits!$B$154=0,Fits!$B$156=""),"",'
+            ('s, d13C (permil)', '=IF(OR(Fits!$C$62<>"Yes",Fits!$B$62<3,Fits!$B$154="",Fits!$B$154=0,Fits!$B$156=""),"",'
                                  'Fits!$B$156*ABS(Fits!$B$63))', 'Fits B156 x |Fits B63|'),
             ('Comparison', f'={S_REP}', 'Setup B71')), start=4):
         rp.cell(r_, 1, k_).font = F_SM
@@ -1802,7 +1939,7 @@ def build_workbook(export_path, out_path, config: Config | None = None,
                 vals.append(f'=IF(AND(Work!$D{w_}="Sample",Work!${RX["rep group"]}{w_}={g_["group"]}),'
                             f'IF(ISNUMBER(Work!${col_}{w_}),Work!${col_}{w_},""),"")')
             for j, v in enumerate(vals, start=1):
-                c = rp.cell(i_, j, v); c.font = F_SM
+                c = put(rp, i_, j, v) if j == 2 else rp.cell(i_, j, v); c.font = F_SM
                 if j in (5, 6): c.number_format = '0.00'
         for (cnt, rng, lim, over), val, srow in ((('G', 'H', 'I', 'J'), 'E', 4), (('K', 'L', 'M', 'N'), 'F', 5)):
             span = f'{val}{top_}:{val}{bot_}'
@@ -1861,11 +1998,15 @@ def build_workbook(export_path, out_path, config: Config | None = None,
 
     qsec(21, 'Calibration')
     qline(22, 'Nitrogen anchors used', '=Fits!$B$55', '0',
-          '=IF(Fits!$B$55<2,"CHECK: need at least two anchor measurements","ok")')
+          '=IF(Fits!$B$55<2,"CHECK: need at least two anchor measurements",IF(Fits!$C$55<>"Yes",'
+          '"CHECK: every anchor carries the same accepted d15N; two materials with different values set the '
+          'scale, so no d15N is reported","ok"))')
     qline(23, 'Nitrogen calibration slope', '=Fits!$B$56', '0.0000',
           '=IF(Fits!$B$56="","",IF(ABS(Fits!$B$56-1)>0.05,"CHECK: stretch factor far from 1","ok"))')
     qline(24, 'Carbon anchors used', '=Fits!$B$62', '0',
-          '=IF(Fits!$B$62<2,"CHECK: need at least two anchor measurements","ok")')
+          '=IF(Fits!$B$62<2,"CHECK: need at least two anchor measurements",IF(Fits!$C$62<>"Yes",'
+          '"CHECK: every anchor carries the same accepted d13C; two materials with different values set the '
+          'scale, so no d13C is reported","ok"))')
     qline(25, 'Carbon calibration slope', '=Fits!$B$63', '0.0000',
           '=IF(Fits!$B$63="","",IF(ABS(Fits!$B$63-1)>0.05,"CHECK: stretch factor far from 1","ok"))')
     qline(26, 'Check standards measured in this run', '=Fits!$B$217', '0',
@@ -2140,11 +2281,14 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     from openpyxl.chart.series import SeriesLabel
     from openpyxl.chart.trendline import Trendline
 
-    def feed(col):
+    def feed(col, sheet=None):
+        if sheet is raw:          # 1.4.10: the pulses chart reads every pulse from Raw
+            return Reference(raw, min_col=raw[col + '1'].column, min_row=RA, max_row=RB)
         return Reference(wk, min_col=wk[col + '1'].column, min_row=R0, max_row=R0 + NSAMP - 1)
 
-    def add_series(ch, xcol, ycol, name, colour, marker=True, line=False, trend=False, size=5, hollow=False):
-        sr = Series(feed(ycol), feed(xcol))
+    def add_series(ch, xcol, ycol, name, colour, marker=True, line=False, trend=False, size=5, hollow=False,
+                   sheet=None):
+        sr = Series(feed(ycol, sheet), feed(xcol, sheet))
         sr.tx = SeriesLabel(v=name)
         if marker:
             sr.marker = Marker(symbol='circle', size=size)
@@ -2174,10 +2318,10 @@ def build_workbook(export_path, out_path, config: Config | None = None,
 
     BLUE, ORANGE, GREEN, YELLOW, GREY, RED = '1F4E79', 'C55A11', '1B7F5A', 'B8860B', '7F7F7F', 'B2182B'
     # Working gas, beside rows 10 to 19
-    for anchor, el, gas in (('K10', 'N', 'N2'), ('T10', 'C', 'CO2')):
+    for anchor, el, gas, ycol in (('K10', 'N', 'N2', 'AC'), ('T10', 'C', 'CO2', 'AD')):
         ch = chart(anchor, f'{gas} reference pulses Isodat did not designate', 'Autosampler position',
                    ('d15N' if el == 'N' else 'd13C') + ' of the pulse (permil)')
-        add_series(ch, CH['ch pos'], CH[f'ch pulse {el}'], 'pulses', GREY, trend=True)
+        add_series(ch, 'A', ycol, 'pulses', GREY, trend=True, sheet=raw)
     # Calibration, beside rows 21 to 28: are the unknowns bracketed by the anchors?
     for anchor, el, name in (('K25', 'N', 'd15N'), ('T25', 'C', 'd13C')):
         ch = chart(anchor, f'Calibrated {name} of the unknowns against the anchor span', 'Autosampler position',
@@ -2220,7 +2364,7 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     md.merge_cells('A2:H2'); md.row_dimensions[2].height = 40
     md['A2'].alignment = Alignment(wrap_text=True, vertical='top')
     md.cell(4, 1, 'Run information').font = F_H1
-    info_rows = [('Run', '=IF(Setup!$B$5="","",Setup!$B$5)', None), ('File', _FILE, None),
+    info_rows = [('Run', '=IF(Setup!$B$5="","",Setup!$B$5)', None), ('File', _FILE, 'text'),
                  ('Run date', '=IF(Setup!$B$6="","",Setup!$B$6)', None),
                  ('Operator', '=IF(Setup!$B$7="","",Setup!$B$7)', None)]
     info_rows += [(k_, _INFO.get(k_, ''), 'in') for k_ in RUN_FIELDS if k_ != 'Operator']
@@ -2231,7 +2375,7 @@ def build_workbook(export_path, out_path, config: Config | None = None,
             md.merge_cells(start_row=r_, start_column=2, end_row=r_, end_column=8)
             md.cell(r_, 2).alignment = Alignment(wrap_text=True, vertical='top')
         else:
-            c = md.cell(r_, 2, v_); c.font = F_SM
+            c = put(md, r_, 2, v_) if kind_ == 'text' else md.cell(r_, 2, v_); c.font = F_SM
     md.cell(5 + len(info_rows), 1, 'Operator is Setup B7; type the others here.').font = F_NOTE
     md.cell(13, 1, 'Sample sheet').font = F_H1
     if samples is None:
@@ -2243,11 +2387,11 @@ def build_workbook(export_path, out_path, config: Config | None = None,
                       ('Replicate groups', len(_GROUPS)), ('Notes', '; '.join(samples.notes) or 'none')]
         for r_, (k_, v_) in enumerate(sheet_rows, start=14):
             md.cell(r_, 1, k_).font = F_SM
-            c = md.cell(r_, 2, v_); c.font = F_SM; c.alignment = Alignment(horizontal='left')
+            c = put(md, r_, 2, v_); c.font = F_SM; c.alignment = Alignment(horizontal='left')
         md.cell(MD_TOP - 2, 1, 'This run\'s samples').font = F_H1
         mhead = ['Row', 'Identifier', 'Sample ID (sheet)', 'Matched by', 'Replicate group'] + [h for _, h in _MCOLS]
         for j, h in enumerate(mhead, start=1):
-            c = md.cell(MD_TOP - 1, j, h); c.font = F_HDR; c.fill = FILL_HDR
+            c = put(md, MD_TOP - 1, j, h); c.font = F_HDR; c.fill = FILL_HDR
             c.alignment = Alignment(horizontal='center', wrap_text=True)
             if j > 5:
                 md.column_dimensions[gcl(j)].width = 14
@@ -2258,7 +2402,7 @@ def build_workbook(export_path, out_path, config: Config | None = None,
             vals = [q.row, q.identifier, q.sample_id, q.matched_by or NOT_MATCHED, q.replicate_group]
             vals += [samples.rows[q.sheet_index][j_] if q.sheet_index is not None else None for j_, _ in _MCOLS]
             for j, v in enumerate(vals, start=1):
-                c = md.cell(t_, j, v); c.font = F_SM
+                c = put(md, t_, j, v); c.font = F_SM
         md.freeze_panes = f'A{MD_TOP}'
 
     for s in wb.worksheets:

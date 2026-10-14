@@ -13,6 +13,7 @@ import io
 import math
 from dataclasses import fields
 
+from ea_irms.cells import csv_text
 from ea_irms.metadata import output_columns, output_header, output_values
 from ea_irms.parse import Position
 from ea_irms.pipeline import ATOMIC_C, ATOMIC_N, Config
@@ -70,6 +71,8 @@ def port_input(positions, fits, config: Config, file_name: str, size: int,
             "amplN": p.ampl_n, "amplC": p.ampl_c,
             "bgd": p.bgd_n, "rbgd": p.ref_bgd_n,
             "pN": p.ref_pulse_d15n, "pC": p.ref_pulse_d13c,
+            # ea_irms 1.4.10: every pulse Isodat did not designate at the position, which the checks read
+            "pNs": list(p.ref_pulses_d15n), "pCs": list(p.ref_pulses_d13c),
             "raN": p.ref_area_n, "raC": p.ref_area_c,
             "ugN": p.ug_n, "ugC": p.ug_c,
             "carry": bool(p.carry_flag), "rise": _r(p.carry_rise, 2), "over": bool(p.oversized),
@@ -92,7 +95,8 @@ def port_input(positions, fits, config: Config, file_name: str, size: int,
                   "flagged": F["carryover"]["flagged"], "maxRise": _r(F["carryover"]["max_rise"], 2)},
         "settle": {k: _r(F["settling"][k], 4)
                    for k in ("floor", "excess", "settled_from", "level", "excess_level")},
-        "refgas": {el: {"n": F[f"ref_gas_{el}"]["n"], "mean": _r(F[f"ref_gas_{el}"]["mean"], 5),
+        "refgas": {el: {"n": F[f"ref_gas_{el}"]["n"], "positions": F[f"ref_gas_{el}"]["positions"],
+                        "mean": _r(F[f"ref_gas_{el}"]["mean"], 5),
                         "sd": _r(F[f"ref_gas_{el}"]["sd"], 5), "range": _r(F[f"ref_gas_{el}"]["range"], 4),
                         "fit": _fit(F[f"ref_gas_{el}"]["fit"], ("slope", "intercept", "p", "n")),
                         "trend": F[f"ref_gas_{el}"]["trend"]} for el in ("n", "c")},
@@ -157,7 +161,7 @@ def results_csv(positions, config: Config, sheet=None) -> str:
     cols = output_columns(sheet, [positions])
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\n")
-    w.writerow(RESULTS_HEADER + output_header(sheet, cols))
+    w.writerow(csv_cells(RESULTS_HEADER + output_header(sheet, cols)))
     for p in positions:
         w.writerow(csv_cells(results_values(p) + output_values(p, sheet, cols)))
     return buf.getvalue()
@@ -171,5 +175,6 @@ def sample_records(positions) -> list[dict]:
 
 
 def csv_cells(values) -> list:
-    """Values as the results table writes them: floats in full (repr), empty for None."""
-    return ["" if v is None else (repr(v) if isinstance(v, float) else v) for v in values]
+    """Values as the results table writes them: floats in full (repr), empty for None, and text that
+    begins like a formula after an apostrophe (ea_irms 1.4.10, ea_irms.cells.csv_text)."""
+    return ["" if v is None else (repr(v) if isinstance(v, float) else csv_text(v)) for v in values]

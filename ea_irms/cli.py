@@ -11,9 +11,9 @@ import sys
 from pathlib import Path
 
 from .parse import ExportFormatError, parse_export
-from .labconfig import LabConfigError, config_from_xlsx, config_to_xlsx
+from .labconfig import LabConfigError, config_from_xlsx, config_to_xlsx, read_config_json
 from .metadata import SampleSheetError, read_sample_sheet, summary_text
-from .pipeline import Config, config_from_dict, config_to_dict, process
+from .pipeline import Config, config_to_dict, process, scope_to_run
 from .workbook import VERSION, build_workbook
 
 
@@ -52,12 +52,19 @@ def main(argv=None):
             if args.config.lower().endswith(".xlsx"):
                 config = config_from_xlsx(args.config)
             else:
-                config = config_from_dict(json.loads(Path(args.config).read_text()))
+                # 1.4.10: by the rules of the Excel configuration, as the service reads JSON
+                config, read_notes = read_config_json(json.loads(Path(args.config).read_text()))
+                for note in read_notes:
+                    print(f"note: {note}", file=sys.stderr)
         except (OSError, ValueError, LabConfigError) as exc:
             print(f"cannot read the configuration {args.config}: {exc}", file=sys.stderr)
             return 2
     export = Path(args.export)
     out = Path(args.out) if args.out else export.with_name(export.stem + "_corrected.xlsx")
+    # 1.4.10: the positions a configuration leaves out belong to the run it names
+    config, config_notes = scope_to_run(config, export.name)
+    for note in config_notes:
+        print(f"note: {note}", file=sys.stderr)
 
     try:
         positions = parse_export(export)
@@ -73,7 +80,7 @@ def main(argv=None):
             print(f"cannot read the sample sheet {args.samples}: {exc}", file=sys.stderr)
             return 2
     positions, fits = process(positions, config, samples=samples)
-    build_workbook(export, out, config, run_name=export.stem, samples=samples)
+    build_workbook(export, out, config, run_name=export.stem, samples=samples, config_notes=config_notes)
     if args.no_recalc:
         baked = False
     else:

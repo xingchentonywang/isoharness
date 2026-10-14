@@ -88,6 +88,53 @@ def filtered_variant(src: Path, dst: Path) -> Path:
     return dst
 
 
+# A constructed CO2 peak for each blank capsule (ea_irms 1.4.10): illustrative values, not measured
+# ones, chosen so that the blank correction for carbon is in force on Auto (three or more blanks whose
+# d13C agree to within 2 permil); the k-th blank capsule gets these plus k times the step.
+CARBON_BLANK = {"Ampl  44": (140.0, 10.0), "Area 44": (3.0, 0.2), "d 13C/12C": (-27.0, 0.3)}
+
+
+def carbon_blank_variant(src: Path, dst: Path, standards=None) -> Path:
+    """Write ``src`` with a sample CO2 peak in each blank capsule, which no run in the repository has, so
+    that the carbon blank correction is exercised (finding R-20 of the 2026-10-14 review). The peak goes
+    before the capsule's first designated CO2 peak, as a sample's does, and the peaks after it are
+    renumbered one up. Blank capsules are the positions the standards table gives the Blank role."""
+    from ea_irms.pipeline import DEFAULT_STANDARDS, Config, assign_roles
+    with open(src, newline="", encoding="utf-8-sig") as fh:
+        rows = list(csv.reader(fh))
+    head, body = rows[0], rows[1:]
+    i = {k: n for n, k in enumerate(head)}
+    positions = {p.row: p for p in assign_roles(parse_export(src), Config(standards=standards or list(DEFAULT_STANDARDS)))}
+    by_pos = {}
+    for r in body:
+        by_pos.setdefault(r[i["Row"]], []).append(r)
+    out, k = [head], 0
+    for pos, pos_rows in by_pos.items():
+        p = positions.get(int(float(pos)))
+        m44 = [n for n, r in enumerate(pos_rows) if r[i["Peak Nr"]].strip() and r[i["Ampl  44"]].strip()]
+        refs = [n for n in m44 if pos_rows[n][i["Is Ref _"]].strip() == "1"]
+        if p is None or p.role != "Blank" or not refs or (m44 and m44[0] != refs[0]):
+            out.extend(pos_rows)            # not a blank capsule, or it already has a sample CO2 peak
+            continue
+        first = refs[0]
+        nr = int(float(pos_rows[first][i["Peak Nr"]]))
+        peak = list(pos_rows[first])
+        for key, (base, step) in CARBON_BLANK.items():
+            peak[i[key]] = f"{base + step * k:.3f}"
+        peak[i["Is Ref _"]] = "0"
+        k += 1
+        for n, r in enumerate(pos_rows):
+            r = list(r)
+            if n == first:
+                out.append(peak)
+            if r[i["Peak Nr"]].strip() and int(float(r[i["Peak Nr"]])) >= nr:
+                r[i["Peak Nr"]] = str(int(float(r[i["Peak Nr"]])) + 1)
+            out.append(r)
+    with open(dst, "w", newline="", encoding="utf-8") as fh:
+        csv.writer(fh).writerows(out)
+    return dst
+
+
 def random_decisions(rng, monitors):
     return {"blank": rng.choice(SWITCH), "linN": rng.choice(SWITCH), "linC": rng.choice(SWITCH),
             "drift": rng.choice(SWITCH), "model": rng.choice(["Row", "Background", "Auto"]),
@@ -160,14 +207,18 @@ def main(argv=None):
                     help="random decision sets for each non-default settings variant")
     ap.add_argument("--as-filtered", action="store_true",
                     help="rewrite the export as a filtered one first (see above)")
+    ap.add_argument("--with-carbon-blank", action="store_true",
+                    help="give each blank capsule a sample CO2 peak first (carbon_blank_variant, 1.4.10)")
     args = ap.parse_args(argv)
 
     export = Path(args.export)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    base = config_from_dict(json.loads(Path(args.config).read_text())) if args.config else Config()
+    if args.with_carbon_blank:
+        export = carbon_blank_variant(export, out / f"{export.stem}_carbon_blank.csv", base.standards)
     if args.as_filtered:
         export = filtered_variant(export, out / f"{export.stem}_filtered.csv")
-    base = config_from_dict(json.loads(Path(args.config).read_text())) if args.config else Config()
     positions, fits = process(parse_export(export), base)
     block = port_input(positions, fits, base, export.name, export.stat().st_size)
     monitors = [q["r"] for q in block["pos"] if q["role"] == "D"]

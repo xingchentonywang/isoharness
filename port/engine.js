@@ -102,6 +102,24 @@ class PortEngine {
 
   above(a, b) { return a - b > 1e-9 * Math.max(1, Math.abs(b)); }
 
+  // x as the workbook's TEXT(x, "0.00") writes it (ea_irms 1.4.10, _xl): to 15 significant digits
+  // first, as a spreadsheet keeps a number, then to the given decimals with a half rounded away
+  // from zero. toFixed rounds the binary value, so -1.3749999999999998 came out -1.37, not -1.38.
+  xl(x, places, sign) {
+    const [mant, ex] = Math.abs(x).toExponential(14).split('e');
+    const digits = BigInt(mant.replace('.', ''));          // 15 significant digits
+    const shift = Number(ex) - 14 + places;                 // |x| * 10^places = digits * 10^shift
+    let n;
+    if (shift >= 0) n = digits * 10n ** BigInt(shift);
+    else {
+      const div = 10n ** BigInt(-shift);
+      n = digits / div + ((digits % div) * 2n >= div ? 1n : 0n);
+    }
+    const t = n.toString().padStart(places + 1, '0');
+    const out = places ? t.slice(0, t.length - places) + '.' + t.slice(t.length - places) : t;
+    return (x < 0 ? '-' : sign ? '+' : '') + out;
+  }
+
   applies(mode, f, n, alpha) {
     if (mode === 'Off' || f == null || n < 3) return false;
     if (mode === 'On') return true;
@@ -223,14 +241,20 @@ class PortEngine {
       Dr.outliers = mons.filter((q) => Dr.t[q.r] != null && Math.abs(Dr.t[q.r]) > S.outlierT && !excl.has(q.r))
         .map((q) => q.r).sort((a, b) => a - b);
     }
+    // ea_irms 1.4.10: the scale needs anchors of two materials with different accepted values; with
+    // one the line is flat and would give every sample that material's value, so none is calibrated.
     const anchors = role('A');
     for (const [el] of E) {
       const ak = el === 'n' ? 'acc15' : 'acc13';
       const xs = anchors.map((q) => q[el].drift), ys = anchors.map((q) => q[ak]);
-      const f = this.fit(xs, ys) || { slope: null, intercept: null, r2: null, sd: null, n: 0 };
       const acc = ys.filter((a, i) => xs[i] != null && a != null);
+      const two = acc.length > 0 && Math.max(...acc) > Math.min(...acc);
+      const f = (two ? this.fit(xs, ys) : null) || { slope: null, intercept: null, r2: null, sd: null, n: 0 };
       f.accMin = acc.length ? Math.min(...acc) : null;
       f.accMax = acc.length ? Math.max(...acc) : null;
+      f.analyses = acc.length;
+      f.values = new Set(acc).size;
+      f.calibrated = two && f.n >= 2;
       M.cal[el] = f;
       for (const q of P) {
         q[el].fin = q[el].drift == null || f.n < 2 ? null : f.slope * q[el].drift + f.intercept;
@@ -287,10 +311,14 @@ class PortEngine {
       }
       M.unc[el] = B;
     }
+    // ea_irms 1.4.10: a peak at or below the k-factor line's intercept holds no detectable N or C
     for (const q of P) {
-      q.pctNm = q.ugN == null || !q.amt ? null : q.ugN / (q.amt * 1000) * 100;
-      q.pctCm = q.ugC == null || !q.amt ? null : q.ugC / (q.amt * 1000) * 100;
-      q.cnm = q.ugN && q.ugC && q.ugN > 0 ? (q.ugC / D.atomic.c) / (q.ugN / D.atomic.n) : null;
+      const mass = q.amt != null && q.amt > 0;
+      q.pctNm = q.ugN == null || !mass || q.ugN <= 0 ? null : q.ugN / (q.amt * 1000) * 100;
+      q.pctCm = q.ugC == null || !mass || q.ugC <= 0 ? null : q.ugC / (q.amt * 1000) * 100;
+      q.belowN = mass && q.ugN != null && q.ugN <= 0;
+      q.belowC = mass && q.ugC != null && q.ugC <= 0;
+      q.cnm = q.ugN && q.ugC && q.ugN > 0 && q.ugC > 0 ? (q.ugC / D.atomic.c) / (q.ugN / D.atomic.n) : null;
     }
     const exE = new Set(dec.exclE);
     for (const [el, pm, ck] of [['n', 'pctNm', 'certN'], ['c', 'pctCm', 'certC']]) {
@@ -346,7 +374,7 @@ class PortEngine {
       if (q.role === 'K') {
         for (const [got, acc, name] of [[q.n.fin, q.acc15, 'd15N'], [q.c.fin, q.acc13, 'd13C']]) {
           if (got != null && acc != null && Math.abs(got - acc) > S.checkOffset) {
-            fl.push('check ' + name + ' off by ' + (got - acc >= 0 ? '+' : '') + (got - acc).toFixed(2));
+            fl.push('check ' + name + ' off by ' + this.xl(got - acc, 2, true));
           }
         }
       }
@@ -359,14 +387,16 @@ class PortEngine {
       }
       if (q.role !== 'B' && S.blankMultiple) {
         for (const [a, ab, nm] of [[q.aN, M.blank.n.area, 'N'], [q.aC, M.blank.c.area, 'C']]) {
-          if (a != null && ab > 0 && a < ab * S.blankMultiple) fl.push(nm + ' peak only ' + (a / ab).toFixed(1) + 'x the blank');
+          if (a != null && ab > 0 && a < ab * S.blankMultiple) fl.push(nm + ' peak only ' + this.xl(a / ab, 1) + 'x the blank');
         }
       }
       if (q.r < settled) fl.push('ran before the background settled');
       if (q.carry) fl.push('possible carryover from an oversized sample');
       for (const [dev, nm] of [[q.poN, 'N2'], [q.poC, 'CO2']]) {
-        if (dev != null) fl.push(nm + ' reference pulse off by ' + (dev >= 0 ? '+' : '') + dev.toFixed(2));
+        if (dev != null) fl.push(nm + ' reference pulse off by ' + this.xl(dev, 2, true));
       }
+      if (q.belowN) fl.push('%N below detection');
+      if (q.belowC) fl.push('%C below detection');
       q.flags = fl;
     }
     return M;

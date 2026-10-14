@@ -29,7 +29,7 @@ import shutil
 import tempfile
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
@@ -37,12 +37,12 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from ea_irms.labconfig import LabConfigError, config_to_xlsx, read_lab_config
+from ea_irms.labconfig import LabConfigError, config_to_xlsx, read_config_json, read_lab_config
 from ea_irms.metadata import (MAX_ROWS, SHEET_SUFFIXES, SampleSheetError, clean_run_info, match_positions,
                               match_summary, output_columns, output_header, read_sample_sheet, sample_names,
                               template_xlsx)
 from ea_irms.parse import ExportFormatError, parse_export
-from ea_irms.pipeline import Config, config_from_dict, config_to_dict, process
+from ea_irms.pipeline import Config, config_to_dict, process, scope_to_run
 from ea_irms.workbook import VERSION, bake_values, build_workbook
 
 from . import __version__
@@ -55,8 +55,46 @@ SUFFIXES = (".xls", ".xlsx", ".xlsm", ".csv", ".txt", ".tsv")
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 CHUNK = 1 << 16
 
-# One LibreOffice at a time: concurrent conversions share a user profile and fail.
+# One LibreOffice at a time: concurrent conversions share a user profile and fail. From isoharness 0.4.1 a
+# workbook request waits at most workbook_wait_s() for its turn, and once workbook_queue() requests are
+# waiting the next one is told to come back (503), so a burst of requests cannot hold every worker.
 _libreoffice = threading.Lock()
+_waiting = 0
+_waiting_lock = threading.Lock()
+
+
+def workbook_queue() -> int:
+    """Workbook requests that may wait for LibreOffice at one time (isoharness 0.4.1)."""
+    return int(os.environ.get("ISOHARNESS_WORKBOOK_QUEUE", "3"))
+
+
+def workbook_wait_s() -> float:
+    """Seconds a workbook request waits for LibreOffice before it is told to come back (isoharness 0.4.1). With
+    a workbook taking up to about 10 s on isoharness.org, a wait of 45 s ends inside Firebase Hosting's 60 s."""
+    return float(os.environ.get("ISOHARNESS_WORKBOOK_WAIT_S", "45"))
+
+
+@contextmanager
+def _libreoffice_turn():
+    """Wait for LibreOffice, or raise 503 when too many requests wait already or the wait runs out."""
+    global _waiting
+    with _waiting_lock:
+        if _waiting >= workbook_queue():
+            raise HTTPException(503, "the service is computing other workbooks; try again in a minute",
+                                headers={"Retry-After": "60"})
+        _waiting += 1
+    try:
+        got = _libreoffice.acquire(timeout=workbook_wait_s())
+    finally:
+        with _waiting_lock:
+            _waiting -= 1
+    if not got:
+        raise HTTPException(503, "the service is computing other workbooks; try again in a minute",
+                            headers={"Retry-After": "60"})
+    try:
+        yield
+    finally:
+        _libreoffice.release()
 
 ROOT = Path(__file__).resolve().parents[1]
 WEB = ROOT / "web"
@@ -100,17 +138,49 @@ def max_batch_runs() -> int:
     return int(os.environ.get("ISOHARNESS_MAX_BATCH_RUNS", "20"))
 
 
+def proxy_hops() -> int:
+    """How many proxies in front of the service each add an address to X-Forwarded-For (isoharness 0.4.1):
+    on isoharness.org, Firebase Hosting's and Cloud Run's front ends, so the visitor's address is the second
+    from the right. GET /api/client shows what a deployment sees. 0 counts the connection's own address."""
+    return int(os.environ.get("ISOHARNESS_PROXY_HOPS", "2"))
+
+
+# The most counters the limiter keeps (an address takes one for its uploads and one for its workbooks);
+# the least recently used are forgotten first.
+MAX_KEYS = 20000
+
+
+def client_address(request: Request) -> str:
+    """The visitor's address, read from X-Forwarded-For.
+
+    Each proxy adds the address it received the request from at the right-hand end, and anything a
+    client sends itself stays at the left, so the visitor is proxy_hops() places from the right; the
+    left-most address, which uvicorn's --proxy-headers reports with --forwarded-allow-ips='*', is
+    whatever the client wrote (finding R-05 of the 2026-10-14 review). A request that reaches the service
+    through fewer proxies, such as one sent to the run.app address itself, is read one place too far to
+    the left, where a client can write; the cap of one instance and the spend cap bound what that costs.
+    Without the header, the connection's own address."""
+    own = request.client.host if request.client else "unknown"
+    hops = proxy_hops()
+    raw = ",".join(request.headers.getlist("x-forwarded-for")) if hops > 0 else ""
+    chain = [a.strip() for a in raw.split(",") if a.strip()]
+    if not chain:
+        return own
+    return (chain[-hops] if len(chain) >= hops else chain[0])[:100]
+
+
 class UploadLimiter:
     """At most N limited requests per client address in any hour, counted in memory.
 
-    The count lives in one process, so it holds per container; the cap on
-    instances set at deployment bounds the rest. The address is the one uvicorn
-    reports, which behind Cloud Run's front end comes from X-Forwarded-For.
-    """
+    The count lives in one process, so it holds per container; the cap on instances set at deployment
+    bounds the rest. The addresses come from client_address (isoharness 0.4.1). From 0.4.1 the limiter
+    keeps at most MAX_KEYS counters, forgetting the least recently used first, so neither its memory nor
+    the time each request spends in it grows with the number of addresses it has seen."""
 
-    def __init__(self):
-        self._hits: dict[str, deque] = {}
+    def __init__(self, max_keys: int = MAX_KEYS):
+        self._hits: OrderedDict[str, deque] = OrderedDict()
         self._lock = threading.Lock()
+        self._max_keys = max_keys
 
     def reset(self):
         with self._lock:
@@ -118,18 +188,30 @@ class UploadLimiter:
 
     def wait_seconds(self, key: str, limit: int, now: float | None = None) -> int | None:
         """Count one request; None if it may proceed, else the seconds until it could."""
+        return self.wait_all([(key, limit)], now)
+
+    def wait_all(self, keys: list[tuple[str, int]], now: float | None = None) -> int | None:
+        """Count one request against every (key, limit) at once: None if each allows it, and then it is
+        counted in each; otherwise the seconds until all would, and it is counted in none."""
         now = time.monotonic() if now is None else now
         with self._lock:
-            hits = self._hits.setdefault(key, deque())
-            while hits and now - hits[0] >= WINDOW_S:
-                hits.popleft()
-            if len(hits) >= limit:
-                return max(1, int(WINDOW_S - (now - hits[0])) + 1)
-            hits.append(now)
-            if len(self._hits) > 10000:          # forget addresses with nothing in the window
-                for k in [k for k, v in self._hits.items() if not v or now - v[-1] >= WINDOW_S]:
-                    del self._hits[k]
-            return None
+            waits, lists = [], []
+            for key, limit in keys:
+                hits = self._hits.get(key)
+                if hits is None:
+                    hits = self._hits[key] = deque()
+                self._hits.move_to_end(key)
+                while hits and now - hits[0] >= WINDOW_S:
+                    hits.popleft()
+                if len(hits) >= limit:
+                    waits.append(max(1, int(WINDOW_S - (now - hits[len(hits) - limit])) + 1))
+                lists.append(hits)
+            if not waits:
+                for hits in lists:
+                    hits.append(now)
+            while len(self._hits) > self._max_keys:
+                self._hits.popitem(last=False)
+            return max(waits) if waits else None
 
 
 limiter = UploadLimiter()
@@ -154,8 +236,8 @@ async def limit_uploads(request: Request, call_next):
         heavy = request.url.path in HEAVY
         limit = uploads_per_hour() if heavy else reads_per_hour()
         if limit > 0:
-            key = (request.client.host if request.client else "unknown") + (" workbook" if heavy else "")
-            wait = limiter.wait_seconds(key, limit)
+            kind = " workbook" if heavy else ""
+            wait = limiter.wait_all([(client_address(request) + kind, limit)])
             if wait is not None:
                 minutes = max(1, round(wait / 60))
                 what = "workbook requests" if heavy else "uploads"
@@ -227,16 +309,57 @@ def _upload(file: UploadFile):
         yield path, {"name": name, "bytes": size, "sha256": digest.hexdigest()}
 
 
-def _config(text: str | None) -> Config:
+def _config(text: str | None, notes: list | None = None) -> Config:
+    """The configuration sent as JSON, checked by the rules of the Excel one (ea_irms 1.4.10,
+    labconfig.read_config_json): a value it cannot use is a 422 that names the setting, and keys it
+    does not read go into ``notes`` when a list is given."""
     if text is None or not text.strip():
         return Config()
     try:
         data = json.loads(text)
-        if not isinstance(data, dict):
-            raise ValueError("the configuration must be a JSON object")
-        return config_from_dict(data)
+    except ValueError as exc:
+        raise HTTPException(422, f"the configuration could not be read as JSON: {exc}") from exc
+    try:
+        cfg, read_notes = read_config_json(data)
+    except LabConfigError as exc:
+        raise HTTPException(422, f"the configuration could not be read: {exc}") from exc
     except (ValueError, TypeError, KeyError) as exc:
         raise HTTPException(422, f"the configuration could not be read: {exc}") from exc
+    if notes is not None:
+        notes.extend(read_notes)
+    return cfg
+
+
+def _scoped(cfg: Config, name: str, notes: list, shared: bool = False) -> Config:
+    """The configuration as it applies to the export ``name`` (ea_irms 1.4.10, scope_to_run): the first drift
+    position, the positions left out, and a repeatability from the drift monitors only for the run they were
+    chosen for. What was not applied, or was applied without a run named, goes into ``notes``. ``shared``: one
+    configuration given to several runs of a batch at once."""
+    cfg, scope_notes = scope_to_run(cfg, name, shared)
+    notes.extend(scope_notes)
+    return cfg
+
+
+NOTES_HEADER_MAX = 4000
+
+
+def _notes_header(notes: list) -> dict:
+    """The configuration's notes for a file download, in a header (isoharness 0.4.1): a JSON list with every
+    character outside ASCII escaped, of at most NOTES_HEADER_MAX characters. Notes that do not fit are left
+    out and counted in a last entry, so the header is always a whole JSON list."""
+    if not notes:
+        return {}
+    kept, out = [], "[]"
+    for i, note in enumerate(notes):
+        text = str(note) if len(str(note)) <= 1000 else str(note)[:1000] + "..."
+        rest = len(notes) - i - 1
+        trial = json.dumps(kept + [text] + ([f"and {rest} more"] if rest else []), ensure_ascii=True)
+        if len(trial) > NOTES_HEADER_MAX:
+            out = json.dumps(kept + [f"and {len(notes) - i} more"], ensure_ascii=True)
+            break
+        kept.append(text)
+        out = json.dumps(kept, ensure_ascii=True)
+    return {"X-Isoharness-Config-Notes": out}
 
 
 def _parse(path: Path, name: str):
@@ -305,6 +428,16 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/api/client")
+def client(request: Request):
+    """What the upload limit reads for this request (isoharness 0.4.1): the visitor's address, which is the
+    caller's own, and how many addresses X-Forwarded-For held, so that a deployment can check
+    ISOHARNESS_PROXY_HOPS against the proxies in front of it. Nothing else of the header is returned."""
+    raw = ",".join(request.headers.getlist("x-forwarded-for"))
+    return {"address": client_address(request), "forwarded_for_entries": len([a for a in raw.split(",") if a.strip()]),
+            "proxy_hops": proxy_hops()}
+
+
 @app.get("/api/version")
 def version():
     return {"isoharness": __version__, "ea_irms": VERSION,
@@ -325,8 +458,10 @@ def process_run(file: UploadFile = File(...), config: str | None = Form(None),
     and the block the browser's preview port recomputes from. With a sample sheet (0.3.0)
     each sample is matched to it and its replicates are compared for the rerun marks."""
     t0 = time.perf_counter()
+    notes: list[str] = []
     with _upload(file) as (path, info):
-        cfg = _config(config)
+        cfg = _config(config, notes)
+        cfg = _scoped(cfg, info["name"], notes)
         sheet = _sheet(sample_sheet, id_column)
         rinfo = _info(run_info)
         positions = _parse(path, info["name"])
@@ -335,7 +470,8 @@ def process_run(file: UploadFile = File(...), config: str | None = Form(None),
             "isoharness": __version__,
             "ea_irms": VERSION,
             "file": info,
-            "config": config_to_dict(cfg),
+            "config": clean(config_to_dict(cfg)),
+            "config_notes": notes,
             "positions": [position_record(p) for p in positions],
             "fits": clean(fits),
             "port": port_input(positions, fits, cfg, info["name"], info["bytes"], run_date),
@@ -355,26 +491,28 @@ def workbook(file: UploadFile = File(...), config: str | None = Form(None),
     """The correction workbook for one run. With ``values`` (the default) LibreOffice
     computes every formula, so the numbers show in any viewer. A sample sheet and the run
     information (0.3.0) fill its Metadata sheet and the columns after Results."""
+    notes: list[str] = []
     with _upload(file) as (path, info):
-        cfg = _config(config)
+        cfg = _scoped(_config(config, notes), info["name"], notes)
         sheet = _sheet(sample_sheet, id_column)
         rinfo = _info(run_info)
         _parse(path, info["name"])
         out = path.with_name(f"{path.stem}_ea_irms_v{VERSION}.xlsx")
         try:
             build_workbook(path, out, cfg, run_name=run_name or Path(info["name"]).stem,
-                           run_date=run_date or None, samples=sheet, run_info=rinfo, file_name=info["name"])
+                           run_date=run_date or None, samples=sheet, run_info=rinfo, file_name=info["name"],
+                           config_notes=notes)
         except ValueError as exc:
             raise HTTPException(422, f"the workbook could not be built: {exc}") from exc
         computed = False
         if values:
-            with _libreoffice:
+            with _libreoffice_turn():
                 computed = bake_values(out)
         data = out.read_bytes()
-    return Response(data, media_type=XLSX, headers={
+    return Response(data, media_type=XLSX, headers=dict({
         "Content-Disposition": f'attachment; filename="{out.name}"',
         "X-Isoharness-Values": "computed" if computed else "formulas-only",
-    })
+    }, **_notes_header(notes)))
 
 
 @app.post("/api/results.csv")
@@ -382,14 +520,15 @@ def results(file: UploadFile = File(...), config: str | None = Form(None),
             sample_sheet: UploadFile | None = File(None), id_column: str | None = Form(None)):
     """The workbook's Results sheet as CSV, from the engine at full precision; with a sample
     sheet (0.3.0), its columns after them."""
+    notes: list[str] = []
     with _upload(file) as (path, info):
-        cfg = _config(config)
+        cfg = _scoped(_config(config, notes), info["name"], notes)
         sheet = _sheet(sample_sheet, id_column)
         positions, _ = _process(_parse(path, info["name"]), cfg, info["name"], sheet)
         text = results_csv(positions, cfg, sheet)
         name = f"{path.stem}_results_ea_irms_v{VERSION}.csv"
-    return Response(text, media_type="text/csv", headers={
-        "Content-Disposition": f'attachment; filename="{name}"'})
+    return Response(text, media_type="text/csv", headers=dict({
+        "Content-Disposition": f'attachment; filename="{name}"'}, **_notes_header(notes)))
 
 
 def _json_list(text: str | None, field: str, n: int) -> list:
@@ -413,7 +552,7 @@ def _batch(files: list[UploadFile], configs: str | None, run_dates: str | None, 
     if len(files) > max_batch_runs():
         raise HTTPException(422, f"{len(files)} exports were sent; at most {max_batch_runs()} runs are combined "
                                  "in one request")
-    cfgs = None
+    cfgs, shared = None, False
     if configs is not None and configs.strip():
         try:
             one = json.loads(configs)
@@ -421,6 +560,7 @@ def _batch(files: list[UploadFile], configs: str | None, run_dates: str | None, 
             raise HTTPException(422, f"configs could not be read as JSON: {exc}") from exc
         if isinstance(one, dict):
             cfgs = [one] * len(files)      # one configuration for every run
+            shared = len(files) > 1        # its run-only values then name no run of their own (0.4.1)
     if cfgs is None:
         cfgs = _json_list(configs, "configs", len(files))
     dates = _json_list(run_dates, "run_dates", len(files))
@@ -444,15 +584,17 @@ def _batch(files: list[UploadFile], configs: str | None, run_dates: str | None, 
                                          "this service accepts in one request")
             if data is not None and not isinstance(data, dict):
                 raise HTTPException(422, f"the configuration for {info['name']} is not a JSON object")
+            notes: list[str] = []
             try:
-                cfg = _config(json.dumps(data) if data is not None else None)
+                cfg = _config(json.dumps(data) if data is not None else None, notes)
             except HTTPException as exc:
                 raise HTTPException(exc.status_code, f"{info['name']}: {exc.detail}") from exc
+            cfg = _scoped(cfg, info["name"], notes, shared)
             run_info = _info(rinfo, f"the run information for {info['name']}")
             positions, fits = _process(_parse(path, info["name"]), cfg, info["name"], sheet)
             when = str(date).strip()[:40] if isinstance(date, (str, int, float)) and str(date).strip() else None
             runs.append(BatchRun(file=info["name"], positions=positions, fits=fits, config=cfg, run_date=when,
-                                 run_info=run_info))
+                                 run_info=run_info, config_notes=notes))
     return label_runs(runs)
 
 
@@ -471,7 +613,9 @@ def batch_results_xlsx(files: list[UploadFile] = File(...), configs: str | None 
     runs = _batch(files, configs, run_dates, sheet, run_infos)
     name = f"combined_{len(runs)}_run{'s' if len(runs) != 1 else ''}_results_ea_irms_v{VERSION}.xlsx"
     data = combined_xlsx(runs, (config_name or "").strip()[:200] or None, sheet)
-    return Response(data, media_type=XLSX, headers={"Content-Disposition": f'attachment; filename="{name}"'})
+    notes = [f"{r.file}: {n}" for r in runs for n in r.config_notes]
+    return Response(data, media_type=XLSX, headers=dict({"Content-Disposition": f'attachment; filename="{name}"'},
+                                                        **_notes_header(notes)))
 
 
 @app.post("/api/batch/results.csv")
@@ -482,8 +626,9 @@ def batch_results_csv(files: list[UploadFile] = File(...), configs: str | None =
     sheet = _sheet(sample_sheet, id_column)
     runs = _batch(files, configs, run_dates, sheet, run_infos)
     name = f"combined_{len(runs)}_run{'s' if len(runs) != 1 else ''}_results_ea_irms_v{VERSION}.csv"
+    notes = [f"{r.file}: {n}" for r in runs for n in r.config_notes]
     return Response(combined_csv(runs, sheet), media_type="text/csv",
-                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
+                    headers=dict({"Content-Disposition": f'attachment; filename="{name}"'}, **_notes_header(notes)))
 
 
 class _Sample:
@@ -603,13 +748,14 @@ def config_read(file: UploadFile = File(...)):
     if not data:
         raise HTTPException(422, f"{name} is empty")
     if suffix == ".json":
-        cfg, notes = _config(data.decode("utf-8", "replace")), []
+        notes = []
+        cfg = _config(data.decode("utf-8", "replace"), notes)
     else:
         try:
             cfg, notes = read_lab_config(data)
         except LabConfigError as exc:
             raise HTTPException(422, f"{name} could not be read: {exc}") from exc
-    return {"name": name, "ea_irms": VERSION, "config": config_to_dict(cfg), "notes": notes}
+    return {"name": name, "ea_irms": VERSION, "config": clean(config_to_dict(cfg)), "notes": notes}
 
 
 @app.get("/api/example")

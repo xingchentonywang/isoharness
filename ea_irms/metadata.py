@@ -13,7 +13,9 @@ matched.
 Analyses of one sample in one run are replicates: Sample positions matched to the sheet that
 have the same identifier, or the same value in the sheet's Replicate of column, which names
 the sample an analysis repeats. Matching by a shorter ID does not make two analyses
-replicates, so CI 3-2-H and CI 3-2-S, fractions of one colony, stay apart.
+replicates, so CI 3-2-H and CI 3-2-S, fractions of one colony, stay apart, and from 1.4.10 an
+analysis matched to a row by a shorter ID does not take that row's Replicate of (Tony,
+2026-10-14), so CI 2-2-H+S, matched to the row CI 2-2-H, does not join CI 2-2-H's replicates.
 
 The run information is four short texts typed for each run: Operator, Instrument, Project,
 and Notes. Nothing here changes a value; ea_irms.pipeline compares the replicates.
@@ -220,6 +222,11 @@ def _number_from_text(v):
 
 def _xlsx_grid(data: bytes):
     import openpyxl
+    from .xlsxguard import UploadTooLarge, check_xlsx
+    try:
+        check_xlsx(data, what="the sample sheet")          # 1.4.10: before anything opens it
+    except UploadTooLarge as exc:
+        raise SampleSheetError(str(exc)) from exc
     try:
         wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     except Exception as exc:
@@ -231,7 +238,7 @@ def _xlsx_grid(data: bytes):
             raise SampleSheetError("the workbook has no sheets")
         ws = wb[pick]
         grid, empty = [], 0
-        for row in ws.iter_rows(values_only=True):
+        for row in ws.iter_rows(values_only=True, max_col=MAX_COLUMNS + 1):
             vals = list(row)
             if all(v is None or (isinstance(v, str) and not v.strip()) for v in vals):
                 empty += 1
@@ -262,7 +269,7 @@ def _xls_grid(data: bytes):
     grid = []
     for r in range(min(sh.nrows, MAX_ROWS + HEADER_SEARCH + EMPTY_RUN_STOP)):
         row = []
-        for c in range(sh.ncols):
+        for c in range(min(sh.ncols, MAX_COLUMNS + 1)):      # 1.4.10: a bounded width
             cell = sh.cell(r, c)
             v = cell.value
             if cell.ctype == xlrd.XL_CELL_DATE:
@@ -296,7 +303,8 @@ def _text_grid(data: bytes, suffix: str):
             delim = "\t" if sample.count("\t") > sample.count(",") else ","
     grid = []
     for row in csv.reader(io.StringIO(text), delimiter=delim):
-        grid.append([_number_from_text(v.strip()) if isinstance(v, str) else v for v in row])
+        grid.append([_number_from_text(v.strip()) if isinstance(v, str) else v
+                     for v in row[:MAX_COLUMNS + 1]])                # 1.4.10: a bounded width
         if len(grid) > MAX_ROWS + HEADER_SEARCH + EMPTY_RUN_STOP:
             break
     return "", grid
@@ -359,7 +367,7 @@ def read_sample_sheet(data: bytes, name: str, id_column: str | None = None) -> S
     width = min(width, last)
     notes, counts = [], {}
     if width > MAX_COLUMNS:
-        notes.append(f"only the first {MAX_COLUMNS} of its {width} columns were read")
+        notes.append(f"only its first {MAX_COLUMNS} columns were read")    # 1.4.10: reading stops at the next
         width = MAX_COLUMNS
     columns, seen = [], {}
     for j in range(width):
@@ -432,7 +440,11 @@ def match_positions(positions, sheet: SampleSheet | None) -> list[dict]:
         if i is None:
             continue
         p.sheet_index, p.matched_by, p.sample_id = i, how, sheet.sample_id(i)
-        rep = sheet.value(i, sheet.replicate_index) if sheet.replicate_index is not None else None
+        # 1.4.10 (Tony, 2026-10-14): the row's Replicate of names the analyses of that row's sample, so an
+        # analysis matched to the row by a shorter ID, such as CI 2-2-H+S to the row CI 2-2-H, does not
+        # take it; such an analysis is a replicate only of analyses with its own identifier.
+        rep = (sheet.value(i, sheet.replicate_index)
+               if sheet.replicate_index is not None and how.startswith("exact") else None)
         key = norm(rep) if norm(rep) else norm(p.identifier)
         if key:
             keyed.setdefault(key, []).append((p, cell_text(rep).strip() if norm(rep) else " ".join(p.identifier.split())))
@@ -444,8 +456,9 @@ def match_positions(positions, sheet: SampleSheet | None) -> list[dict]:
         for p, _ in members:
             p.replicate_group = g
         by = "name"
-        if sheet.replicate_index is not None and any(norm(sheet.value(p.sheet_index, sheet.replicate_index))
-                                                     for p, _ in members):
+        if sheet.replicate_index is not None and any(
+                p.matched_by.startswith("exact") and norm(sheet.value(p.sheet_index, sheet.replicate_index))
+                for p, _ in members):
             by = REPLICATE_COLUMN
         groups.append({"group": g, "key": key, "name": members[0][1], "rows": [p.row for p, _ in members],
                        "by": by})
@@ -586,9 +599,10 @@ def template_xlsx(names) -> bytes:
         c.font, c.fill = f_hdr, fill_hdr
         c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         ws.column_dimensions[_letters(j)].width = widths.get(h, 14)
+    from .cells import put
     names = list(names)
     for i, n in enumerate(names, start=2):
-        c = ws.cell(i, 1, n)
+        c = put(ws, i, 1, n)      # a name is text, even one that begins with "=" (1.4.10)
         c.font = f_sm
         c.number_format = "@"
         for j in range(2, len(SAMPLE_COLUMNS) + 1):

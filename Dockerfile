@@ -58,5 +58,9 @@ ENV HOME=/home/app PORT=8000
 RUN python -m ea_irms warmup/20260915_raw.csv -o /tmp/warmup.xlsx && rm -f /tmp/warmup.xlsx
 
 EXPOSE 8000
-# One process: LibreOffice conversions are serialized inside it (isoharness.app).
+# One process: LibreOffice conversions are serialized inside it (isoharness.app). --proxy-headers keeps
+# the https of the address in the URLs the app builds. The upload limit does not use the client address
+# uvicorn derives from X-Forwarded-For, which with --forwarded-allow-ips='*' is whatever a client wrote at
+# its left end: it reads the header itself and counts the address ISOHARNESS_PROXY_HOPS places from the
+# right (isoharness 0.4.1, isoharness.app.client_address; GET /api/client shows what it reads).
 CMD ["sh", "-c", "exec uvicorn isoharness.app:app --host 0.0.0.0 --port ${PORT} --proxy-headers --forwarded-allow-ips='*'"]

@@ -65,6 +65,7 @@ RESULTS = {"pct_c_reported": 5, "u_pct_c": 6, "pct_n_reported": 7, "u_pct_n": 8,
            "u_cn_molar": 10, "cn_mass_reported": 11, "u_cn_mass": 12, "elem_factor_n": 21, "elem_factor_c": 22,
            "pct_c_measured": 23, "pct_n_measured": 24}
 FLAGS_COL = "Q"
+RERUN_TEXT = {18: "rerun", 19: "rerun_why", 20: "rerun_mass"}
 FITS = {"B20": ("lin_n", "applied"), "B95": ("lin_n", "fit", "p"), "B96": ("lin_n", "in_force"),
         "B28": ("lin_c", "applied"), "B102": ("lin_c", "fit", "p"), "B103": ("lin_c", "in_force"),
         "B39": ("drift_n", "applied"), "B114": ("drift_n", "fit", "p"), "B115": ("drift_n", "in_force"),
@@ -136,7 +137,9 @@ def check_values(body, wb):
     bad, n = [], 0
     errors = [(s.title, c.coordinate, c.value) for s in wb for row in s.iter_rows() for c in row
               if isinstance(c.value, str) and c.value.startswith("#") and c.value[1:4].isupper()
-              and not (s.title == "Work" and c.column in feeds and c.value == "#N/A")]
+              and not (s.title == "Work" and c.column in feeds and c.value == "#N/A")
+              and not (s.title == "Raw" and str(s.cell(1, c.column).value or "").startswith("chart ")
+                       and c.value == "#N/A")]   # 1.4.10: the pulses chart feeds, NA() by design
     for p in positions:
         for attr, col in cols.items():
             mine, theirs = p.get(attr), num(wk[f"{col}{5 + p['row']}"].value)
@@ -152,6 +155,12 @@ def check_values(body, wb):
         n += 1
         if {t.strip() for t in text.split(";") if t.strip()} != set(p["flags"]):
             bad.append(("flags", p["row"], text, p["flags"]))
+        # the rerun mark, its reason and the suggested mass (text, R to T), from 1.4.10 here too
+        for col, attr in RERUN_TEXT.items():
+            n += 1
+            mine, theirs = p.get(attr) or "", rs.cell(4 + p["row"], col).value or ""
+            if mine != theirs:
+                bad.append(("Results", attr, p["row"], mine, theirs))
     for cell, path in FITS.items():
         mine, theirs = dig(fits, path), ft[cell].value
         n += 1
@@ -162,7 +171,12 @@ def check_values(body, wb):
                 bad.append(("Fits", cell, path, mine, theirs))
         elif mine != theirs:
             bad.append(("Fits", cell, path, mine, theirs))
-    extra = [r for r in range(6 + len(positions), 126) if wk[f"B{r}"].value not in (None, "")]
+    n += 1
+    if ft["B356"].value != fits["rerun"]["run_level_text"]:
+        bad.append(("Fits", "B356", "problems of the whole run", fits["rerun"]["run_level_text"], ft["B356"].value))
+    last = max([125] + [5 + p["row"] for p in positions])
+    extra = [r for r in range(6, last + 1) if wk[f"B{r}"].value not in (None, "")
+             and r - 5 not in {p["row"] for p in positions}]
     if extra:
         bad.append(("extra Work rows", extra[:5]))
     return n, bad, errors
@@ -171,9 +185,10 @@ def check_values(body, wb):
 def check_engine(body, export: Path, config_text):
     """2. The API's positions against ea_irms called directly."""
     from ea_irms.parse import parse_export
-    from ea_irms.pipeline import Config, config_from_dict, process
+    from ea_irms.pipeline import Config, config_from_dict, process, scope_to_run
     from isoharness.serialize import position_record
     cfg = config_from_dict(json.loads(config_text)) if config_text else Config()
+    cfg, _ = scope_to_run(cfg, export.name)        # as the service applies it (ea_irms 1.4.10)
     positions, _ = process(parse_export(export), cfg)
     want = [json.loads(json.dumps(position_record(p))) for p in positions]
     got = body["positions"]

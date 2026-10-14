@@ -20,6 +20,7 @@ from openpyxl.formatting.rule import FormulaRule
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
+from ea_irms.cells import put
 from ea_irms.metadata import RUN_FIELDS, output_columns, output_header, output_values, summary_text
 from ea_irms.pipeline import Config
 from ea_irms.workbook import VERSION
@@ -64,6 +65,7 @@ class BatchRun:
     index: int = 0
     extra: dict = field(default_factory=dict)
     run_info: dict = field(default_factory=dict)       # Operator, Instrument, Project, Notes (0.3.0)
+    config_notes: list = field(default_factory=list)   # what the configuration set for another run (0.4.1)
 
 
 def label_runs(runs: list[BatchRun]) -> list[BatchRun]:
@@ -177,7 +179,7 @@ def combined_csv(runs: list[BatchRun], sheet=None) -> str:
     """The combined results table as CSV: Run, then the Results columns at full precision."""
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\n")
-    w.writerow(["Run"] + results_header("1sigma") + output_header(sheet, sheet_columns(runs, sheet)))
+    w.writerow(csv_cells(["Run"] + results_header("1sigma") + output_header(sheet, sheet_columns(runs, sheet))))
     for row in combined_rows(runs, sheet):
         w.writerow(csv_cells(row))
     return buf.getvalue()
@@ -185,7 +187,7 @@ def combined_csv(runs: list[BatchRun], sheet=None) -> str:
 
 def _table(ws, top: int, header: list[str], rows, widths: dict, formats: dict | None = None):
     for j, h in enumerate(header, start=1):
-        c = ws.cell(top, j, h)
+        c = put(ws, top, j, h)      # sample-sheet column names are text (ea_irms 1.4.10)
         c.font, c.fill = F_HDR, FILL_HDR
         c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         ws.column_dimensions[get_column_letter(j)].width = widths.get(h, 12)
@@ -193,7 +195,7 @@ def _table(ws, top: int, header: list[str], rows, widths: dict, formats: dict | 
     for i, row in enumerate(rows, start=top + 1):
         n += 1
         for j, v in enumerate(row, start=1):
-            c = ws.cell(i, j, v)
+            c = put(ws, i, j, v)     # every value here is data, never a formula
             c.font = F_SM
             fmt = (formats or {}).get(header[j - 1])
             if fmt and isinstance(v, (int, float)) and not isinstance(v, bool):
@@ -224,7 +226,8 @@ def combined_xlsx(runs: list[BatchRun], config_name: str | None = None, sheet=No
         ("text", "Runs: one row per run, with its file, run date, counts of positions, which corrections were "
                  "in force, the calibration slopes, the samples marked for a rerun or a check, and the problems "
                  "the run's Rerun sheet lists for the whole run; then the run information typed on the page "
-                 "(Operator, Instrument, Project, Notes) and, with a sample sheet, how many samples matched it."),
+                 "(Operator, Instrument, Project, Notes), with a sample sheet how many samples matched it, and "
+                 "Configuration notes when the configuration set positions for another run or named none."),
         ("text", "Repeats: samples, and check standards, measured in more than one of these runs, one row per "
                  "analysis. A sample is matched by its identifier, ignoring case and surrounding spaces; a check "
                  "standard by its row of the standards table. Every analysis of a matched name is listed, "
@@ -293,13 +296,16 @@ def combined_xlsx(runs: list[BatchRun], config_name: str | None = None, sheet=No
             srow[f] = r.run_info.get(f) or None
         if sheet is not None:
             srow["Samples matched"] = summary_text(r.fits.get("metadata", {}).get("match", {}))
+    if any(r.config_notes for r in runs):           # 0.4.1: only when a configuration said something
+        for r, srow in zip(runs, sums):
+            srow["Configuration notes"] = "; ".join(r.config_notes) or None
     rh = list(sums[0].keys()) if sums else ["Run"]
     rwid = {"Run": widths["Run"], "File": 30, "Run date": 11, "Positions": 9, "Samples": 9,
             "Anchor analyses": 9, "Check analyses": 9, "Blank subtracted": 10, "Linearity applied": 10,
             "Drift applied": 26, "Elemental drift corrected": 11, "Calibration slope d15N": 11,
             "Calibration slope d13C": 11, "Samples to rerun": 9, "Samples to check": 9,
             "Problems of the whole run": 60, "Operator": 16, "Instrument": 16, "Project": 18, "Notes": 40,
-            "Samples matched": 40}
+            "Samples matched": 40, "Configuration notes": 60}
     _table(ru, 1, rh, ([s[h] for h in rh] for s in sums), rwid,
            {"Calibration slope d15N": "0.0000", "Calibration slope d13C": "0.0000"})
     ru.freeze_panes = "B2"

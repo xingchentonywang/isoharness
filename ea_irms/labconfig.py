@@ -14,14 +14,18 @@ is an error rather than a silent default.
 from __future__ import annotations
 
 import io
+import math
+import re
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.worksheet.datavalidation import DataValidation
 
-from .pipeline import (MAX_STANDARDS, STANDARD_FIELDS, Config, config_from_dict, config_to_dict,
-                       standards_from_rows)
+from .cells import as_text
+from .xlsxguard import MAX_CONFIG_UNPACKED_MB, UploadTooLarge, check_xlsx
+from .pipeline import (MAX_RUN_FILE, MAX_STANDARDS, MONITORS, STANDARD_FIELDS, Config, config_from_dict,
+                       config_to_dict, standards_from_rows)
 
 SWITCH = ("On", "Off", "Auto")
 ONOFF = ("On", "Off")
@@ -33,7 +37,7 @@ SETTINGS_HEADERS = ["Setting", "Value", "What it means", "Key"]
 
 # (key, label, kind, note). A row without a key is a heading. Kinds: switch (On, Off or
 # Auto), switch_or_empty, onoff (On or Off, 1.4.8), model, number, number_or_empty,
-# whole_or_empty, positions.
+# whole_or_empty, positions, and from 1.4.10 source (Drift monitors or empty) and text_or_empty.
 SETTINGS = [
     (None, "Corrections", None, None),
     ("blank_correction", "Blank correction", "switch",
@@ -102,6 +106,12 @@ SETTINGS = [
      "Empty: the pooled scatter of the anchor replicates in each run."),
     ("u_sample_c", "Sample repeatability, d13C (1σ, permil)", "number_or_empty",
      "Empty: the pooled scatter of the anchor replicates in each run."),
+    ("u_sample_n_source", "Where the d15N repeatability comes from", "source",
+     "Empty: the value above is the lab's own and holds for every run. Drift monitors: it is the SD of the drift "
+     "monitors of the run named in the last row, and only that run takes it; another run takes the SD of its "
+     "own monitors on the isoharness.org page, and the pooled anchor scatter without the page (1.4.10)."),
+    ("u_sample_c_source", "Where the d13C repeatability comes from", "source",
+     "As for d15N."),
     ("coverage_k", "Multiple of 1σ for the checks (k)", "number",
      "The checks compare a standard's deviation with k x 1σ. k = 2 covers about 95 percent when the "
      "replicates behind 1σ are many."),
@@ -116,6 +126,11 @@ SETTINGS = [
      "Comma-separated autosampler positions."),
     ("exclude_elemental", "Positions left out of the elemental correction", "positions",
      "Comma-separated autosampler positions."),
+    ("run_file", "The run these were chosen for (its export's file name)", "text_or_empty",
+     "Written by isoharness.org when a configuration is downloaded after a run. The rows above, and a "
+     "repeatability from the drift monitors, are then used only for a run of this name, in any case and as "
+     ".xls, .xlsx, .csv, or another export; empty: they are used for the run the configuration is used with, "
+     "with a note, and for none when it is given to several runs at once (1.4.10)."),
 ]
 KEYS = [s[0] for s in SETTINGS if s[0]]
 
@@ -194,9 +209,13 @@ def config_to_xlsx(config: Config | None = None, path: str | Path | None = None,
          "certificates. 1σ is the uncertainty the producer lists, one standard deviation.", f_sm),
         ("", f_sm),
         ("One run only", f_h1),
-        ("The last rows of Settings (the first drift position and the positions left out) belong to one run. "
-         "A configuration downloaded after a run carries them; leave them empty in a configuration meant for "
-         "every run of the lab.", f_sm),
+        ("The last rows of Settings (the first drift position and the positions left out) belong to one run, "
+         "and so does a repeatability taken from that run's drift monitors. A configuration downloaded after a "
+         "run carries them with the run's file name in the last row, and they are then used only for a run of "
+         "that name: for any other run they are left out, and the page says so. With the last row empty they "
+         "are used for the one run the configuration is used with, with a note to check them, and for none "
+         "when it is given to several runs at once. Leave them empty in a configuration meant for every run of "
+         "the lab.", f_sm),
     ]
     for i, (text, font) in enumerate(lines, start=1):
         c = ws.cell(i, 2, text)
@@ -217,7 +236,8 @@ def config_to_xlsx(config: Config | None = None, path: str | Path | None = None,
     dv_swe = DataValidation(type="list", formula1='"On,Off,Auto"', allow_blank=True)
     dv_dm = DataValidation(type="list", formula1='"Row,Background,Auto"', allow_blank=False)
     dv_oo = DataValidation(type="list", formula1='"On,Off"', allow_blank=False)
-    for dv in (dv_sw, dv_swe, dv_dm, dv_oo):
+    dv_src = DataValidation(type="list", formula1=f'"{MONITORS}"', allow_blank=True)
+    for dv in (dv_sw, dv_swe, dv_dm, dv_oo, dv_src):
         st.add_data_validation(dv)
     r = 5
     for key, label, kind, note in SETTINGS:
@@ -230,18 +250,21 @@ def config_to_xlsx(config: Config | None = None, path: str | Path | None = None,
             continue
         st.cell(r, 1, label).font = f_sm
         v = st.cell(r, 2, _cell_value(key, data[key]))
+        as_text(v)                  # a file name stays text (1.4.10)
         v.font = f_in
         v.fill = fill_in
         v.border = box
-        if kind == "positions":
+        if kind in ("positions", "text_or_empty"):
             v.number_format = "@"
+        if kind == "text_or_empty":
+            v.alignment = Alignment(wrap_text=True, vertical="top")      # a file name longer than the cell
         n = st.cell(r, 3, note)
         n.font = f_note
         n.alignment = Alignment(wrap_text=True, vertical="top")
         k = st.cell(r, 4, key)
         k.font = f_key
         k.fill = fill_key
-        dv = {"switch": dv_sw, "switch_or_empty": dv_swe, "model": dv_dm, "onoff": dv_oo}.get(kind)
+        dv = {"switch": dv_sw, "switch_or_empty": dv_swe, "model": dv_dm, "onoff": dv_oo, "source": dv_src}.get(kind)
         if dv is not None:
             dv.add(f"B{r}")
         r += 1
@@ -270,6 +293,7 @@ def config_to_xlsx(config: Config | None = None, path: str | Path | None = None,
                 c.number_format = "0.00"
             if i < len(rows) and rows[i][j - 1] not in (None, ""):
                 c.value = rows[i][j - 1]
+                as_text(c)          # match text and material stay text (1.4.10)
     dv_role = DataValidation(type="list", formula1='"' + ",".join(ROLES) + '"', allow_blank=True)
     sd.add_data_validation(dv_role)
     dv_role.add(f"B5:B{4 + MAX_STANDARDS}")
@@ -283,8 +307,30 @@ def config_to_xlsx(config: Config | None = None, path: str | Path | None = None,
     return blob
 
 
+# 1.4.10: the values each setting can take, (lowest, highest, lowest allowed, highest allowed); a value
+# outside is refused with the setting named (finding R-12 of the 2026-10-14 review: a k of -5 was taken).
+RANGES = {
+    "significance_level": (0.0, 1.0, False, False), "monitor_outlier_t": (0.0, None, False, None),
+    "check_offset_permil": (0.0, None, True, None), "min_area_n": (0.0, None, True, None),
+    "min_area_c": (0.0, None, True, None), "max_area_n": (0.0, None, True, None),
+    "max_area_c": (0.0, None, True, None), "min_blank_multiple": (0.0, None, True, None),
+    "settled_threshold": (0.0, 1.0, False, True), "carryover_mv": (0.0, None, True, None),
+    "ref_pulse_ampl_tol": (0.0, None, True, None), "ref_pulse_d13c_window": (0.0, None, True, None),
+    "ref_pulse_off_sd": (0.0, None, False, None), "ref_gas_sd_limit": (0.0, None, False, None),
+    "max_amplitude_mv": (0.0, None, False, None), "rerun_max_1sigma": (0.0, None, False, None),
+    "u_sample_n": (0.0, None, True, None), "u_sample_c": (0.0, None, True, None),
+    "coverage_k": (0.0, None, False, None), "balance_u_mg": (0.0, None, True, None),
+    "elemental_threshold_pct": (0.0, None, True, None), "first_drift_position": (1, None, True, None),
+}
+
+
 def _number(text, whole=False):
+    """A finite number from a cell or a JSON value; True and False are not numbers (1.4.10)."""
+    if isinstance(text, bool):
+        raise ValueError
     value = float(text) if not isinstance(text, (int, float)) else text
+    if not math.isfinite(value):
+        raise ValueError
     if whole:
         if float(value) != int(value):
             raise ValueError
@@ -292,56 +338,192 @@ def _number(text, whole=False):
     return float(value)
 
 
+def _in_range(key, value, problems, where):
+    """The value, or None with a problem when it lies outside RANGES[key]."""
+    lo, hi, lo_ok, hi_ok = RANGES.get(key, (None, None, None, None))
+    low = lo is not None and (value < lo or (value == lo and not lo_ok))
+    high = hi is not None and (value > hi or (value == hi and not hi_ok))
+    if not (low or high):
+        return value
+    parts = [f"{'of at least' if lo_ok else 'above'} {lo:g}"]
+    if hi is not None:
+        parts.append(f"{'at most' if hi_ok else 'below'} {hi:g}")
+    problems.append(f"{_name(where, key)} is {_text(value)}; it needs a number {' and '.join(parts)}")
+    return None
+
+
+def _name(where, key):
+    """How a message names a setting: by its cell and key in an Excel configuration, by its key in JSON."""
+    return f"{where} ({key})" if where else key
+
+
+def _positions(text):
+    """Positions from text such as 59, 61 or 59; 61 or 59 61; None when a part is not a whole number."""
+    tokens = [t for t in re.split(r"[,;\s]+", str(text)) if t]
+    return [int(t) for t in tokens] if all(t.isdigit() for t in tokens) else None
+
+
 def _read_value(key, kind, raw, problems, where):
     empty = raw is None or (isinstance(raw, str) and not raw.strip())
     text = raw.strip() if isinstance(raw, str) else raw
-    if kind in ("switch", "switch_or_empty", "model", "onoff"):
-        allowed = MODELS if kind == "model" else ONOFF if kind == "onoff" else SWITCH
+    if kind == "text_or_empty":                 # 1.4.10: the run a configuration's run-only rows belong to
         if empty:
-            if kind == "switch_or_empty":
+            return None
+        if isinstance(text, bool) or not isinstance(text, (str, int, float)):
+            problems.append(f"{_name(where, key)} is {raw!r}; it needs a file name, or nothing")
+            return None
+        value = _text(text).strip()
+        if len(value) > MAX_RUN_FILE:
+            problems.append(f"{_name(where, key)} holds {len(value)} characters; a file name has at most "
+                            f"{MAX_RUN_FILE}")
+            return None
+        return value
+    if kind in ("switch", "switch_or_empty", "model", "onoff", "source"):
+        allowed = MODELS if kind == "model" else ONOFF if kind == "onoff" else (MONITORS,) if kind == "source" \
+            else SWITCH
+        if empty:
+            if kind in ("switch_or_empty", "source"):
                 return None
-            problems.append(f"{where} ({key}) is empty; it needs one of {', '.join(allowed)}")
+            problems.append(f"{_name(where, key)} is empty; it needs one of {', '.join(allowed)}")
             return None
         if isinstance(text, bool):
             text = "On" if text else "Off"
         hit = next((a for a in allowed if str(text).lower() == a.lower()), None)
         if hit is None:
-            problems.append(f"{where} ({key}) is {_text(raw)!r}; it needs one of {', '.join(allowed)}")
+            problems.append(f"{_name(where, key)} is {_text(raw)!r}; it needs "
+                            + (f"{MONITORS}, or nothing" if kind == "source" else f"one of {', '.join(allowed)}"))
         return hit
     if kind == "positions":
         if empty:
             return []
-        if isinstance(text, (int, float)) and not isinstance(text, bool):
+        need = f"{_name(where, key)} is {_text(raw)!r}; it needs whole positions from 1, such as 59, 61"
+        if isinstance(text, (list, tuple)):              # a JSON list (1.4.10)
+            out = []
+            for v in text:
+                try:
+                    out.append(_number(v.strip() if isinstance(v, str) else v, whole=True))
+                except (TypeError, ValueError):
+                    problems.append(need)
+                    return []
+        elif isinstance(text, (int, float)) and not isinstance(text, bool):
             try:
-                return [_number(text, whole=True)]
+                out = [_number(text, whole=True)]
             except ValueError:
-                problems.append(f"{where} ({key}) is {_text(raw)!r}; it needs whole positions such as 59, 61")
+                problems.append(need)
                 return []
-        tokens = [t.strip() for t in str(text).replace(";", ",").split(",") if t.strip()]
-        if not all(t.isdigit() for t in tokens):
-            problems.append(f"{where} ({key}) is {_text(raw)!r}; it needs whole positions such as 59, 61")
+        else:
+            out = _positions(text) if not isinstance(text, bool) else None
+            if out is None:
+                problems.append(need)
+                return []
+        if any(v < 1 for v in out):
+            problems.append(need)
             return []
-        return [int(t) for t in tokens]
+        return out
     if empty:
         if kind in ("number_or_empty", "whole_or_empty"):
             return None
-        problems.append(f"{where} ({key}) is empty; it needs a number")
+        problems.append(f"{_name(where, key)} is empty; it needs a number")
         return None
     try:
-        return _number(text, whole=(kind == "whole_or_empty"))
+        value = _number(text, whole=(kind == "whole_or_empty"))
     except (TypeError, ValueError):
         what = "a whole number" if kind == "whole_or_empty" else "a number"
-        problems.append(f"{where} ({key}) is {_text(raw)!r}; it needs {what}")
+        problems.append(f"{_name(where, key)} is {_text(raw)!r}; it needs {what}")
         return None
+    return _in_range(key, value, problems, where)
+
+
+def _standard_row(cells, problems, cell_name, row_name):
+    """One row of the standards table, checked: match text, a role, and numbers; None for an empty row
+    or one without match text (which is a problem). ``cell_name(j)`` names column j for a message."""
+    cells = list(cells)[:STANDARD_FIELDS] + [None] * max(0, STANDARD_FIELDS - len(cells))
+    if all(c is None or (isinstance(c, str) and not c.strip()) for c in cells):
+        return None
+    match = cells[0]
+    if match is None or isinstance(match, bool) or not str(match).strip():
+        problems.append(f"{row_name} has values but no match text in column A")
+        return None
+    cells[0] = str(match).strip()
+    role = cells[1]
+    hit = next((x for x in ROLES if str(role or "").strip().lower() == x.lower()), None)
+    if hit is None:
+        problems.append(f"{cell_name(1)} ({cells[0]}) is {_text(role)!r}; the role is one of {', '.join(ROLES)}")
+    cells[1] = hit
+    for j in (2, 3, 4, 5, 7, 8, 9, 10):
+        v = cells[j]
+        if v is None or (isinstance(v, str) and not v.strip()):
+            cells[j] = None
+            continue
+        try:
+            cells[j] = _number(v.strip() if isinstance(v, str) else v)
+        except (TypeError, ValueError):
+            problems.append(f"{cell_name(j)} ({cells[0]}) is {_text(v)!r}; it needs a number")
+            cells[j] = None
+            continue
+        # 1.4.10: %C and %N are percentages, and a 1σ is not negative
+        if j in (4, 5) and not 0 <= cells[j] <= 100:
+            problems.append(f"{cell_name(j)} ({cells[0]}) is {_text(v)}; it needs a percentage from 0 to 100")
+            cells[j] = None
+        elif j >= 7 and cells[j] < 0:
+            problems.append(f"{cell_name(j)} ({cells[0]}) is {_text(v)}; a 1σ is a number of at least 0")
+            cells[j] = None
+    cells[6] = None if cells[6] is None or not str(cells[6]).strip() else str(cells[6]).strip()
+    return cells
+
+
+def read_config_json(data) -> tuple[Config, list[str]]:
+    """Read a configuration sent as JSON (a dict) by the rules of the Excel one (1.4.10): On, Off and Auto
+    in any case, positions as a list or as text such as 59, 61 or 59 61, finite numbers inside each
+    setting's range, and a standards table of rows. Returns the configuration and notes on the keys this
+    version does not read; raises LabConfigError naming every value it cannot use. Before 1.4.10 such a
+    configuration was taken as it came, so "off" ran as Auto in the engine and as Off in the workbook,
+    and "40 47" left out no position (finding R-07 of the 2026-10-14 review)."""
+    if not isinstance(data, dict):
+        raise LabConfigError(["a configuration is one JSON object of fields, such as blank_correction"])
+    kinds = {key: kind for key, _, kind, _ in SETTINGS if key}
+    problems, notes, out = [], [], {}
+    for key, raw in data.items():
+        if key == "standards":
+            if raw is None:
+                continue
+            if not isinstance(raw, list) or not all(isinstance(r, (list, tuple)) for r in raw):
+                problems.append("standards is a list of rows, each a list beginning with the match text and the role")
+                continue
+            rows = []
+            for i, row in enumerate(raw, start=1):
+                cells = _standard_row(row, problems, lambda j, i=i: f"standards row {i}, item {j + 1}",
+                                      f"standards row {i}")
+                if cells is not None:
+                    rows.append(cells)
+            if len(rows) > MAX_STANDARDS:
+                problems.append(f"standards holds {len(rows)} rows; the workbook takes at most {MAX_STANDARDS}")
+            out["standards"] = standards_from_rows(rows)
+        elif key in kinds:
+            out[key] = _read_value(key, kinds[key], raw, problems, None)
+        else:
+            notes.append(f"{key} is not a setting ea_irms {_version()} reads, so it was left out")
+    if problems:
+        raise LabConfigError(problems)
+    return config_from_dict(out), notes
+
+
+def _version():
+    from .workbook import VERSION
+    return VERSION
 
 
 def read_lab_config(source) -> tuple[Config, list[str]]:
     """Read an Excel lab configuration. Returns the configuration and notes on what was
     filled from the defaults or left unread; raises LabConfigError on any cell it cannot use.
     ``source`` is a path or the file's bytes."""
+    stream = io.BytesIO(source) if isinstance(source, (bytes, bytearray)) else source
     try:
-        wb = load_workbook(io.BytesIO(source) if isinstance(source, (bytes, bytearray)) else source,
-                           data_only=True)
+        check_xlsx(stream, MAX_CONFIG_UNPACKED_MB, "the lab configuration")      # 1.4.10
+    except UploadTooLarge as exc:
+        raise LabConfigError([str(exc)]) from exc
+    try:
+        wb = load_workbook(stream, data_only=True)
     except Exception as exc:   # not an .xlsx file at all
         raise LabConfigError([f"the file could not be opened as an Excel workbook ({type(exc).__name__})"]) \
             from exc
@@ -385,31 +567,10 @@ def read_lab_config(source) -> tuple[Config, list[str]]:
         raise LabConfigError([f"the Standards sheet has no header row starting with {STANDARD_HEADERS[0]}"])
     rows = []
     for r in range(hdr_row + 1, sd.max_row + 1):
-        cells = [sd.cell(r, j).value for j in range(1, STANDARD_FIELDS + 1)]
-        if all(c is None or (isinstance(c, str) and not c.strip()) for c in cells):
-            continue
-        match = cells[0]
-        if match is None or not str(match).strip():
-            problems.append(f"Standards row {r} has values but no match text in column A")
-            continue
-        cells[0] = str(match).strip()
-        role = cells[1]
-        hit = next((x for x in ROLES if str(role or "").strip().lower() == x.lower()), None)
-        if hit is None:
-            problems.append(f"Standards B{r} ({cells[0]}) is {_text(role)!r}; the role is one of {', '.join(ROLES)}")
-        cells[1] = hit
-        for j in (2, 3, 4, 5, 7, 8, 9, 10):
-            v = cells[j]
-            if v is None or (isinstance(v, str) and not v.strip()):
-                cells[j] = None
-                continue
-            try:
-                cells[j] = _number(v)
-            except (TypeError, ValueError):
-                problems.append(f"Standards {chr(65 + j)}{r} ({cells[0]}) is {_text(v)!r}; it needs a number")
-                cells[j] = None
-        cells[6] = None if cells[6] is None or not str(cells[6]).strip() else str(cells[6]).strip()
-        rows.append(cells)
+        cells = _standard_row([sd.cell(r, j).value for j in range(1, STANDARD_FIELDS + 1)], problems,
+                              lambda j, r=r: f"Standards {chr(65 + j)}{r}", f"Standards row {r}")
+        if cells is not None:
+            rows.append(cells)
     if len(rows) > MAX_STANDARDS:
         problems.append(f"Standards holds {len(rows)} rows; the workbook takes at most {MAX_STANDARDS}")
     if problems:

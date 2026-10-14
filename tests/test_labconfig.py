@@ -50,7 +50,7 @@ def test_every_setting_has_one_row():
     assert sorted(KEYS) == sorted(f.name for f in fields(Config) if f.name != "standards")
     assert len(KEYS) == len(set(KEYS))
     assert all(kind in ("switch", "switch_or_empty", "onoff", "model", "number", "number_or_empty",
-                        "whole_or_empty", "positions") for key, _, kind, _ in SETTINGS if key)
+                        "whole_or_empty", "positions", "source", "text_or_empty") for key, _, kind, _ in SETTINGS if key)
 
 
 @pytest.mark.parametrize("config", [Config(), _custom()], ids=["defaults", "custom"])

@@ -412,7 +412,7 @@ def main(argv=None):
             lab.write_text(json.dumps({"blank_correction": "On", "coverage_k": 3.0}))
             with page.expect_request(lambda r: r.url.endswith("/api/process") and r.method == "POST"):
                 page.set_input_files("#dc-config", str(lab))
-            expect(page.get_by_text("The run was processed again with lab-config.json")).to_be_visible(timeout=30000)
+            expect(page.locator(".dc-toast").get_by_text("The run was processed again with lab-config.json")).to_be_visible(timeout=30000)
             status, _, body = post_json(base, "/api/config.xlsx", {"config": json.loads(lab.read_text()), "name": "lab"})
             check(status == 200, f"/api/config.xlsx answered {status}")
             lab = work / "lab-config.xlsx"
@@ -420,7 +420,7 @@ def main(argv=None):
             # (k = 3 on the uncertainty step can only come from the server, through the port block's settings)
             with page.expect_request(lambda r: r.url.endswith("/api/process") and r.method == "POST"):
                 page.set_input_files("#dc-config", str(lab))
-            expect(page.get_by_text("The run was processed again with lab-config.xlsx")).to_be_visible(timeout=30000)
+            expect(page.locator(".dc-toast").get_by_text("The run was processed again with lab-config.xlsx")).to_be_visible(timeout=30000)
             page.get_by_role("button", name="Start the corrections").click()
             heading("inst")
             page.locator("nav[aria-label='Correction steps'] button", has_text="Setup").click()
@@ -438,7 +438,12 @@ def main(argv=None):
             page.get_by_role("navigation", name="Main").get_by_role("button", name="EA-IRMS").click()
             with page.expect_request(lambda r: r.url.endswith("/api/process") and r.method == "POST"):
                 page.get_by_role("button", name="Use the package defaults").click()
-            expect(page.get_by_text("processed again with the package defaults")).to_be_visible(timeout=30000)
+            expect(page.locator(".dc-toast").get_by_text("processed again with the package defaults")).to_be_visible(timeout=30000)
+
+            # isoharness 0.4.1 (R-17): with a run on the page, leaving it asks first
+            check(page.evaluate("() => { const e = new Event('beforeunload', { cancelable: true }); "
+                                "window.dispatchEvent(e); return e.defaultPrevented; }"),
+                  "leaving the page with a run on it does not ask first")
 
             # ---- the steps, with decisions on the way
             page.get_by_role("button", name="Start the corrections").click()
@@ -499,6 +504,12 @@ def main(argv=None):
                     expect(how.get_by_role("button", name="Hide explanations")).to_be_visible()
                 if scr == "drift":
                     chart = page.locator("figure", has_text="δ¹⁵N of the drift monitors")
+                    # isoharness 0.4.1 (R-03): a figure's points are one tab stop, each at least a dot wide
+                    check(chart.locator('button.dc-hit[tabindex="0"]').count() == 1,
+                          "the drift monitors' figure has more than one tab stop")
+                    small = chart.locator("button.dc-hit").evaluate_all(
+                        "bs => bs.filter(b => { const r = b.getBoundingClientRect(); return r.width < 4 || r.height < 4; }).length")
+                    check(small == 0, f"{small} points of the drift monitors' figure are under 4 px")
                     point = chart.get_by_role("button", name=re.compile(rf", position {EXCL_N}: "))
                     point.click()
                     expect(chart.get_by_role("button", name=re.compile(rf", position {EXCL_N}: .*Left out"))).to_have_count(1)
@@ -533,7 +544,7 @@ def main(argv=None):
 
             # ---- the results screen against the service, decisions built here without the page
             page_rows = page.eval_on_selector_all(
-                'section[aria-label="Samples"] [role="table"] > button',
+                'section[aria-label="Samples"] [role="table"] > [role="row"]:not(:first-child)',
                 """els => els.map(b => { const c = [...b.children].map(x => x.textContent);
                      return { r: c[0], id: c[1], amt: c[2], aN: c[3], dN: c[4], UN: c[5], dC: c[6], UC: c[7],
                               pN: c[8], pC: c[9], cn: c[10],
@@ -574,8 +585,9 @@ def main(argv=None):
             check(got["Workbook"].name == f"20260915_raw_ea_irms_v{ver}.xlsx", f"workbook named {got['Workbook'].name}")
             check(got["Results table"].name == f"20260915_raw_results_ea_irms_v{ver}.csv", f"table named {got['Results table'].name}")
             check(got["Configuration"].name == "20260915_raw_config.xlsx", f"configuration named {got['Configuration'].name}")
-            check(page.locator("[role=status]").count() == 0, "a download left a message: " + (
-                page.locator("[role=status]").first.inner_text() if page.locator("[role=status]").count() else ""))
+            # the message bar (isoharness 0.4.1: .dc-toast; the live region beside it is always there)
+            check(page.locator(".dc-toast").count() == 0, "a download left a message: " + (
+                page.locator(".dc-toast").first.inner_text() if page.locator(".dc-toast").count() else ""))
 
             # the configuration, read back by the service: the decisions in their fields, every other field
             # as processed
@@ -585,7 +597,9 @@ def main(argv=None):
             cfg = json.loads(body)["config"]
             want = dict(processed, blank_correction="On", linearity_correction="Auto", linearity_correction_c="Auto",
                         drift_correction="Auto", drift_model="Background", exclude_drift_n=[EXCL_N], exclude_drift_c=[],
-                        elemental_correction="Auto", exclude_elemental=[EXCL_E], u_sample_c=None)
+                        elemental_correction="Auto", exclude_elemental=[EXCL_E], u_sample_c=None,
+                        # ea_irms 1.4.10 (R-08): the run these were chosen for, and the repeatability's source
+                        run_file="20260915_raw.csv", u_sample_n_source="Drift monitors", u_sample_c_source=None)
             check(set(cfg) == set(want), f"configuration fields differ: {sorted(set(cfg) ^ set(want))}")
             for k, v in want.items():
                 if k != "u_sample_n":
@@ -721,7 +735,7 @@ def main(argv=None):
             for field, value in (("operator", "XT Wang"), ("instrument", "Delta V Plus"), ("project", "e2e")):
                 page.fill(f"#dc-info-{field}", value)
             page.get_by_role("button", name="Use for every run").click()
-            expect(page.get_by_text("Every run of the batch now has the run information of 20260915_raw.csv.")).to_be_visible()
+            expect(page.locator(".dc-toast").get_by_text("Every run of the batch now has the run information of 20260915_raw.csv.")).to_be_visible()
             page.fill("#dc-info-notes", "first run")
             with page.expect_download(timeout=30000) as dl:
                 page.get_by_role("button", name="Download a sheet with these sample names").click()
@@ -805,6 +819,85 @@ def main(argv=None):
             page.get_by_role("button", name="Start the corrections").click()
             heading("results")
 
+            # ---- ea_irms 1.4.10 (R-08): the downloaded configuration chosen for the batch. Its positions left
+            # out and its repeatability from the drift monitors belong to 20260915_raw.csv; the other run keeps
+            # none of them, takes the SD of its own monitors, and says so.
+            page.get_by_role("navigation", name="Main").get_by_role("button", name="EA-IRMS").click()
+            with page.expect_request(lambda r: r.url.endswith("/api/process") and r.method == "POST"):
+                page.set_input_files("#dc-config", str(got["Configuration"]))
+            expect(page.locator(".dc-toast").get_by_text(
+                "The 2 runs were processed again with 20260915_raw_config.xlsx")).to_be_visible(timeout=60000)
+            expect(page.get_by_text(re.compile(
+                rf"the position left out of the nitrogen drift fit \({EXCL_N}\), the position left out of the elemental "
+                rf"correction \({EXCL_E}\), and the d15N repeatability from the drift monitors \(0\.\d{{3}} permil\) were "
+                r"chosen for 20260915_raw\.csv and are used for that run only"))).to_be_visible()
+            listed = page.locator('section[aria-label="Runs in this batch"] li')
+            first_row, second_row = listed.nth(0).inner_text(), listed.nth(1).inner_text()
+            check("Read without errors" in first_row and "note" not in first_row, f"batch row 1 reads {first_row!r}")
+            check("Read without errors; 1 note on the configuration" in second_row, f"batch row 2 reads {second_row!r}")
+            page.get_by_role("button", name="Show 20260916_run_a.csv").click()
+            expect(page.get_by_text(re.compile(
+                rf"In the configuration: the position left out of the nitrogen drift fit \({EXCL_N}\), the position "
+                rf"left out of the elemental correction \({EXCL_E}\), and the d15N repeatability from the drift "
+                r"monitors \(0\.\d{3} permil\) were chosen for 20260915_raw\.csv, so they were not applied to "
+                r"20260916_run_a\.csv"))).to_be_visible()
+            page.get_by_role("button", name="Start the corrections").click()
+            page.locator("nav[aria-label='Correction steps'] button", has_text="Drift").click()
+            heading("drift")
+            chart = page.locator("figure", has_text="δ¹⁵N of the drift monitors")
+            expect(chart).to_contain_text("13 of 13 in the fit")
+            page.locator("nav[aria-label='Correction steps'] button", has_text="Uncertainty").click()
+            heading("unc")
+            group = page.get_by_role("group", name="δ¹⁵N repeatability")
+            expect(group.get_by_role("button", name="Drift monitors")).to_have_attribute("aria-pressed", "true")
+            check(group.get_by_role("button", name="Configuration").count() == 0,
+                  "another run's monitor SD is offered as the configuration's value")
+            page.locator("nav[aria-label='Correction steps'] button", has_text="Results").click()
+            heading("results")
+            files = page.locator('section[aria-label="Files and methods"]')
+            with page.expect_download(timeout=30000) as dl:
+                files.get_by_role("button", name=re.compile("^Configuration")).click()
+            other = work / ("run_a_" + dl.value.suggested_filename)
+            dl.value.save_as(str(other))
+            status, _, body = post(base, "/api/config/read", other)
+            mine_a = json.loads(body)["config"]
+            check(mine_a["run_file"] == "20260916_run_a.csv" and mine_a["exclude_drift_n"] == []
+                  and mine_a["exclude_elemental"] == [] and mine_a["u_sample_n_source"] == "Drift monitors",
+                  f"the second run's configuration reads {[mine_a[k] for k in ('run_file', 'exclude_drift_n', 'exclude_elemental', 'u_sample_n_source')]}")
+            status, _, body = post(base, "/api/process", run_a, {"config": json.dumps(dict(mine_a, u_sample_n=None))})
+            mons_a = [p["d15n_drift"] for p in json.loads(body)["positions"]
+                      if p["role"] == "Drift" and p["d15n_drift"] is not None]
+            check(abs(mine_a["u_sample_n"] - sd(mons_a)) <= 1e-12 * sd(mons_a),
+                  f"the second run's repeatability is {mine_a['u_sample_n']}, its own monitors' SD {sd(mons_a)}")
+            page.get_by_role("navigation", name="Runs").get_by_role("button", name=re.compile("20260915_raw.csv")).click()
+            expect(page.get_by_text("Run 1 of 2")).to_be_visible()
+            page.locator("nav[aria-label='Correction steps'] button", has_text="Drift").click()
+            heading("drift")
+            chart = page.locator("figure", has_text="δ¹⁵N of the drift monitors")
+            expect(chart).to_contain_text("12 of 13 in the fit")
+            stats["scoped"] = len(mons_a)
+            # a configuration that names no run, chosen for the two runs at once, leaves its positions out of both
+            nameless = work / "nameless.json"
+            nameless.write_text(json.dumps({"exclude_drift_n": [EXCL_N]}))
+            page.get_by_role("navigation", name="Main").get_by_role("button", name="EA-IRMS").click()
+            with page.expect_request(lambda r: r.url.endswith("/api/process") and r.method == "POST"):
+                page.set_input_files("#dc-config", str(nameless))
+            expect(page.locator(".dc-toast").get_by_text("The 2 runs were processed again with nameless.json")).to_be_visible(timeout=60000)
+            expect(page.get_by_text(f"no run is named for the position left out of the nitrogen drift fit ({EXCL_N}), so "
+                                    "it goes with none of the runs, since the configuration was given to several at "
+                                    "once")).to_be_visible()
+            listed = page.locator('section[aria-label="Runs in this batch"] li')
+            for k in range(2):
+                text = listed.nth(k).inner_text()
+                check("1 note on the configuration" in text, f"batch row {k + 1} reads {text!r}")
+            expect(page.get_by_text(f"In the configuration: no run is named for the position left out of the "
+                                    f"nitrogen drift fit ({EXCL_N}), and the configuration was given to several runs "
+                                    "at once, so it was applied to none of them")).to_be_visible()
+            page.get_by_role("button", name="Start the corrections").click()
+            page.locator("nav[aria-label='Correction steps'] button", has_text="Drift").click()
+            heading("drift")
+            expect(page.locator("figure", has_text="δ¹⁵N of the drift monitors")).to_contain_text("13 of 13 in the fit")
+
             # ---- 400 px wide
             page.set_viewport_size({"width": 400, "height": 1000})
             shot("400-results.png")
@@ -859,7 +952,8 @@ def main(argv=None):
           f"2 refused uploads shown as written; a batch of 3 runs, {stats['batch'][0]} combined rows equal to each "
           f"run's own table within {stats['batch'][1]:.1e} relative, {stats['batch'][2]} repeat analyses; "
           f"a sample sheet matched and carried into {stats['sheet'][0]} rows of the combined table, run information "
-          f"on {stats['sheet'][1]} runs and in a run's workbook; "
+          f"on {stats['sheet'][1]} runs and in a run's workbook; one run's configuration kept to that run in a "
+          f"batch, the other taking its own {stats['scoped']} monitors; "
           f"0 console errors, 0 failed requests; screenshots in {shots}")
     return 0
 

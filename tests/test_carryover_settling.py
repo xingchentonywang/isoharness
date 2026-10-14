@@ -154,7 +154,9 @@ def test_workbook_agrees_with_engine(exports, tmp_path):
         feeds = {c for h, c in header.items() if str(h or "").startswith("ch ")}
         errors = [(s.title, c.coordinate) for s in wb for row in s.iter_rows() for c in row
                   if isinstance(c.value, str) and c.value.startswith("#") and c.value[1:4].isupper()
-                  and not (s.title == "Work" and c.column in feeds and c.value == "#N/A")]
+                  and not (s.title == "Work" and c.column in feeds and c.value == "#N/A")
+              and not (s.title == "Raw" and str(s.cell(1, c.column).value or "").startswith("chart ")
+                       and c.value == "#N/A")]   # 1.4.10: the pulses chart feeds, NA() by design
         assert not errors, (name, errors[:5])
         assert ft["B86"].value == fits["settling"]["settled_from"], name
         assert abs(ft["B85"].value - fits["settling"]["excess"]) < 1e-9, name

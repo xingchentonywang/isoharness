@@ -17,7 +17,10 @@ each input's uncertainty on the result.
 from __future__ import annotations
 
 import math
+import re
+import unicodedata
 from dataclasses import dataclass, field
+from decimal import ROUND_HALF_UP, Decimal
 
 from .metadata import critical_range_factor, match_positions, match_summary
 from .parse import Position
@@ -106,6 +109,11 @@ class Config:
     carryover_mv: float | None = 2.0    # background rise that flags possible carryover; None = off
     u_sample_n: float | None = None     # single-analysis repeatability, 1 SD; None = pooled anchors
     u_sample_c: float | None = None
+    # 1.4.10: where u_sample_n and u_sample_c came from. "Drift monitors" means the value is the SD of the
+    # drift monitors of the run named by run_file, so it belongs to that run (scope_to_run); None means the
+    # value, if any, is the lab's own and holds for every run.
+    u_sample_n_source: str | None = None
+    u_sample_c_source: str | None = None
     coverage_k: float = 2.0             # the checks compare against k x 1 sigma (1.4.5)
     # 1.4.3: standard uncertainty of one weighing, mg; None = not given, counted as 0
     balance_u_mg: float | None = None
@@ -134,16 +142,138 @@ class Config:
     # critical range of ISO 5725-6 (f(n) x the repeatability of one analysis) are marked for a rerun of
     # that element. On or Off; without a sample sheet nothing is compared.
     rerun_replicates: str = "On"
+    # 1.4.10: the export the first drift position, the positions left out, and a repeatability taken from
+    # the drift monitors were chosen for. They are applied only to a run of that name; with no name they
+    # are applied to any run, with a note (scope_to_run; finding R-08 of the 2026-10-14 review).
+    run_file: str | None = None
 
     def __post_init__(self):
-        # Older configurations stored the switches as booleans.
-        for name in ("linearity_correction", "linearity_correction_c", "drift_correction",
-                     "elemental_correction", "rerun_replicates"):
-            v = getattr(self, name)
-            if v is True:
-                setattr(self, name, "On")
-            elif v is False:
-                setattr(self, name, "Off")
+        _normalize(self)
+
+
+MONITORS = "Drift monitors"       # the one source of a repeatability that belongs to one run (1.4.10)
+
+# The switches and the words each takes. From 1.4.10 they are read in any case, so "off" is Off in the
+# engine as it already was in the workbook, where Excel compares text without regard to case; a word
+# that is none of these is refused rather than read as Auto (finding R-07 of the 2026-10-14 review).
+CHOICES = {"blank_correction": ("On", "Off", "Auto"), "linearity_correction": ("On", "Off", "Auto"),
+           "linearity_correction_c": ("On", "Off", "Auto"), "drift_correction": ("On", "Off", "Auto"),
+           "drift_model": ("Row", "Background", "Auto"), "elemental_correction": ("On", "Off", "Auto"),
+           "rerun_replicates": ("On", "Off"), "u_sample_n_source": (MONITORS,), "u_sample_c_source": (MONITORS,)}
+OPTIONAL_CHOICES = ("linearity_correction_c", "u_sample_n_source", "u_sample_c_source")   # empty means none
+MAX_RUN_FILE = 255
+
+
+def _normalize(config):
+    """Put each switch in its own spelling; older configurations stored some as booleans."""
+    for name, allowed in CHOICES.items():
+        v = getattr(config, name)
+        if v is True and "On" in allowed:
+            v = "On"
+        elif v is False and "Off" in allowed:
+            v = "Off"
+        if name in OPTIONAL_CHOICES and (v is None or (isinstance(v, str) and not v.strip())):
+            setattr(config, name, None)
+            continue
+        hit = next((a for a in allowed if isinstance(v, str) and v.strip().casefold() == a.casefold()), None)
+        if hit is None:
+            raise ValueError(f"{name} is {v!r}; it needs one of {', '.join(allowed)}"
+                             + (" or nothing" if name in OPTIONAL_CHOICES else ""))
+        setattr(config, name, hit)
+    run = config.run_file
+    if run is not None and (isinstance(run, bool) or not isinstance(run, (str, int, float))):
+        raise ValueError(f"run_file is {run!r}; it needs the export's file name, or nothing")
+    run = str(run).strip() if run is not None else ""
+    if len(run) > MAX_RUN_FILE:
+        raise ValueError(f"run_file holds {len(run)} characters; a file name has at most {MAX_RUN_FILE}")
+    config.run_file = run or None
+
+
+# ------------------------------------------------- values that belong to one run (1.4.10)
+RUN_ONLY = ("first_drift_position", "exclude_drift_n", "exclude_drift_c", "exclude_elemental")
+EXPORT_SUFFIXES = (".xls", ".xlsx", ".xlsm", ".csv", ".txt", ".tsv")      # the exports ea_irms reads
+
+
+def run_key(name) -> str:
+    """A run's file name as a configuration compares it: without folders or the export's extension, in any
+    case and in Unicode's composed form, so that the same run exported as .xls or as .csv is the same run.
+    Two different runs exported under one name are one run to this comparison."""
+    base = re.split(r"[\\/]", unicodedata.normalize("NFC", str(name or "")).strip())[-1].strip()
+    low = base.casefold()
+    for suffix in EXPORT_SUFFIXES:
+        if low.endswith(suffix) and len(low) > len(suffix):
+            base = base[:-len(suffix)]
+            break
+    return base.strip().casefold()
+
+
+def _permil(value) -> str:
+    try:
+        return f"{_xl(float(value), 3)} permil"
+    except (TypeError, ValueError):
+        return f"{value} permil"
+
+
+def _run_only(config) -> list[str]:
+    """What the configuration sets for one run only, each as a phrase for a note; empty when nothing."""
+    out = []
+    if config.first_drift_position:
+        out.append(f"the first drift position ({config.first_drift_position})")
+    for key, what in (("exclude_drift_n", "the nitrogen drift fit"), ("exclude_drift_c", "the carbon drift fit"),
+                      ("exclude_elemental", "the elemental correction")):
+        rows = getattr(config, key)
+        if rows:
+            out.append(f"the position{'s' if len(rows) > 1 else ''} left out of {what} ({', '.join(map(str, rows))})")
+    for el, iso in (("n", "d15N"), ("c", "d13C")):
+        value = getattr(config, f"u_sample_{el}")
+        if value is not None and getattr(config, f"u_sample_{el}_source") == MONITORS:
+            out.append(f"the {iso} repeatability from the drift monitors ({_permil(value)})")
+    return out
+
+
+def _and(items: list[str]) -> str:
+    return items[0] if len(items) == 1 else " and ".join(items) if len(items) == 2 \
+        else ", ".join(items[:-1]) + ", and " + items[-1]
+
+
+def _cleared(config):
+    """The configuration without its run-only values; a repeatability's source is kept, its value not."""
+    from dataclasses import replace
+    scoped = replace(config, first_drift_position=None, exclude_drift_n=[], exclude_drift_c=[],
+                     exclude_elemental=[], standards=list(config.standards))
+    for el in ("n", "c"):
+        if getattr(config, f"u_sample_{el}_source") == MONITORS:
+            setattr(scoped, f"u_sample_{el}", None)
+    return scoped
+
+
+def scope_to_run(config, file_name, shared: bool = False) -> tuple:
+    """The configuration as it applies to the run in ``file_name``, and notes on what was not applied.
+
+    The first drift position, the positions left out, and a repeatability taken from the drift monitors are
+    decisions about one run's positions. A configuration that names its run (run_file, written by
+    isoharness.org from 1.4.10) applies them to that run only; for any other run they are cleared, and the
+    repeatability's source is kept, so the page takes that run's own monitors. A configuration that names no
+    run applies them to the run it is used with, as before 1.4.10, with a note asking whether they belong to
+    it; given to several runs at once (``shared``), it applies them to none (finding R-08 of the 2026-10-14
+    review: one run's exclusions had been carried to every run of a batch). A repeatability saved before
+    1.4.10 carries no source, so it is taken as the lab's own figure."""
+    held = _run_only(config)
+    if not held:
+        return config, []
+    name = str(file_name or "").strip() or "this run"
+    many = len(held) > 1 or held[0].startswith("the positions")
+    items = _and(held)
+    if not config.run_file:
+        if shared:
+            return _cleared(config), [f"no run is named for {items}, and the configuration was given to several "
+                                      f"runs at once, so {'they were' if many else 'it was'} applied to none of them"]
+        return config, [f"no run is named for {items}, so {'they were' if many else 'it was'} applied to "
+                        f"{name}; check that {'they belong' if many else 'it belongs'} to this run"]
+    if run_key(config.run_file) == run_key(file_name):
+        return config, []
+    return _cleared(config), [f"{items} {'were' if many else 'was'} chosen for {config.run_file}, so "
+                              f"{'they were' if many else 'it was'} not applied to {name}"]
 
 
 # ----------------------------------------------------------------- statistics
@@ -460,6 +590,15 @@ _PLAIN = ("no N peak", "no C peak", "CO2 peak rejected as a reference pulse",
           "ran before the background settled", "possible carryover from an oversized sample")
 
 
+def _xl(x, places: int, sign: bool = False) -> str:
+    """x as the workbook's TEXT(x, "0.00") writes it (1.4.10): to 15 significant digits first, as a
+    spreadsheet keeps a number, and then to ``places`` decimals with a half rounded away from zero.
+    Python's own format rounds the binary value, so -1.3749999999999998 came out -1.37 where the
+    workbook reads -1.375 and writes -1.38. ``sign`` puts a + before a value that is not negative."""
+    d = Decimal(f"{x if x != 0 else 0.0:.15g}").quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
+    return format(d, f"{'+' if sign else ''}.{places}f")
+
+
 def _k_sigma(k):
     """k x 1 sigma as the checks name it: '2σ' for the default k = 2 (1.4.5)."""
     return f"{k:.15g}σ"
@@ -490,18 +629,18 @@ def _extra_reasons(p, config, replicates=None):
     if lim is not None:
         for el, area, ampl, gas in (("n", p.area_n, p.ampl_n, "N2"), ("c", p.area_c, p.ampl_c, "CO2")):
             if area is not None and ampl is not None and not _above(lim, ampl):
-                out.append((el, f"{gas} peak at or above {lim:.0f} mV"))
+                out.append((el, f"{gas} peak at or above {_xl(lim, 0)} mV"))
     usig = config.rerun_max_1sigma
     if usig is not None:
         for el, u, name in (("n", p.u_d15n, "d15N"), ("c", p.u_d13c, "d13C")):
             if u is not None and _above(u, usig):
-                out.append((el, f"1σ({name}) {u:.2f} above {usig:.2f}"))
+                out.append((el, f"1σ({name}) {_xl(u, 2)} above {_xl(usig, 2)}"))
     g = (replicates or {}).get(getattr(p, "replicate_group", None))
     if g is not None:
         for el, name in (("n", "d15N"), ("c", "d13C")):
             if g[el]["over"]:
                 out.append((el, f"replicates at positions {', '.join(str(r) for r in g['rows'])} differ by "
-                                f"{g[el]['range']:.2f} in {name}, above {g[el]['limit']:.2f}"))
+                                f"{_xl(g[el]['range'], 2)} in {name}, above {_xl(g[el]['limit'], 2)}"))
     return out
 
 
@@ -531,19 +670,22 @@ def _replicates(positions, F, config, groups):
     F["replicates"] = {"on": on, "s": s, "groups": out}
 
 
-def _mass_window(p, el, lo_area, hi_area):
+def _mass_window(p, el, lo_area, hi_area, blank_area=0.0):
     """Masses (mg) that put this position's peak of el between lo_area and hi_area.
 
-    Read from this analysis's own peak area per mg. None without a mass, a peak or
-    both limits, or when no mass can reach the range (lo_area above hi_area).
+    Read from this analysis's own peak area per mg above the blank (1.4.10): a capsule
+    of m mg gives the blank's area plus m times (area - blank) / mass, so the masses are
+    (limit - blank) / that yield. None without a mass, a peak above the blank or both
+    limits above the blank, or when no mass can reach the range (lo_area above hi_area).
     """
     area = getattr(p, f"area_{el}")
-    if area is None or area <= 0 or not p.amount or p.amount <= 0:
+    ab = blank_area if blank_area and blank_area > 0 else 0.0
+    if area is None or not p.amount or p.amount <= 0 or area - ab <= 0:
         return None
-    if lo_area <= 0 or hi_area <= 0 or lo_area > hi_area:
+    if lo_area - ab <= 0 or hi_area - ab <= 0 or lo_area > hi_area:
         return None
-    per_mg = area / p.amount
-    return lo_area / per_mg, hi_area / per_mg
+    per_mg = (area - ab) / p.amount
+    return (lo_area - ab) / per_mg, (hi_area - ab) / per_mg
 
 
 def _rerun_marks(positions, F, config):
@@ -563,6 +705,10 @@ def _rerun_marks(positions, F, config):
                        (mult * F[f"blank_{el}"]["area"]) if (mult and F[f"blank_{el}"]["area"] > 0) else 0)
                for el in ("n", "c")}
     hi_area = {el: L[f"max_{el}"] or 0 for el in ("n", "c")}
+    blank_area = {el: F[f"blank_{el}"]["area"] for el in ("n", "c")}
+    # 1.4.10: a suggested mass above every capsule weighed in this run says so
+    masses = [p.amount for p in positions if p.amount and p.amount > 0]
+    heaviest = max(masses) if masses else None
     counts = {"N": 0, "C": 0, "N and C": 0, "Check": 0}
     reps = {g["group"]: g for g in F.get("replicates", {}).get("groups", [])}
     for p in positions:
@@ -592,25 +738,38 @@ def _rerun_marks(positions, F, config):
         counts[mark] += 1
         if mark == "Check":
             continue
-        win = {el: w for el in ("n", "c") if (w := _mass_window(p, el, lo_area[el], hi_area[el])) is not None}
+        win = {el: w for el in ("n", "c")
+               if (w := _mass_window(p, el, lo_area[el], hi_area[el], blank_area[el])) is not None}
         if not win:
             continue
         lo, hi = max(w[0] for w in win.values()), min(w[1] for w in win.values())
+        beyond = (" (more than the heaviest capsule in this run)"
+                  if heaviest is not None and _above(lo, heaviest) else "")
         if lo <= hi:
             p.rerun_mass_lo, p.rerun_mass_hi = lo, hi
-            p.rerun_mass = f"{lo:.3f} to {hi:.3f}"
+            p.rerun_mass = f"{_xl(lo, 3)} to {_xl(hi, 3)}" + beyond
         elif len(win) == 2:
-            p.rerun_mass = (f"N {win['n'][0]:.3f} to {win['n'][1]:.3f}; "
-                            f"C {win['c'][0]:.3f} to {win['c'][1]:.3f} (two capsules)")
+            p.rerun_mass = (f"N {_xl(win['n'][0], 3)} to {_xl(win['n'][1], 3)}; "
+                            f"C {_xl(win['c'][0], 3)} to {_xl(win['c'][1], 3)} (two capsules)" + beyond)
         else:
             p.rerun_mass = "none"
 
     # Problems of the whole run, for the top of the Rerun sheet.
     items = []
+    # 1.4.10: an element the anchors cannot calibrate (see the calibration step)
+    for el, name, drifted in (("n", "d15N", "d15n_drift"), ("c", "d13C", "d13c_drift")):
+        f = F[f"cal_{el}"]
+        if f.get("calibrated"):
+            continue
+        if f.get("values") == 1:
+            items.append(f"no {name} calibrated: every anchor carries the same accepted {name}, and the scale "
+                         "needs two materials with different values")
+        elif any(p.role == "Sample" and getattr(p, drifted) is not None for p in positions):
+            items.append(f"no {name} calibrated: no anchor has a measured {name}")
     off = [p.row for p in positions if p.role == "Check"
            and any(f.startswith(("check d15N off by", "check d13C off by")) for f in p.flags)]
     if off:
-        items.append(f"check standard off by more than {config.check_offset_permil:.2f} permil at "
+        items.append(f"check standard off by more than {_xl(config.check_offset_permil, 2)} permil at "
                      f"{'position' if len(off) == 1 else 'positions'} {', '.join(str(r) for r in off)}")
     for name, val, cert, big_u in (("%N", "pct_n_reported", lambda p: p.pct_n, "U_pct_n"),
                                    ("%C", "pct_c_reported", lambda p: p.pct_c, "U_pct_c"),
@@ -627,8 +786,8 @@ def _rerun_marks(positions, F, config):
         for el, name in (("n", "N2"), ("c", "CO2")):
             g = F[f"ref_gas_{el}"]
             if g["n"] >= 3 and g["sd"] is not None and g["sd"] >= config.ref_gas_sd_limit:
-                items.append(f"{name} reference pulses SD {g['sd']:.2f} permil, at or above "
-                             f"{config.ref_gas_sd_limit:.2f}")
+                items.append(f"{name} reference pulses SD {_xl(g['sd'], 2)} permil, at or above "
+                             f"{_xl(config.ref_gas_sd_limit, 2)}")
     F["rerun"] = {"counts": counts, "run_level": items,
                   "run_level_text": "; ".join(items) if items else "none found",
                   "lo_area": lo_area, "hi_area": hi_area}
@@ -807,16 +966,23 @@ def process(positions, config=None, samples=None):
                                     and p.row not in excluded[el])
 
     # ---- calibration -----------------------------------------------------
+    # 1.4.10: a scale needs anchors of two materials with different accepted values. With
+    # one, the line through them is flat (slope 0) and would give every sample that
+    # material's value, so nothing is calibrated and the run says why.
     anchors = role("Anchor")
     for out, xattr, accattr, dst in (("cal_n", "d15n_drift", "acc15", "d15n"),
                                      ("cal_c", "d13c_drift", "acc13", "d13c")):
         xs = [getattr(p, xattr) for p in anchors]
         ys = [getattr(p, accattr) for p in anchors]
-        fit = _fit(xs, ys) or {"slope": None, "intercept": None, "r2": None,
-                               "sd": None, "n": 0}
         acc = [a for x, a in zip(xs, ys) if x is not None and a is not None]
+        two = bool(acc) and max(acc) > min(acc)
+        fit = (_fit(xs, ys) if two else None) or {"slope": None, "intercept": None, "r2": None,
+                                                  "sd": None, "n": 0}
         fit["acc_min"] = min(acc) if acc else None
         fit["acc_max"] = max(acc) if acc else None
+        fit["analyses"] = len(acc)
+        fit["values"] = len(set(acc))
+        fit["calibrated"] = two and fit["n"] >= 2
         F[out] = fit
     for p in positions:
         f = F["cal_n"]
@@ -906,16 +1072,21 @@ def process(positions, config=None, samples=None):
             ys.append(getattr(p, area))
         F[out] = _fit(xs, ys) or {"slope": None, "intercept": None, "r2": None,
                                   "sd": None, "n": 0}
+    # 1.4.10: a peak at or below the k-factor line's intercept, the area it gives for none of the
+    # element, holds no detectable N or C; %N, %C and C:N are then not reported, and the flag says so.
     for p in positions:
         for out, area, dst in (("k_n", "area_n", "ug_n"), ("k_c", "area_c", "ug_c")):
             f, a = F[out], getattr(p, area)
             setattr(p, dst, None if a is None or f["n"] < 3
                     else (a - f["intercept"]) / f["slope"])
-        p.pct_n_measured = (None if p.ug_n is None or not p.amount
+        mass = p.amount is not None and p.amount > 0
+        p.pct_n_measured = (None if p.ug_n is None or not mass or p.ug_n <= 0
                             else p.ug_n / (p.amount * 1000) * 100)
-        p.pct_c_measured = (None if p.ug_c is None or not p.amount
+        p.pct_c_measured = (None if p.ug_c is None or not mass or p.ug_c <= 0
                             else p.ug_c / (p.amount * 1000) * 100)
-        if p.ug_n and p.ug_c and p.ug_n > 0:
+        p.below_detection_n = bool(mass and p.ug_n is not None and p.ug_n <= 0)
+        p.below_detection_c = bool(mass and p.ug_c is not None and p.ug_c <= 0)
+        if p.ug_n and p.ug_c and p.ug_n > 0 and p.ug_c > 0:
             p.cn_molar = (p.ug_c / ATOMIC_C) / (p.ug_n / ATOMIC_N)
             p.cn_mass = p.ug_c / p.ug_n
         else:
@@ -1082,13 +1253,15 @@ def process(positions, config=None, samples=None):
     # The pulse Isodat designates as the reference carries the assigned value
     # by definition, so only the other pulses can show whether the reference
     # measurement held steady across the run.
-    for el, attr, out in (("n", "ref_pulse_d15n", "ref_gas_n"),
-                          ("c", "ref_pulse_d13c", "ref_gas_c")):
-        vals = [(float(p.row), getattr(p, attr, None)) for p in positions
-                if getattr(p, attr, None) is not None]
+    # 1.4.10: every such pulse counts, not only the first at each position (the full exports
+    # carry two CO2 pulses at each position, and the SD of the first alone understated it).
+    for el, attr, out in (("n", "ref_pulses_d15n", "ref_gas_n"),
+                          ("c", "ref_pulses_d13c", "ref_gas_c")):
+        vals = [(float(p.row), v) for p in positions for v in (getattr(p, attr, None) or [])]
         ys = [v for _, v in vals]
         fit = _fit([r for r, _ in vals], ys)
-        F[out] = {"n": len(vals), "mean": sum(ys) / len(ys) if ys else None,
+        F[out] = {"n": len(vals), "positions": len({r for r, _ in vals}),
+                  "mean": sum(ys) / len(ys) if ys else None,
                   "sd": _sd(ys), "range": (max(ys) - min(ys)) if ys else None,
                   "fit": fit,
                   "trend": (fit is not None and fit["p"] is not None and fit["p"] < alpha)}
@@ -1100,17 +1273,19 @@ def process(positions, config=None, samples=None):
     # ---- the reference pulse at each position (1.4.4) ----------------------
     # Against the run's own scatter: the median and a robust SD, so that the
     # positions being judged cannot widen the limit they are judged by.
+    # 1.4.10: over every pulse; a position is judged by its pulse furthest from the median.
     F["pulse_off"] = {}
-    for el, attr in (("n", "ref_pulse_d15n"), ("c", "ref_pulse_d13c")):
-        ys = [getattr(p, attr) for p in positions if getattr(p, attr, None) is not None]
+    for el, attr in (("n", "ref_pulses_d15n"), ("c", "ref_pulses_d13c")):
+        ys = [v for p in positions for v in (getattr(p, attr, None) or [])]
         med = _median(ys) if len(ys) >= 5 else None
         rsd = None if med is None else ROBUST_SD * _median([abs(y - med) for y in ys])
         off_sd = config.ref_pulse_off_sd
         lim = (off_sd * rsd) if (off_sd is not None and off_sd > 0 and rsd) else None
         F["pulse_off"][el] = {"n": len(ys), "median": med, "robust_sd": rsd, "limit": lim}
         for p in positions:
-            v = getattr(p, attr, None)
-            setattr(p, f"pulse_dev_{el}", None if (v is None or med is None) else v - med)
+            devs = [v - med for v in (getattr(p, attr, None) or [])] if med is not None else []
+            # the largest distance, and of two equal ones the one above the median
+            setattr(p, f"pulse_dev_{el}", max(devs, key=lambda d: (abs(d), d)) if devs else None)
 
     # ---- flags -----------------------------------------------------------
     for p in positions:
@@ -1139,7 +1314,7 @@ def process(positions, config=None, samples=None):
             for got, acc, name in ((p.d15n_final, p.acc15, "d15N"),
                                    (p.d13c_final, p.acc13, "d13C")):
                 if got is not None and acc is not None and abs(got - acc) > config.check_offset_permil:
-                    flags.append(f"check {name} off by {got - acc:+.2f}")
+                    flags.append(f"check {name} off by {_xl(got - acc, 2, sign=True)}")
         if p.role == "Drift":
             for el, name in (("n", "N"), ("c", "C")):
                 if p.row in excluded[el]:
@@ -1152,7 +1327,7 @@ def process(positions, config=None, samples=None):
             for area, ab, name in ((p.area_n, F["blank_n"]["area"], "N"),
                                    (p.area_c, F["blank_c"]["area"], "C")):
                 if area is not None and ab > 0 and area < ab * config.min_blank_multiple:
-                    flags.append(f"{name} peak only {area / ab:.1f}x the blank")
+                    flags.append(f"{name} peak only {_xl(area / ab, 1)}x the blank")
         if p.row < F["settling"]["settled_from"]:
             flags.append("ran before the background settled")
         if p.carry_flag:
@@ -1160,7 +1335,12 @@ def process(positions, config=None, samples=None):
         for el, name in (("n", "N2"), ("c", "CO2")):
             dev, lim = getattr(p, f"pulse_dev_{el}"), F["pulse_off"][el]["limit"]
             if dev is not None and lim is not None and _above(abs(dev), lim):
-                flags.append(f"{name} reference pulse off by {dev:+.2f}")
+                flags.append(f"{name} reference pulse off by {_xl(dev, 2, sign=True)}")
+        # 1.4.10: no %N or %C where the peak is at or below the k-factor line's intercept
+        if p.below_detection_n:
+            flags.append("%N below detection")
+        if p.below_detection_c:
+            flags.append("%C below detection")
         p.flags = flags
     _replicates(positions, F, config, rep_groups)
     _rerun_marks(positions, F, config)
@@ -1198,14 +1378,30 @@ def standards_from_rows(rows) -> list[tuple]:
 
 
 def _positions_list(value) -> list:
-    """Accept a list, a number, or text such as '59, 61'."""
+    """Accept a list, a number, or text such as '59, 61', '59; 61' or '59 61'. From 1.4.10 anything that is
+    not a whole position is refused rather than dropped, so a list cannot quietly leave out nothing."""
     if value is None or value == "":
         return []
+    if isinstance(value, bool):
+        raise ValueError(f"{value!r} is not a list of positions")
     if isinstance(value, (int, float)):
-        return [int(value)]
-    if isinstance(value, str):
-        return [int(t) for t in value.replace(";", ",").split(",") if t.strip().isdigit()]
-    return [int(v) for v in value]
+        items = [value]
+    elif isinstance(value, str):
+        items = [t for t in re.split(r"[,;\s]+", value) if t]
+    else:
+        items = list(value)
+    out = []
+    for v in items:
+        if isinstance(v, bool):
+            raise ValueError(f"{value!r} is not a list of positions")
+        try:
+            f = float(v.strip()) if isinstance(v, str) else float(v)
+        except (TypeError, ValueError):
+            raise ValueError(f"{value!r} is not a list of whole positions") from None
+        if not math.isfinite(f) or f != int(f) or f < 1:
+            raise ValueError(f"{value!r} is not a list of whole positions from 1")
+        out.append(int(f))
+    return out
 
 
 def config_to_dict(config: Config) -> dict:
@@ -1232,6 +1428,8 @@ def config_to_dict(config: Config) -> dict:
         "carryover_mv": config.carryover_mv,
         "u_sample_n": config.u_sample_n,
         "u_sample_c": config.u_sample_c,
+        "u_sample_n_source": config.u_sample_n_source,
+        "u_sample_c_source": config.u_sample_c_source,
         "coverage_k": config.coverage_k,
         "balance_u_mg": config.balance_u_mg,
         "elemental_correction": config.elemental_correction,
@@ -1244,20 +1442,21 @@ def config_to_dict(config: Config) -> dict:
         "max_amplitude_mv": config.max_amplitude_mv,
         "rerun_max_1sigma": config.rerun_max_1sigma,
         "rerun_replicates": config.rerun_replicates,
+        "run_file": config.run_file,
     }
 
 
 def config_from_dict(data: dict) -> Config:
-    """Rebuild a configuration, filling anything absent from the defaults."""
+    """Rebuild a configuration, filling anything absent from the defaults. The switches are read in any
+    case and positions as ea_irms.labconfig reads them (1.4.10); labconfig.read_config_json also checks
+    every number and names the keys it does not read."""
     config = Config()
     for key, value in (data or {}).items():
         if key == "standards":
             config.standards = standards_from_rows(value)
         elif key in ("exclude_drift_n", "exclude_drift_c", "exclude_elemental"):
             setattr(config, key, _positions_list(value))
-        elif key in ("linearity_correction", "linearity_correction_c", "drift_correction",
-                     "elemental_correction", "rerun_replicates") and isinstance(value, bool):
-            setattr(config, key, "On" if value else "Off")
         elif hasattr(config, key):
             setattr(config, key, value)
+    _normalize(config)
     return config

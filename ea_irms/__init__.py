@@ -2,9 +2,10 @@
 from .parse import ExportFormatError, Position, parse_export
 from .labconfig import LabConfigError, config_from_xlsx, config_to_xlsx, read_lab_config
 from .metadata import SampleSheet, SampleSheetError, read_sample_sheet
-from .pipeline import Config, DEFAULT_STANDARDS, process
+from .pipeline import Config, DEFAULT_STANDARDS, process, scope_to_run
 from .workbook import VERSION, build_workbook
 
 __all__ = ["parse_export", "Position", "ExportFormatError", "process", "Config",
            "DEFAULT_STANDARDS", "build_workbook", "VERSION", "config_to_xlsx", "config_from_xlsx",
-           "read_lab_config", "LabConfigError", "SampleSheet", "SampleSheetError", "read_sample_sheet"]
+           "read_lab_config", "LabConfigError", "SampleSheet", "SampleSheetError", "read_sample_sheet",
+           "scope_to_run"]
