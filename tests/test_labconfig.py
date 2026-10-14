@@ -26,7 +26,8 @@ def _custom():
         "significance_level": 0.1, "min_area_n": 9.5, "max_area_c": 400, "min_blank_multiple": None,
         "carryover_mv": None, "u_sample_n": 0.181, "u_sample_c": None, "coverage_k": 3.0, "balance_u_mg": 0.002,
         "elemental_correction": "Off", "elemental_threshold_pct": 4.0, "ref_pulse_ampl_tol": None,
-        "ref_pulse_d13c_window": 1.0, "ref_pulse_off_sd": None, "ref_gas_sd_limit": 0.08})
+        "ref_pulse_d13c_window": 1.0, "ref_pulse_off_sd": None, "ref_gas_sd_limit": 0.08,
+        "rerun_replicates": "Off"})
 
 
 def _edit(blob, **cells):
@@ -48,8 +49,8 @@ def _row(blob, key):
 def test_every_setting_has_one_row():
     assert sorted(KEYS) == sorted(f.name for f in fields(Config) if f.name != "standards")
     assert len(KEYS) == len(set(KEYS))
-    assert all(kind in ("switch", "switch_or_empty", "model", "number", "number_or_empty", "whole_or_empty",
-                        "positions") for key, _, kind, _ in SETTINGS if key)
+    assert all(kind in ("switch", "switch_or_empty", "onoff", "model", "number", "number_or_empty",
+                        "whole_or_empty", "positions") for key, _, kind, _ in SETTINGS if key)
 
 
 @pytest.mark.parametrize("config", [Config(), _custom()], ids=["defaults", "custom"])

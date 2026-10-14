@@ -4,7 +4,8 @@ Each run is corrected on its own by ea_irms, with its own standards and its own 
 this module only puts the runs' Results rows one after another, with a Run column first,
 describes each run on one row, and lists the samples measured in more than one run. It
 computes no correction. The means and differences on the Repeats sheet are arithmetic on
-the engine's values.
+the engine's values. From isoharness 0.3.0 one sample sheet may go with the batch: its
+columns follow the Results columns, and each run's information follows its row on Runs.
 """
 from __future__ import annotations
 
@@ -19,6 +20,7 @@ from openpyxl.formatting.rule import FormulaRule
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
+from ea_irms.metadata import RUN_FIELDS, output_columns, output_header, output_values, summary_text
 from ea_irms.pipeline import Config
 from ea_irms.workbook import VERSION
 
@@ -61,6 +63,7 @@ class BatchRun:
     label: str = ""
     index: int = 0
     extra: dict = field(default_factory=dict)
+    run_info: dict = field(default_factory=dict)       # Operator, Instrument, Project, Notes (0.3.0)
 
 
 def label_runs(runs: list[BatchRun]) -> list[BatchRun]:
@@ -156,19 +159,26 @@ def repeats(runs: list[BatchRun]) -> list[dict]:
     return out
 
 
-def combined_rows(runs: list[BatchRun]):
-    """Every position of every run, in run order: the Run label, then the run's Results row."""
+def sheet_columns(runs: list[BatchRun], sheet):
+    """The sample sheet's columns the combined table writes: those with a value for a sample of any run."""
+    return output_columns(sheet, [r.positions for r in runs])
+
+
+def combined_rows(runs: list[BatchRun], sheet=None):
+    """Every position of every run, in run order: the Run label, then the run's Results row, then the
+    sample sheet's columns when one was given."""
+    cols = sheet_columns(runs, sheet)
     for r in runs:
         for p in r.positions:
-            yield [r.label] + results_values(p)
+            yield [r.label] + results_values(p) + output_values(p, sheet, cols)
 
 
-def combined_csv(runs: list[BatchRun]) -> str:
+def combined_csv(runs: list[BatchRun], sheet=None) -> str:
     """The combined results table as CSV: Run, then the Results columns at full precision."""
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\n")
-    w.writerow(["Run"] + results_header("1sigma"))
-    for row in combined_rows(runs):
+    w.writerow(["Run"] + results_header("1sigma") + output_header(sheet, sheet_columns(runs, sheet)))
+    for row in combined_rows(runs, sheet):
         w.writerow(csv_cells(row))
     return buf.getvalue()
 
@@ -191,7 +201,7 @@ def _table(ws, top: int, header: list[str], rows, widths: dict, formats: dict | 
     return n
 
 
-def combined_xlsx(runs: list[BatchRun], config_name: str | None = None) -> bytes:
+def combined_xlsx(runs: list[BatchRun], config_name: str | None = None, sheet=None) -> bytes:
     """The combined results as an Excel file: README, Results, Runs, and Repeats."""
     wb = openpyxl.Workbook()
     rd = wb.active
@@ -213,7 +223,8 @@ def combined_xlsx(runs: list[BatchRun], config_name: str | None = None) -> bytes
                  "precision, not formulas; each run's workbook holds the formulas."),
         ("text", "Runs: one row per run, with its file, run date, counts of positions, which corrections were "
                  "in force, the calibration slopes, the samples marked for a rerun or a check, and the problems "
-                 "the run's Rerun sheet lists for the whole run."),
+                 "the run's Rerun sheet lists for the whole run; then the run information typed on the page "
+                 "(Operator, Instrument, Project, Notes) and, with a sample sheet, how many samples matched it."),
         ("text", "Repeats: samples, and check standards, measured in more than one of these runs, one row per "
                  "analysis. A sample is matched by its identifier, ignoring case and surrounding spaces; a check "
                  "standard by its row of the standards table. Every analysis of a matched name is listed, "
@@ -230,6 +241,16 @@ def combined_xlsx(runs: list[BatchRun], config_name: str | None = None) -> bytes
                               f"{s['Samples']} samples."))
     lines.append(("text", "Configuration: " + (config_name or "the package defaults") + ", with each run's "
                           "choices written into it (the Runs sheet shows which corrections were in force)."))
+    if sheet is not None:
+        cols = sheet_columns(runs, sheet)
+        lines.append(("text", f"Sample sheet: {sheet.name}, ID column {sheet.id_column}, {len(sheet.rows)} rows. "
+                              "Results carries, after its own columns, the ID each sample matched (Sample ID "
+                              "(sheet)), how it matched (exact or prefix, with spaces ignored when only that fits, or not in "
+                              "sheet), and "
+                              + (", ".join(h for _, h in cols) if cols else "no other column")
+                              + ". A sample matches a row when its name equals the ID or begins with it followed "
+                                "by a character that is neither a letter nor a digit; the longest such ID wins. "
+                                "Columns with no value for any sample of these runs are left out."))
     lines.append(("text", f"Repeats: {len(names)} name{'s' if len(names) != 1 else ''} found in more than one run"
                           + (": " + ", ".join(names[:12]) + (", and others" if len(names) > 12 else "") + "."
                              if names else ".")))
@@ -242,10 +263,12 @@ def combined_xlsx(runs: list[BatchRun], config_name: str | None = None) -> bytes
 
     # Results
     rs = wb.create_sheet("Results")
-    header = ["Run"] + results_header("1σ")
+    mhead = output_header(sheet, sheet_columns(runs, sheet))
+    header = ["Run"] + results_header("1σ") + mhead
     widths = dict(WIDTHS, Run=max([8] + [min(40, len(r.label) + 2) for r in runs]))
+    widths.update({h: 16 if h == "Sample ID (sheet)" else 11 if h == "Matched by" else 14 for h in mhead})
     formats = dict({h: "0.00" for h in TWO}, **FORMATS)
-    n = _table(rs, 1, header, combined_rows(runs), widths, formats)
+    n = _table(rs, 1, header, combined_rows(runs, sheet), widths, formats)
     for j, h in enumerate(header, start=1):
         if h in GREEN:
             for i in range(2, n + 2):
@@ -261,15 +284,22 @@ def combined_xlsx(runs: list[BatchRun], config_name: str | None = None) -> bytes
                                       FormulaRule(formula=[f'AND(${rerun_col}2<>"",${rerun_col}2<>"Check")'],
                                                   fill=FILL_RERUN))
 
-    # Runs
+    # Runs, with the run information and the sheet's matches after the 0.2.0 columns (0.3.0)
     ru = wb.create_sheet("Runs")
     sums = [run_summary(r) for r in runs]
+    fields = [f for f in RUN_FIELDS if any(r.run_info.get(f) for r in runs)]
+    for r, srow in zip(runs, sums):
+        for f in fields:
+            srow[f] = r.run_info.get(f) or None
+        if sheet is not None:
+            srow["Samples matched"] = summary_text(r.fits.get("metadata", {}).get("match", {}))
     rh = list(sums[0].keys()) if sums else ["Run"]
     rwid = {"Run": widths["Run"], "File": 30, "Run date": 11, "Positions": 9, "Samples": 9,
             "Anchor analyses": 9, "Check analyses": 9, "Blank subtracted": 10, "Linearity applied": 10,
             "Drift applied": 26, "Elemental drift corrected": 11, "Calibration slope d15N": 11,
             "Calibration slope d13C": 11, "Samples to rerun": 9, "Samples to check": 9,
-            "Problems of the whole run": 60}
+            "Problems of the whole run": 60, "Operator": 16, "Instrument": 16, "Project": 18, "Notes": 40,
+            "Samples matched": 40}
     _table(ru, 1, rh, ([s[h] for h in rh] for s in sums), rwid,
            {"Calibration slope d15N": "0.0000", "Calibration slope d13C": "0.0000"})
     ru.freeze_panes = "B2"

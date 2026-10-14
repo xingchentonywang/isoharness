@@ -18,10 +18,12 @@ from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.formatting.rule import FormulaRule
 
 
-from .parse import _read_rows
-from .pipeline import DEFAULT_STANDARDS, MAX_STANDARDS, MIN_OUTLIER_MONITORS, Config
+from .metadata import (NOT_MATCHED, REPLICATE_COLUMN, RUN_FIELDS, clean_run_info, critical_range_factor,
+                       excel_trim, match_positions, match_summary, output_columns, output_header, summary_text)
+from .parse import _read_rows, parse_export
+from .pipeline import DEFAULT_STANDARDS, MAX_STANDARDS, MIN_OUTLIER_MONITORS, Config, assign_roles
 
-VERSION = "1.4.7"
+VERSION = "1.4.8"
 NSTD = MAX_STANDARDS      # rows in the Setup standards table (16 from 1.4.2, 13 before)
 
 
@@ -58,11 +60,15 @@ def bake_values(path) -> bool:
 
 def build_workbook(export_path, out_path, config: Config | None = None,
                    run_name: str | None = None, run_date: str | None = None,
-                   recalc: bool = False):
+                   recalc: bool = False, samples=None, run_info: dict | None = None,
+                   file_name: str | None = None):
     """Build the workbook from an Isodat export. Returns ``out_path``.
 
     With ``recalc`` the finished file is passed through :func:`bake_values` when
     LibreOffice is available, so it carries computed values as well as formulas.
+    From 1.4.8 ``samples`` (an ea_irms.metadata.SampleSheet) is matched to the run's samples, its
+    rows written to a Metadata sheet and after the Results columns, and the replicates it names
+    compared on a Replicates sheet; ``run_info`` holds Operator, Instrument, Project, and Notes.
     """
     config = config or Config()
     if len(config.standards) > NSTD:
@@ -74,6 +80,14 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     _CFG = config
     _RUN = run_name or Path(export_path).stem
     _DATE = run_date or ""
+    _FILE = file_name or Path(export_path).name
+    # 1.4.8: the sample sheet's matches and the replicate groups, found as the engine finds them
+    _INFO = clean_run_info(run_info) if run_info else {}
+    _META = sorted(parse_export(SRC), key=lambda q: q.row)
+    assign_roles(_META, config)
+    _GROUPS = match_positions(_META, samples)
+    _MATCH = match_summary(_META, samples)
+    _MCOLS = output_columns(samples, [_META])
 
     MAXRAW = 1000          # raw data rows 2..1001
     R0, NSAMP = 6, 120     # Work data rows 6..125
@@ -137,6 +151,9 @@ def build_workbook(export_path, out_path, config: Config | None = None,
               'corrections, the test that decided whether it was applied.')
     r = rd(r, '6.  Open Rerun. It lists the samples to measure again, with the reason and a mass to weigh, and '
               'the samples to check first. Its top line says whether the run as a whole has a problem.')
+    r = rd(r, '7.  Metadata holds the run information and, when a sample sheet was given, each sample\'s row of it, '
+              'which Results also carries after its own columns. Replicates compares the analyses of one sample '
+              'in this run (1.4.8).')
     r += 1
     r = rd(r, 'Colour', F_H1)
     r = rd(r, 'Yellow cells with blue text are yours to fill in. Grey columns are machinery and can be ignored. '
@@ -153,7 +170,9 @@ def build_workbook(export_path, out_path, config: Config | None = None,
         ('Fits',    'Every coefficient fitted from this run, each with n, r-squared and residual scatter.'),
         ('Results', 'The clean table to copy out or plot from.'),
         ('Rerun',   'The samples to measure again or to check, with the reason and a suggested mass.'),
+        ('Replicates', 'Analyses of one sample in this run, their range, and the critical range of ISO 5725-6 (1.4.8).'),
         ('QC',      'Checks and flags. Read this first.'),
+        ('Metadata', 'The run information and the sample sheet\'s rows for this run\'s samples (1.4.8).'),
     ]:
         c = ws.cell(r, 2); c.value = f'{a}.  {b}'; c.font = F_SM
         c.alignment = Alignment(wrap_text=True, vertical='top'); r += 1
@@ -244,7 +263,7 @@ def build_workbook(export_path, out_path, config: Config | None = None,
               'reports the position without a carbon value, and says so in Flags. Leave B39 empty to switch the '
               'check off.')
     r += 1
-    r = rd(r, 'Rerun marks (1.4.4, 1.4.7)', F_H1)
+    r = rd(r, 'Rerun marks (1.4.4, 1.4.7, 1.4.8)', F_H1)
     r = rd(r, 'A sample is marked for what measuring it again can fix: the amount, the peak, or the state of '
               'the instrument at its position. It is marked for a rerun of N, C, or both when its peak lies below '
               'the range of the linearity standards (Fits rows 81 to 104) or under the blank multiple in Setup B25; '
@@ -252,17 +271,23 @@ def build_workbook(export_path, out_path, config: Config | None = None,
               'linearity range but under it is not marked, and with B69 empty every peak above the range is, as '
               'before 1.4.7); when it follows an oversized sample and its background rose (Setup B28); when the '
               'reference pulse at its position is off, further than Setup B67 robust SDs from the median of the '
-              'run\'s pulses; or when the 1σ of its final d15N or d13C is above Setup B70 (1.4.7), which a run '
-              'with better anchors can fix. It is marked for a check when it ran before the background settled or '
-              'has the peak of only one element. A value outside the anchors\' range is not marked, because a '
+              'run\'s pulses; when the 1σ of its final d15N or d13C is above Setup B70 (1.4.7), which a run '
+              'with better anchors can fix; or when it has replicates in the run whose range is above the critical '
+              'range of ISO 5725-6 (1.4.8, Replicates sheet, switched by Setup B71). It is marked for a check when it '
+              'ran before the background settled or has the peak of only one element. A value outside the anchors\' range is not marked, because a '
               'rerun would extrapolate the same way; the fix is an anchor that brackets it.')
     r = rd(r, 'The suggested mass puts each peak inside the linearity range and above the blank multiple, read from '
               'this analysis\'s own peak area per mg. When no one mass does that for both N and C, the two '
               'elements need two capsules and both ranges are given. Problems of the whole run, a check standard '
               'off, anchors outside k x 1σ, or a reference-gas SD at or above Setup B68 (the FIRMS guide\'s '
-              'zero-enrichment limit, section 4.3.2), are listed once at the top of Rerun and not on every sample. '
-              'Replicates are not compared yet: that needs a sample sheet saying which positions hold the same '
-              'sample.')
+              'zero-enrichment limit, section 4.3.2), are listed once at the top of Rerun and not on every sample.')
+    r = rd(r, 'Replicates are the analyses of one sample in this run, as the sample sheet names them: samples '
+              'matched to it with the same name, or the same Replicate of. Their range is compared with f(n) x s, '
+              'the critical range of ISO 5725-6 (section 5.2), where s is the repeatability of one analysis in use '
+              'times the calibration slope and f(n) is 2.77 for two analyses (the 2.8 of r = 2.8 s, unrounded), '
+              '3.31 for three and 3.63 for four. When the range is above it, every one of them is marked for a '
+              'rerun of that element, since the data cannot say which analysis is off; the standard\'s next step '
+              'is more analyses and their median. Without a sample sheet nothing is compared.')
     r += 1
     r = rd(r, 'Known limits', F_H1)
     r = rd(r, 'The outlier test on the drift monitors needs five of them in the fit; with four it has one degree of '
@@ -309,6 +334,27 @@ def build_workbook(export_path, out_path, config: Config | None = None,
                 except ValueError: pass
             c = raw.cell(i + 1, j + 1, v); c.font = F_SM
     NRAW_USED = len(records)
+    # 1.4.8: the identifier each Work row shows (the first Raw record of its position)
+    RAW_ID = {}
+    if 'Row' in header and 'Identifier 1' in header:
+        i_row, i_id = header.index('Row'), header.index('Identifier 1')
+        for record in records:
+            try:
+                k_ = int(float(record[i_row]))
+            except (TypeError, ValueError, IndexError):
+                continue
+            RAW_ID.setdefault(k_, record[i_id] if i_id < len(record) else '')
+
+    def lit(pos):
+        """The identifier at a position as Excel's TRIM gives it, quoted for a formula."""
+        return excel_trim(RAW_ID.get(pos, '')).replace('"', '""')
+    REP_TOP = 9                                  # first member row on the Replicates sheet
+    REP_FIRST, REP_OF, r_ = {}, {}, REP_TOP
+    for g_ in _GROUPS:
+        REP_FIRST[g_['group']] = r_
+        r_ += len(g_['rows'])
+        for row_ in g_['rows']:
+            REP_OF[row_] = g_['group']
 
     for i in range(2, MAXRAW + 2):
         c = raw.cell(i, 18, f'=IF($D{i}="","",IF($F{i}<>"","N",IF($J{i}<>"","C","")))')
@@ -338,7 +384,7 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     st.cell(2, 1, 'Yellow cells are yours. Everything else on this sheet is a label.').font = F_NOTE
 
     lab(st, 4, 'Run information', F_H1)
-    for i, (k, v) in enumerate([('Run name', _RUN), ('Run date', _DATE), ('Analyst', '')]):
+    for i, (k, v) in enumerate([('Run name', _RUN), ('Run date', _DATE), ('Operator', _INFO.get('Operator', ''))]):
         lab(st, 5 + i, k, F_SM); inp(st, 5 + i, 2, v)
 
     lab(st, 9, 'Processing options', F_H1)
@@ -527,6 +573,15 @@ def build_workbook(export_path, out_path, config: Config | None = None,
                         'element (1.4.7). The 1σ leaves out the blank, linearity, and drift corrections. Leave '
                         'empty to switch it off.', F_NOTE, 7)
     S_AMAX, S_USIG = f'Setup!$B${SLAST+9}', f'Setup!$B${SLAST+10}'
+    # 1.4.8: replicates of a sample, named by the sample sheet, against the critical range of ISO 5725-6
+    lab(st, SLAST + 11, 'Compare replicates of a sample (On or Off)', F_SM)
+    inp(st, SLAST + 11, 2, _CFG.rerun_replicates if _CFG.rerun_replicates in ('On', 'Off') else 'On')
+    lab(st, SLAST + 11, 'Replicates are analyses of one sample in this run, as the sample sheet names them (Metadata '
+                        'sheet). On marks them for a rerun of an element when their range is above the critical '
+                        'range of ISO 5725-6 (Replicates sheet, 1.4.8).', F_NOTE, 7)
+    dv_rep = DataValidation(type='list', formula1='"On,Off"', allow_blank=False)
+    st.add_data_validation(dv_rep); dv_rep.add(f'B{SLAST + 11}')
+    S_REP = f'Setup!$B${SLAST+11}'
 
     S_BLANK, S_LIN, S_DRIFT, S_DM = 'Setup!$B$10', 'Setup!$B$11', 'Setup!$B$12', 'Setup!$B$13'
     S_LINC = 'IF(Setup!$B$18<>"",Setup!$B$18,Setup!$B$11)'   # carbon switch, empty = follow B11 (1.4.1)
@@ -653,6 +708,12 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     first_rerun2_col = first_rerun_col + len(RERUN_NAMES)
     RX.update({name: gcl(first_rerun2_col + k) for k, name in enumerate(RERUN2_NAMES)})
     COLS += [(name, RX[name], 7, 'h') for name in RERUN2_NAMES]
+    # 1.4.8: the replicate group of the position (from the sample sheet, kept only while the identifier is
+    # the one the sheet matched), and the rerun reasons the Replicates sheet gives it
+    REP_NAMES = ['rep group', 'fl repN', 'fl repC']
+    first_rep_col = first_rerun2_col + len(RERUN2_NAMES)
+    RX.update({name: gcl(first_rep_col + k) for k, name in enumerate(REP_NAMES)})
+    COLS += [(name, RX[name], 7, 'h') for name in REP_NAMES]
     GROUPS = [('A','D','identification'),('E','G','mass'),('H','K','peak lookup'),('L','R','as measured'),
               ('S','V','from the standards table'),('W','AA','nitrogen corrections'),
               ('AB','AF','carbon corrections'),('AG','AL','elemental content'),
@@ -669,7 +730,8 @@ def build_workbook(export_path, out_path, config: Config | None = None,
               (RX['pdev N'],RX['rr check'],'rerun marks: helpers, ignore'),
               (RX['rerun'],RX['suggested mass'],'rerun marks'),
               (RX['rerun rank'],RX['rerun rank'],'helper'),
-              (RX['fl amplN'],RX['why sizeC'],'rerun marks (1.4.7): helpers, ignore')]
+              (RX['fl amplN'],RX['why sizeC'],'rerun marks (1.4.7): helpers, ignore'),
+              (RX['rep group'],RX['fl repC'],'replicates (1.4.8): helpers, ignore')]
     for a, b, t in GROUPS:
         wk.cell(4, wk[a + '1'].column, t).font = F_GRP
         wk.cell(4, wk[a + '1'].column).fill = FILL_GRP
@@ -1114,10 +1176,19 @@ def build_workbook(export_path, out_path, config: Config | None = None,
             f[RX[f'hi {el}']] = f'=IF({R_(f"lo {el}")}="","",Fits!{hia}/{per})'
         f[RX['mass lo']] = f'=IF(AND({R_("lo N")}="",{R_("lo C")}=""),"",MAX({R_("lo N")},{R_("lo C")}))'
         f[RX['mass hi']] = f'=IF(AND({R_("hi N")}="",{R_("hi C")}=""),"",MIN({R_("hi N")},{R_("hi C")}))'
+        pos_ = n + 1
+        if pos_ in REP_OF:
+            g_, top_ = REP_OF[pos_], REP_FIRST[REP_OF[pos_]]
+            f[RX['rep group']] = f'=IF(TRIM($B{i})="{lit(pos_)}",{g_},"")'
+            for el, name, cnt, rng, lim, over in (('N', 'd15N', 'G', 'H', 'I', 'J'), ('C', 'd13C', 'K', 'L', 'M', 'N')):
+                f[RX[f'fl rep{el}']] = (f'=IF({R_("rep group")}="","",IF(Replicates!${over}${top_}="yes",'
+                                        f'"replicates at positions "&Replicates!$O${top_}&" differ by "'
+                                        f'&TEXT(Replicates!${rng}${top_},"0.00")&" in {name}, above "'
+                                        f'&TEXT(Replicates!${lim}${top_},"0.00")&"; ",""))')
         f[RX['rr N']] = (f'=IF($D{i}<>"Sample",0,IF(OR({R_("why sizeN")}<>"",{R_("fl blankN")}<>"",'
-                         f'{R_("fl pulseN")}<>"",{R_("fl amplN")}<>"",{R_("fl uN")}<>""),1,0))')
+                         f'{R_("fl pulseN")}<>"",{R_("fl amplN")}<>"",{R_("fl uN")}<>"",{R_("fl repN")}<>""),1,0))')
         f[RX['rr C']] = (f'=IF($D{i}<>"Sample",0,IF(OR({R_("why sizeC")}<>"",{R_("fl blankC")}<>"",'
-                         f'{R_("fl pulseC")}<>"",{R_("fl amplC")}<>"",{R_("fl uC")}<>""),1,0))')
+                         f'{R_("fl pulseC")}<>"",{R_("fl amplC")}<>"",{R_("fl uC")}<>"",{R_("fl repC")}<>""),1,0))')
         f[RX['rr both']] = (f'=IF($D{i}<>"Sample",0,IF(OR({R_("fl carry")}<>"",'
                             f'AND({R_("fl noN")}<>"",{R_("fl noC")}<>"")),1,0))')
         f[RX['rr check']] = (f'=IF($D{i}<>"Sample",0,IF(OR({R_("fl settle")}<>"",'
@@ -1127,7 +1198,7 @@ def build_workbook(export_path, out_path, config: Config | None = None,
         f[RX['why raw']] = (f'=IF({R_("rerun")}="","",' + '&'.join(
             R_(k) for k in ('fl noN', 'why sizeN', 'fl noC', 'fl rejC', 'why sizeC', 'fl blankN', 'fl blankC',
                             'fl settle', 'fl carry', 'fl pulseN', 'fl pulseC',
-                            'fl amplN', 'fl amplC', 'fl uN', 'fl uC')) + ')')
+                            'fl amplN', 'fl amplC', 'fl uN', 'fl uC', 'fl repN', 'fl repC')) + ')')
         f[RX['why']] = f'=IF({R_("why raw")}="","",LEFT({R_("why raw")},LEN({R_("why raw")})-2))'
         f[RX['suggested mass']] = (
             f'=IF(OR({R_("rerun")}="",{R_("rerun")}="Check",{R_("mass lo")}=""),"",'
@@ -1562,6 +1633,9 @@ def build_workbook(export_path, out_path, config: Config | None = None,
             ('Rerun', 9), ('Why', 46), ('Suggested mass (mg)', 24),
             ('Elemental drift factor N', 10), ('Elemental drift factor C', 10),
             ('%C as measured', 9), ('%N as measured', 9)]
+    NRES = len(RHDR)                                      # the 24 columns every workbook has
+    MHDR = output_header(samples, _MCOLS)                 # 1.4.8: the sample sheet's, when one was given
+    RHDR += [(h, 16 if j == 0 else 11 if j == 1 else 14) for j, h in enumerate(MHDR)]
     rs.cell(1, 1, 'Results').font = F_TITLE
     rs.cell(2, 1, 'Read QC before using these. Isotope values are on the scale set by the anchor standards '
                   'in Setup; %C, %N and C:N need a mass in Work column F or G, and from 1.4.2 they carry the '
@@ -1573,7 +1647,10 @@ def build_workbook(export_path, out_path, config: Config | None = None,
                   'calibration and the sample repeatability (Fits rows 132 onwards) and leaves out the blank, '
                   'linearity and drift corrections and day-to-day reproducibility; for %C, %N and C:N it has five '
                   'terms (Fits rows 300 onwards), and stays incomplete until Setup B33 and Setup columns J and K '
-                  'are filled in.').font = F_NOTE
+                  'are filled in.' + (' From 1.4.8 the columns after %N as measured come from the sample sheet '
+                                      '(Metadata sheet): the ID a sample matched, how it matched, and the sheet\'s '
+                                      'columns that hold a value for a sample of this run.' if MHDR else '')
+                  ).font = F_NOTE
     for j, (h, w_) in enumerate(RHDR, start=1):
         c = rs.cell(4, j, h); c.font = F_HDR; c.fill = FILL_HDR
         c.alignment = Alignment(horizontal='center', wrap_text=True)
@@ -1616,6 +1693,19 @@ def build_workbook(export_path, out_path, config: Config | None = None,
             if j in (14, 16): c.number_format = '0.000'
             if j in (21, 22): c.number_format = '0.0000'
             if 5 <= j <= 16: c.fill = FILL_OUT
+    # 1.4.8: the metadata cells read the Metadata sheet's table, while the identifier is the one matched
+    MD_TOP = 24                                           # first row of the samples table on Metadata
+    MD_ROW = {}
+    if samples is not None:
+        for t_, q in enumerate([q for q in _META if q.role == 'Sample' and 1 <= q.row <= NSAMP]):
+            MD_ROW[q.row] = MD_TOP + t_
+        for pos_, t_ in MD_ROW.items():
+            k = R0 + pos_ - 1
+            for j in range(len(MHDR)):
+                L = gcl(3 + (j if j < 2 else j + 1))      # C, D, then F onwards (E is the replicate group)
+                c = rs.cell(4 + pos_, NRES + 1 + j,
+                            f'=IF(TRIM(Work!$B{k})="{lit(pos_)}",IF(Metadata!${L}${t_}="","",Metadata!${L}${t_}),"")')
+                c.font = F_SM
     rs.freeze_panes = 'A5'
     RLAST = gcl(len(RHDR))
     rs.conditional_formatting.add(f'A5:{RLAST}{5+NSAMP-1}', FormulaRule(formula=['$R5="Check"'], fill=FILL_CHECK))
@@ -1630,8 +1720,9 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     rr.cell(1, 1, 'Rerun').font = F_TITLE
     rr.cell(2, 1, 'Samples to measure again (Rerun: N, C, or N and C) and to check first, in the order they ran. '
                   'A mark reads what a rerun can fix; README, Rerun marks, says which flags count (from 1.4.7 a '
-                  'peak above the linearity range only at Setup B69, and a 1σ above Setup B70). The suggested mass '
-                  'puts the peaks inside the linearity range, from this analysis\'s area per mg.'
+                  'peak above the linearity range only at Setup B69, and a 1σ above Setup B70; from 1.4.8 replicates '
+                  'above the critical range, on the Replicates sheet). The suggested mass puts the peaks inside the '
+                  'linearity range, from this analysis\'s area per mg.'
                   ).font = F_NOTE
     rr.merge_cells("A2:G2"); rr.row_dimensions[2].height = 44
     rr['A2'].alignment = Alignment(wrap_text=True, vertical='top')
@@ -1657,6 +1748,73 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     rr.conditional_formatting.add(f'A8:G{8+NSAMP-1}', FormulaRule(formula=['$E8="Check"'], fill=FILL_CHECK))
     rr.conditional_formatting.add(f'A8:G{8+NSAMP-1}',
                                   FormulaRule(formula=['AND($E8<>"",$E8<>"Check")'], fill=FILL_RERUN))
+
+    # ================================================================ Replicates (1.4.8)
+    rp = wb.create_sheet('Replicates')
+    rp.sheet_view.showGridLines = False
+    for col, w in zip('ABCDEFGHIJKLMNOPQR', [7, 18, 8, 18, 10, 10, 7, 9, 9, 7, 7, 9, 9, 7, 22, 3, 5, 9]):
+        rp.column_dimensions[col].width = w
+    rp.cell(1, 1, 'Replicates').font = F_TITLE
+    rp.cell(2, 1, 'Analyses of one sample in this run, as the sample sheet names them: samples that match it and have '
+                  'the same name, or the same Replicate of (Metadata sheet). When their range in d15N or d13C is above '
+                  'the critical range of ISO 5725-6, f(n) x s, each of them is marked for a rerun of that element. s is '
+                  'the repeatability of one analysis in use (Fits B136 and B156: Setup B30 and B31, or the pooled '
+                  'anchor replicates) times the calibration slope, and f(n) is the 0.95 quantile of the range of n '
+                  'values from one normal distribution, in units of its SD (columns Q and R): 2.77 for two, which '
+                  'ISO 5725-6 rounds to 2.8 in r = 2.8 s. n counts the analyses with a value. Setup B71 switches the '
+                  'marks off.').font = F_NOTE
+    rp.merge_cells('A2:O2'); rp.row_dimensions[2].height = 66
+    rp['A2'].alignment = Alignment(wrap_text=True, vertical='top')
+    NF = max([20] + [len(g_['rows']) for g_ in _GROUPS])
+    FT = f'$R$4:$R${4 + NF - 2}'
+    for r_, (k_, v_, note_) in enumerate((
+            ('s, d15N (permil)', '=IF(OR(Fits!$B$55<3,Fits!$B$134="",Fits!$B$134=0,Fits!$B$136=""),"",'
+                                 'Fits!$B$136*ABS(Fits!$B$56))', 'Fits B136 x |Fits B56|'),
+            ('s, d13C (permil)', '=IF(OR(Fits!$B$62<3,Fits!$B$154="",Fits!$B$154=0,Fits!$B$156=""),"",'
+                                 'Fits!$B$156*ABS(Fits!$B$63))', 'Fits B156 x |Fits B63|'),
+            ('Comparison', f'={S_REP}', 'Setup B71')), start=4):
+        rp.cell(r_, 1, k_).font = F_SM
+        c = rp.cell(r_, 2, v_); c.font = F_SM; c.number_format = '0.000'
+        rp.cell(r_, 3, note_).font = F_NOTE
+    for j, h in enumerate(('n', 'f(n)'), start=17):
+        c = rp.cell(3, j, h); c.font = F_HDR; c.fill = FILL_HDR; c.alignment = Alignment(horizontal='center')
+    for k_, nn in enumerate(range(2, NF + 1)):
+        rp.cell(4 + k_, 17, nn).font = F_SM
+        c = rp.cell(4 + k_, 18, critical_range_factor(nn)); c.font = F_SM; c.number_format = '0.000000'
+    RPH = ['Group', 'Sample', 'Position', 'Identifier', 'd15N (permil)', 'd13C (permil)',
+           'n d15N', 'Range d15N', 'Limit d15N', 'Over d15N', 'n d13C', 'Range d13C', 'Limit d13C', 'Over d13C',
+           'Positions']
+    for j, h in enumerate(RPH, start=1):
+        c = rp.cell(8, j, h); c.font = F_HDR; c.fill = FILL_HDR
+        c.alignment = Alignment(horizontal='center', wrap_text=True)
+    if not _GROUPS:
+        rp.cell(REP_TOP, 1, 'No sample sheet was given, so no replicates are compared.' if samples is None else
+                'No sample is analysed more than once in this run, by the sample sheet: no two samples matched to '
+                'it share a name or a Replicate of.').font = F_NOTE
+    for g_ in _GROUPS:
+        top_, bot_ = REP_FIRST[g_['group']], REP_FIRST[g_['group']] + len(g_['rows']) - 1
+        for k_, pos_ in enumerate(g_['rows']):
+            i_, w_ = top_ + k_, R0 + pos_ - 1
+            vals = [g_['group'], g_['name'], pos_, f'=IF(Work!$B{w_}="","",Work!$B{w_})']
+            for col_ in ('AA', 'AF'):
+                vals.append(f'=IF(AND(Work!$D{w_}="Sample",Work!${RX["rep group"]}{w_}={g_["group"]}),'
+                            f'IF(ISNUMBER(Work!${col_}{w_}),Work!${col_}{w_},""),"")')
+            for j, v in enumerate(vals, start=1):
+                c = rp.cell(i_, j, v); c.font = F_SM
+                if j in (5, 6): c.number_format = '0.00'
+        for (cnt, rng, lim, over), val, srow in ((('G', 'H', 'I', 'J'), 'E', 4), (('K', 'L', 'M', 'N'), 'F', 5)):
+            span = f'{val}{top_}:{val}{bot_}'
+            for col_, v in ((cnt, f'=COUNT({span})'),
+                            (rng, f'=IF({cnt}{top_}<2,"",MAX({span})-MIN({span}))'),
+                            (lim, f'=IF(OR({cnt}{top_}<2,$B${srow}=""),"",INDEX({FT},{cnt}{top_}-1)*$B${srow})'),
+                            (over, f'=IF(OR({rng}{top_}="",{lim}{top_}=""),"",'
+                                   f'IF(AND($B$6="On",{rng}{top_}>{lim}{top_}),"yes",""))')):
+                c = rp[f'{col_}{top_}']; c.value = v; c.font = F_SM
+                if col_ in (rng, lim): c.number_format = '0.000'
+        c = rp.cell(top_, 15, ', '.join(str(r) for r in g_['rows'])); c.font = F_SM
+        rp.conditional_formatting.add(f'A{top_}:O{bot_}',
+                                      FormulaRule(formula=[f'OR($J${top_}="yes",$N${top_}="yes")'], fill=FILL_RERUN))
+    rp.freeze_panes = 'A9'
 
     # ================================================================ QC
     qc = wb.create_sheet('QC')
@@ -2045,6 +2203,60 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     qc.cell(3, 11, 'Charts sit beside the section they belong to. A trendline is Excel\'s own linear fit '
                    'through the plotted points; for the drift monitors in the fit it is the row-model slope '
                    'Fits reports.').font = F_NOTE
+
+    # ================================================================ Metadata (1.4.8)
+    md = wb.create_sheet('Metadata')
+    md.sheet_view.showGridLines = False
+    for col, w in zip('ABCDE', [22, 30, 18, 12, 10]):
+        md.column_dimensions[col].width = w
+    md.cell(1, 1, 'Metadata').font = F_TITLE
+    md.cell(2, 1, 'The run information and the sample sheet\'s rows for this run\'s samples, as isoharness.org '
+                  'received them. The sample table holds values, not formulas: it belongs to the run this workbook '
+                  'was built from, and Results reads it only at positions whose identifier is still the one '
+                  'matched.').font = F_NOTE
+    md.merge_cells('A2:H2'); md.row_dimensions[2].height = 40
+    md['A2'].alignment = Alignment(wrap_text=True, vertical='top')
+    md.cell(4, 1, 'Run information').font = F_H1
+    info_rows = [('Run', '=IF(Setup!$B$5="","",Setup!$B$5)', None), ('File', _FILE, None),
+                 ('Run date', '=IF(Setup!$B$6="","",Setup!$B$6)', None),
+                 ('Operator', '=IF(Setup!$B$7="","",Setup!$B$7)', None)]
+    info_rows += [(k_, _INFO.get(k_, ''), 'in') for k_ in RUN_FIELDS if k_ != 'Operator']
+    for r_, (k_, v_, kind_) in enumerate(info_rows, start=5):
+        md.cell(r_, 1, k_).font = F_SM
+        if kind_ == 'in':
+            inp(md, r_, 2, v_)
+            md.merge_cells(start_row=r_, start_column=2, end_row=r_, end_column=8)
+            md.cell(r_, 2).alignment = Alignment(wrap_text=True, vertical='top')
+        else:
+            c = md.cell(r_, 2, v_); c.font = F_SM
+    md.cell(5 + len(info_rows), 1, 'Operator is Setup B7; type the others here.').font = F_NOTE
+    md.cell(13, 1, 'Sample sheet').font = F_H1
+    if samples is None:
+        md.cell(14, 1, 'No sample sheet was given.').font = F_NOTE
+    else:
+        sheet_rows = [('File', samples.name), ('Sheet', samples.sheet_name or '(a text file)'),
+                      ('ID column', samples.id_column), ('Header row', samples.header_row),
+                      ('Rows', len(samples.rows)), ('Samples matched', summary_text(_MATCH)),
+                      ('Replicate groups', len(_GROUPS)), ('Notes', '; '.join(samples.notes) or 'none')]
+        for r_, (k_, v_) in enumerate(sheet_rows, start=14):
+            md.cell(r_, 1, k_).font = F_SM
+            c = md.cell(r_, 2, v_); c.font = F_SM; c.alignment = Alignment(horizontal='left')
+        md.cell(MD_TOP - 2, 1, 'This run\'s samples').font = F_H1
+        mhead = ['Row', 'Identifier', 'Sample ID (sheet)', 'Matched by', 'Replicate group'] + [h for _, h in _MCOLS]
+        for j, h in enumerate(mhead, start=1):
+            c = md.cell(MD_TOP - 1, j, h); c.font = F_HDR; c.fill = FILL_HDR
+            c.alignment = Alignment(horizontal='center', wrap_text=True)
+            if j > 5:
+                md.column_dimensions[gcl(j)].width = 14
+        for q in _META:
+            if q.row not in MD_ROW:
+                continue
+            t_ = MD_ROW[q.row]
+            vals = [q.row, q.identifier, q.sample_id, q.matched_by or NOT_MATCHED, q.replicate_group]
+            vals += [samples.rows[q.sheet_index][j_] if q.sheet_index is not None else None for j_, _ in _MCOLS]
+            for j, v in enumerate(vals, start=1):
+                c = md.cell(t_, j, v); c.font = F_SM
+        md.freeze_panes = f'A{MD_TOP}'
 
     for s in wb.worksheets:
         s.sheet_properties.tabColor = '1F4E79' if s.title in ('Results', 'QC') else None

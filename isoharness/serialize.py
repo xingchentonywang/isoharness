@@ -13,6 +13,7 @@ import io
 import math
 from dataclasses import fields
 
+from ea_irms.metadata import output_columns, output_header, output_values
 from ea_irms.parse import Position
 from ea_irms.pipeline import ATOMIC_C, ATOMIC_N, Config
 from ea_irms.workbook import VERSION
@@ -144,19 +145,29 @@ def results_values(p: Position) -> list:
     return row
 
 
-def results_csv(positions, config: Config) -> str:
+def results_csv(positions, config: Config, sheet=None) -> str:
     """The workbook's Results sheet as CSV, at full precision, same columns and order.
 
     Each value is followed by its 1 sigma (ea_irms 1.4.5). The workbook heads those columns
     1σ(...); here they read 1sigma(...), since Excel misreads a Greek letter in a CSV file
-    that has no byte-order mark.
+    that has no byte-order mark. With a sample sheet (isoharness 0.3.0) the sheet's columns
+    follow, as on the workbook's Results sheet: Sample ID (sheet), Matched by, and each column
+    with a value for a sample of the run.
     """
+    cols = output_columns(sheet, [positions])
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\n")
-    w.writerow(RESULTS_HEADER)
+    w.writerow(RESULTS_HEADER + output_header(sheet, cols))
     for p in positions:
-        w.writerow(csv_cells(results_values(p)))
+        w.writerow(csv_cells(results_values(p) + output_values(p, sheet, cols)))
     return buf.getvalue()
+
+
+def sample_records(positions) -> list[dict]:
+    """How each Sample position matched the sample sheet (isoharness 0.3.0)."""
+    return [{"row": p.row, "identifier": p.identifier, "sample_id": getattr(p, "sample_id", None),
+             "matched_by": getattr(p, "matched_by", None), "group": getattr(p, "replicate_group", None)}
+            for p in positions if p.role == "Sample"]
 
 
 def csv_cells(values) -> list:

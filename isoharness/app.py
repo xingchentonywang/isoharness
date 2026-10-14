@@ -13,6 +13,8 @@ answers alone (processing a run, the results tables, reading a configuration) to
 ``ISOHARNESS_READS_PER_HOUR`` (default 600, from isoharness 0.2.0, since a batch sends
 one request per run); 0 turns either off. Several runs can be combined into one results
 table (isoharness 0.2.0), at most ``ISOHARNESS_MAX_BATCH_RUNS`` (default 20) in a request.
+A sample sheet and each run's information (isoharness 0.3.0) go with the request that needs
+them, as the export does, and are read for that request only.
 
     uvicorn isoharness.app:app --host 0.0.0.0 --port 8000
 """
@@ -36,13 +38,16 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 
 from ea_irms.labconfig import LabConfigError, config_to_xlsx, read_lab_config
+from ea_irms.metadata import (MAX_ROWS, SHEET_SUFFIXES, SampleSheetError, clean_run_info, match_positions,
+                              match_summary, output_columns, output_header, read_sample_sheet, sample_names,
+                              template_xlsx)
 from ea_irms.parse import ExportFormatError, parse_export
 from ea_irms.pipeline import Config, config_from_dict, config_to_dict, process
 from ea_irms.workbook import VERSION, bake_values, build_workbook
 
 from . import __version__
 from .batch import BatchRun, combined_csv, combined_xlsx, label_runs
-from .serialize import clean, port_input, position_record, results_csv
+from .serialize import clean, port_input, position_record, results_csv, sample_records
 
 log = logging.getLogger("isoharness")
 
@@ -61,7 +66,8 @@ PORT_ENGINE = ROOT / "port" / "engine.js"
 EXAMPLE = next((p for p in (ROOT / "warmup" / "20260915_raw.csv",
                             ROOT / "tests" / "data" / "20260915_raw.csv") if p.is_file()), None)
 LIMITED = ("/api/process", "/api/workbook", "/api/results.csv", "/api/config/read",
-           "/api/batch/results.xlsx", "/api/batch/results.csv")
+           "/api/batch/results.xlsx", "/api/batch/results.csv",
+           "/api/samplesheet/read", "/api/samplesheet/template.xlsx")
 BATCH = ("/api/batch/results.xlsx", "/api/batch/results.csv")
 # The workbook is the costly request, since LibreOffice computes it: for the test run a workbook
 # request to isoharness.org took 8.96 s on 2026-10-13. The engine answers the others alone; for the
@@ -249,13 +255,49 @@ def _parse(path: Path, name: str):
                                  f"{path.suffix} ({type(exc).__name__})") from exc
 
 
-def _process(positions, config: Config, name: str):
+def _process(positions, config: Config, name: str, samples=None):
     try:
-        return process(positions, config)
+        return process(positions, config, samples=samples)
     except (ValueError, ZeroDivisionError, IndexError, TypeError) as exc:
         # TypeError: a configuration field of the wrong kind, such as text where a number belongs
         log.warning("process failed for %s: %r", name, exc)
         raise HTTPException(422, f"the run in {name} could not be corrected: {exc}") from exc
+
+
+def _sheet(upload: UploadFile | None, id_column: str | None = None):
+    """The sample sheet sent with a request (isoharness 0.3.0), read for this request only; None without one."""
+    if upload is None or not (upload.filename or "").strip():
+        return None
+    name = Path(upload.filename or "").name
+    if Path(name).suffix.lower() not in SHEET_SUFFIXES:
+        raise HTTPException(415, f"{name or 'the file'} is not a sample sheet ea_irms reads; use one of "
+                                 f"{', '.join(SHEET_SUFFIXES)}")
+    limit = max_upload_bytes()
+    data = upload.file.read(limit + 1)
+    if len(data) > limit:
+        raise HTTPException(413, f"{name} is larger than the {limit // (1024 * 1024)} MB this service accepts")
+    try:
+        return read_sample_sheet(data, name, id_column)
+    except SampleSheetError as exc:
+        raise HTTPException(422, f"the sample sheet could not be read: {exc}") from exc
+    except Exception as exc:  # a corrupt file is the caller's input
+        log.warning("sample sheet failed for %s: %r", name, exc)
+        raise HTTPException(422, f"the sample sheet {name} could not be read ({type(exc).__name__})") from exc
+
+
+def _info(value, where: str = "run_info") -> dict:
+    """Run information, a JSON object or its text, as ea_irms.metadata keeps it."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return {}
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError as exc:
+            raise HTTPException(422, f"{where} could not be read as JSON: {exc}") from exc
+    try:
+        return clean_run_info(value)
+    except ValueError as exc:
+        raise HTTPException(422, f"{where}: {exc}") from exc
 
 
 @app.get("/api/health")
@@ -277,14 +319,18 @@ def defaults():
 
 @app.post("/api/process")
 def process_run(file: UploadFile = File(...), config: str | None = Form(None),
-                run_date: str | None = Form(None)):
+                run_date: str | None = Form(None), sample_sheet: UploadFile | None = File(None),
+                id_column: str | None = Form(None), run_info: str | None = Form(None)):
     """Correct one run. Returns every position's values and flags, the fitted steps,
-    and the block the browser's preview port recomputes from."""
+    and the block the browser's preview port recomputes from. With a sample sheet (0.3.0)
+    each sample is matched to it and its replicates are compared for the rerun marks."""
     t0 = time.perf_counter()
     with _upload(file) as (path, info):
         cfg = _config(config)
+        sheet = _sheet(sample_sheet, id_column)
+        rinfo = _info(run_info)
         positions = _parse(path, info["name"])
-        positions, fits = _process(positions, cfg, info["name"])
+        positions, fits = _process(positions, cfg, info["name"], sheet)
         body = {
             "isoharness": __version__,
             "ea_irms": VERSION,
@@ -293,6 +339,9 @@ def process_run(file: UploadFile = File(...), config: str | None = Form(None),
             "positions": [position_record(p) for p in positions],
             "fits": clean(fits),
             "port": port_input(positions, fits, cfg, info["name"], info["bytes"], run_date),
+            "metadata": clean({"run_info": rinfo, "sheet": sheet.describe() if sheet else None,
+                               "match": fits["metadata"]["match"], "samples": sample_records(positions),
+                               "columns": output_header(sheet, output_columns(sheet, [positions]))}),
         }
     body["seconds"] = round(time.perf_counter() - t0, 4)
     return body
@@ -301,16 +350,20 @@ def process_run(file: UploadFile = File(...), config: str | None = Form(None),
 @app.post("/api/workbook")
 def workbook(file: UploadFile = File(...), config: str | None = Form(None),
              run_name: str | None = Form(None), run_date: str | None = Form(None),
-             values: bool = Form(True)):
+             values: bool = Form(True), sample_sheet: UploadFile | None = File(None),
+             id_column: str | None = Form(None), run_info: str | None = Form(None)):
     """The correction workbook for one run. With ``values`` (the default) LibreOffice
-    computes every formula, so the numbers show in any viewer."""
+    computes every formula, so the numbers show in any viewer. A sample sheet and the run
+    information (0.3.0) fill its Metadata sheet and the columns after Results."""
     with _upload(file) as (path, info):
         cfg = _config(config)
+        sheet = _sheet(sample_sheet, id_column)
+        rinfo = _info(run_info)
         _parse(path, info["name"])
         out = path.with_name(f"{path.stem}_ea_irms_v{VERSION}.xlsx")
         try:
             build_workbook(path, out, cfg, run_name=run_name or Path(info["name"]).stem,
-                           run_date=run_date or None)
+                           run_date=run_date or None, samples=sheet, run_info=rinfo, file_name=info["name"])
         except ValueError as exc:
             raise HTTPException(422, f"the workbook could not be built: {exc}") from exc
         computed = False
@@ -325,12 +378,15 @@ def workbook(file: UploadFile = File(...), config: str | None = Form(None),
 
 
 @app.post("/api/results.csv")
-def results(file: UploadFile = File(...), config: str | None = Form(None)):
-    """The workbook's Results sheet as CSV, from the engine at full precision."""
+def results(file: UploadFile = File(...), config: str | None = Form(None),
+            sample_sheet: UploadFile | None = File(None), id_column: str | None = Form(None)):
+    """The workbook's Results sheet as CSV, from the engine at full precision; with a sample
+    sheet (0.3.0), its columns after them."""
     with _upload(file) as (path, info):
         cfg = _config(config)
-        positions, _ = _process(_parse(path, info["name"]), cfg, info["name"])
-        text = results_csv(positions, cfg)
+        sheet = _sheet(sample_sheet, id_column)
+        positions, _ = _process(_parse(path, info["name"]), cfg, info["name"], sheet)
+        text = results_csv(positions, cfg, sheet)
         name = f"{path.stem}_results_ea_irms_v{VERSION}.csv"
     return Response(text, media_type="text/csv", headers={
         "Content-Disposition": f'attachment; filename="{name}"'})
@@ -349,7 +405,8 @@ def _json_list(text: str | None, field: str, n: int) -> list:
     return data
 
 
-def _batch(files: list[UploadFile], configs: str | None, run_dates: str | None) -> list[BatchRun]:
+def _batch(files: list[UploadFile], configs: str | None, run_dates: str | None, sheet=None,
+           run_infos: str | None = None) -> list[BatchRun]:
     """Correct each export on its own, with its own configuration, as /api/process does."""
     if not files:
         raise HTTPException(422, "send the exports in the files field")
@@ -367,9 +424,19 @@ def _batch(files: list[UploadFile], configs: str | None, run_dates: str | None) 
     if cfgs is None:
         cfgs = _json_list(configs, "configs", len(files))
     dates = _json_list(run_dates, "run_dates", len(files))
+    infos = None
+    if run_infos is not None and run_infos.strip():
+        try:
+            one = json.loads(run_infos)
+        except ValueError as exc:
+            raise HTTPException(422, f"run_infos could not be read as JSON: {exc}") from exc
+        if isinstance(one, dict):
+            infos = [one] * len(files)      # one run information for every run
+    if infos is None:
+        infos = _json_list(run_infos, "run_infos", len(files))
     runs, total, limit = [], 0, max_upload_bytes()
     with ExitStack() as stack:
-        for f, data, date in zip(files, cfgs, dates):
+        for f, data, date, rinfo in zip(files, cfgs, dates, infos):
             path, info = stack.enter_context(_upload(f))
             total += info["bytes"]
             if total > limit:
@@ -381,33 +448,114 @@ def _batch(files: list[UploadFile], configs: str | None, run_dates: str | None) 
                 cfg = _config(json.dumps(data) if data is not None else None)
             except HTTPException as exc:
                 raise HTTPException(exc.status_code, f"{info['name']}: {exc.detail}") from exc
-            positions, fits = _process(_parse(path, info["name"]), cfg, info["name"])
+            run_info = _info(rinfo, f"the run information for {info['name']}")
+            positions, fits = _process(_parse(path, info["name"]), cfg, info["name"], sheet)
             when = str(date).strip()[:40] if isinstance(date, (str, int, float)) and str(date).strip() else None
-            runs.append(BatchRun(file=info["name"], positions=positions, fits=fits, config=cfg, run_date=when))
+            runs.append(BatchRun(file=info["name"], positions=positions, fits=fits, config=cfg, run_date=when,
+                                 run_info=run_info))
     return label_runs(runs)
 
 
 @app.post("/api/batch/results.xlsx")
 def batch_results_xlsx(files: list[UploadFile] = File(...), configs: str | None = Form(None),
-                       run_dates: str | None = Form(None), config_name: str | None = Form(None)):
+                       run_dates: str | None = Form(None), config_name: str | None = Form(None),
+                       sample_sheet: UploadFile | None = File(None), id_column: str | None = Form(None),
+                       run_infos: str | None = Form(None)):
     """Several runs' results in one Excel file (isoharness 0.2.0): Results, every position of every run
     with a Run column first; Runs, one row per run; Repeats, the samples measured in more than one run.
     ``configs`` is a JSON list with one configuration per file, or one object for all of them;
-    ``run_dates`` a JSON list of dates or nulls. Each run is corrected on its own."""
-    runs = _batch(files, configs, run_dates)
+    ``run_dates`` a JSON list of dates or nulls. Each run is corrected on its own. One sample sheet
+    goes with all the runs, and ``run_infos`` is a JSON list with each run's information, or one
+    object for all of them (0.3.0)."""
+    sheet = _sheet(sample_sheet, id_column)
+    runs = _batch(files, configs, run_dates, sheet, run_infos)
     name = f"combined_{len(runs)}_run{'s' if len(runs) != 1 else ''}_results_ea_irms_v{VERSION}.xlsx"
-    data = combined_xlsx(runs, (config_name or "").strip()[:200] or None)
+    data = combined_xlsx(runs, (config_name or "").strip()[:200] or None, sheet)
     return Response(data, media_type=XLSX, headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
 @app.post("/api/batch/results.csv")
 def batch_results_csv(files: list[UploadFile] = File(...), configs: str | None = Form(None),
-                      run_dates: str | None = Form(None)):
+                      run_dates: str | None = Form(None), sample_sheet: UploadFile | None = File(None),
+                      id_column: str | None = Form(None), run_infos: str | None = Form(None)):
     """The combined Results sheet as CSV: Run, then the columns of /api/results.csv, at full precision."""
-    runs = _batch(files, configs, run_dates)
+    sheet = _sheet(sample_sheet, id_column)
+    runs = _batch(files, configs, run_dates, sheet, run_infos)
     name = f"combined_{len(runs)}_run{'s' if len(runs) != 1 else ''}_results_ea_irms_v{VERSION}.csv"
-    return Response(combined_csv(runs), media_type="text/csv",
+    return Response(combined_csv(runs, sheet), media_type="text/csv",
                     headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+class _Sample:
+    """A sample the page lists, for matching without its export."""
+    role = "Sample"
+
+    def __init__(self, row, identifier):
+        self.row, self.identifier = row, identifier
+
+
+def _page_runs(text: str | None) -> list[dict]:
+    """The runs the page sends with a sample sheet: [{"name": ..., "samples": [[row, identifier], ...]}]."""
+    if text is None or not text.strip():
+        return []
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        raise HTTPException(422, f"runs could not be read as JSON: {exc}") from exc
+    if not isinstance(data, list) or len(data) > max_batch_runs():
+        raise HTTPException(422, f"runs must be a JSON list of at most {max_batch_runs()} runs")
+    out = []
+    for k, r in enumerate(data, start=1):
+        if not isinstance(r, dict) or not isinstance(r.get("samples", []), list):
+            raise HTTPException(422, f"run {k} of runs must be an object with a samples list")
+        samples = []
+        for item in r.get("samples", []):
+            if (not isinstance(item, (list, tuple)) or len(item) != 2 or not isinstance(item[0], int)
+                    or isinstance(item[0], bool) or not isinstance(item[1], (str, int, float))):
+                raise HTTPException(422, f"each sample of run {k} must be [position, identifier]")
+            samples.append(_Sample(item[0], str(item[1])[:200]))
+        if len(samples) > 1000:
+            raise HTTPException(422, f"run {k} lists more than 1000 samples")
+        out.append({"name": str(r.get("name") or f"run {k}")[:200], "samples": samples})
+    return out
+
+
+@app.post("/api/samplesheet/read")
+def samplesheet_read(file: UploadFile = File(...), id_column: str | None = Form(None),
+                     runs: str | None = Form(None)):
+    """Read a sample sheet (isoharness 0.3.0) and, for the runs the page lists, match their samples
+    to it: how each matched, which did not, and the replicate groups. Nothing is kept."""
+    sheet = _sheet(file, id_column)
+    if sheet is None:
+        raise HTTPException(422, "send the sample sheet in the file field")
+    listed = _page_runs(runs)
+    out = []
+    for r in listed:
+        groups = match_positions(r["samples"], sheet)
+        out.append({"name": r["name"], "samples": sample_records(r["samples"]),
+                    "match": match_summary(r["samples"], sheet),
+                    "groups": [{k: g[k] for k in ("group", "name", "rows", "by")} for g in groups]})
+    return clean({"ea_irms": VERSION, "sheet": sheet.describe(), "runs": out,
+                  "columns": output_header(sheet, output_columns(sheet, [r["samples"] for r in listed]))})
+
+
+@app.post("/api/samplesheet/template.xlsx")
+async def samplesheet_template(request: Request):
+    """A sample sheet to fill in (isoharness 0.3.0), with one row per name sent:
+    ``{"names": ["CI 3-2-H", ...]}``. The page sends the samples of the runs it holds."""
+    try:
+        body = await request.json()
+    except ValueError as exc:
+        raise HTTPException(422, "send a JSON object with the sample names in its names field") from exc
+    names = body.get("names", []) if isinstance(body, dict) else None
+    if not isinstance(names, list) or not all(isinstance(n, (str, int, float)) and not isinstance(n, bool)
+                                              for n in names):
+        raise HTTPException(422, "send a JSON object with the sample names in its names field")
+    if len(names) > MAX_ROWS:
+        raise HTTPException(422, f"at most {MAX_ROWS} names fit in one sample sheet")
+    data = template_xlsx(sample_names([[str(n)[:200] for n in names]]))
+    return Response(data, media_type=XLSX, headers={
+        "Content-Disposition": f'attachment; filename="sample_sheet_ea_irms_v{VERSION}.xlsx"'})
 
 
 def _xlsx_name(name, suffix: str) -> str:

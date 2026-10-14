@@ -35,10 +35,15 @@ already running there (the container image, say), opens the page in Chromium
    sample named by its position, the second with each sample's N2 peak 0.5 permil
    higher; checks the batch list, that the first run kept its decisions when shown
    again, the samples measured in more than one run, and the combined results and
-   table, each run's rows against the service's table for that run; removes a run;
-8. saves a screenshot of every screen at 1440 by 1000 (full page) and of the upload
+   table, each run's rows against the service's table for that run;
+8. types run information (isoharness 0.3.0) and gives it to every run, downloads the
+   sample sheet the page fills with the batch's sample names, chooses a sample sheet,
+   checks how the samples matched and that choosing another ID column matches them
+   again, and checks the sheet's columns and the run information in the combined
+   results and in a run's workbook; then removes a run;
+9. saves a screenshot of every screen at 1440 by 1000 (full page) and of the upload
    and results screens at 400 px wide;
-9. loads the page afresh, checks the landing page at 400 px and 1440 px wide, follows
+10. loads the page afresh, checks the landing page at 400 px and 1440 px wide, follows
    the brand back to the home page and checks it at 400 px, and reads the example run
    through its button.
 
@@ -657,6 +662,90 @@ def main(argv=None):
                    and abs(abs(r[ix["d15N minus mean"]]) - 0.25 * slope) > 1e-9]
             check(len(rep) - 1 == 52 and not off, f"Repeats: {len(rep) - 1} rows, {len(off)} off by more than 1e-9")
             stats["batch"] = (len(rows), worst, len(rep) - 1)
+
+            # ---- run information and a sample sheet (isoharness 0.3.0)
+            page.get_by_role("navigation", name="Main").get_by_role("button", name="EA-IRMS").click()
+            for field, value in (("operator", "XT Wang"), ("instrument", "Delta V Plus"), ("project", "e2e")):
+                page.fill(f"#dc-info-{field}", value)
+            page.get_by_role("button", name="Use for every run").click()
+            expect(page.get_by_text("Every run of the batch now has the run information of 20260915_raw.csv.")).to_be_visible()
+            page.fill("#dc-info-notes", "first run")
+            with page.expect_download(timeout=30000) as dl:
+                page.get_by_role("button", name="Download a sheet with these sample names").click()
+            tpl = work / dl.value.suggested_filename
+            dl.value.save_as(str(tpl))
+            check(tpl.name == f"sample_sheet_ea_irms_v{ver}.xlsx", f"the sample sheet is named {tpl.name}")
+            ids = [c.value for c in openpyxl.load_workbook(tpl)["Samples"]["A"]][1:]
+            want_ids = ["Random"] + [f"S{r}" for r in sorted(int(x) for x in samples)]
+            check(ids == want_ids, f"the sample sheet lists {len(ids)} names, {ids[:3]}, not {len(want_ids)}")
+            sheet = work / "samples.csv"
+            sheet.write_text("Sample ID,Project,Depth,Replicate of,Alt ID\nS21,P1,10,,X21\nS24,P1,12,S21,X24\n"
+                             "S2,P2,,,X2\n")
+            with page.expect_request(lambda r: r.url.endswith("/api/samplesheet/read") and r.method == "POST"):
+                page.set_input_files("#dc-sheet", str(sheet))
+            summary = page.locator('[data-dc="sheet-summary"]')
+            # S21 and S24 of the two copies match; S2 matches none of S20 to S29, whose next character is a digit
+            expect(summary).to_have_text("4 of 78 samples matched (4 by the exact name); 74 not in the sheet. "
+                                         "2 groups of replicates in one run will be compared.", timeout=30000)
+            matched = page.locator('[aria-label="How each sample matched the sheet"] [role=row]')
+            check(matched.count() == 79, f"the match table has {matched.count() - 1} rows, not 78")
+            shot("1440-sample-sheet.png")
+            page.select_option("#dc-sheet-id", "Alt ID")
+            expect(summary).to_have_text("0 of 78 samples matched; 78 not in the sheet. "
+                                         "No sample has replicates in one run.", timeout=30000)
+            page.select_option("#dc-sheet-id", "Sample ID")
+            expect(summary).to_contain_text("4 of 78 samples matched", timeout=30000)
+            page.get_by_role("button", name="Start the corrections").click()
+            heading("results")
+            files = page.locator('section[aria-label="Files and methods"]')
+            meta = {}
+            for label, key in (("Combined results, all 3 runs", "xlsx"), ("Combined results table", "csv")):
+                with page.expect_download(timeout=120000) as dl:
+                    files.get_by_role("button", name=re.compile("^" + label)).click()
+                meta[key] = work / ("with_sheet_" + dl.value.suggested_filename)
+                dl.value.save_as(str(meta[key]))
+                expect(files.get_by_role("button", name=re.compile("^" + label))).to_be_enabled(timeout=120000)
+            mlines = meta["csv"].read_text().splitlines()
+            check(mlines[0] == lines[0] + ",Sample ID (sheet),Matched by,Project,Depth,Replicate of,Alt ID",
+                  f"the combined table with the sheet is headed {mlines[0][-80:]!r}")
+            mrows, orig = list(csv.reader(mlines[1:])), list(csv.reader(lines[1:]))
+            check(len(mrows) == 168 and all(m[:25] == o for m, o in zip(mrows, orig)),
+                  "the sheet changed the combined table's own 25 columns (no replicates here are over the limit)")
+            got_meta = {(m[0], m[1]): m[25:] for m in mrows if m[25:] != ["", "", "", "", "", ""]}
+            want_meta = {}
+            for run in ("20260916_run_a", "20260917_run_b"):
+                want_meta[(run, "21")] = ["S21", "exact", "P1", "10", "", "X21"]
+                want_meta[(run, "24")] = ["S24", "exact", "P1", "12", "S21", "X24"]
+                for r in samples - {"21", "24"}:
+                    want_meta[(run, r)] = ["", "not in sheet", "", "", "", ""]
+            for r in samples:
+                want_meta[("20260915_raw", r)] = ["", "not in sheet", "", "", "", ""]
+            off_meta = sorted(k for k in set(got_meta) | set(want_meta) if got_meta.get(k) != want_meta.get(k))
+            check(not off_meta, f"the sheet's cells in the combined table differ at {off_meta[:4]}")
+            runs_sheet = list(openpyxl.load_workbook(meta["xlsx"])["Runs"].iter_rows(values_only=True))
+            check(list(runs_sheet[0][-5:]) == ["Operator", "Instrument", "Project", "Notes", "Samples matched"],
+                  f"the Runs sheet ends {runs_sheet[0][-5:]}")
+            check([list(r[-5:]) for r in runs_sheet[1:]] == [
+                ["XT Wang", "Delta V Plus", "e2e", "first run", "0 of 26 samples matched"],
+                ["XT Wang", "Delta V Plus", "e2e", None, "2 of 26 samples matched (2 by the exact name)"],
+                ["XT Wang", "Delta V Plus", "e2e", None, "2 of 26 samples matched (2 by the exact name)"]],
+                f"the Runs sheet reads {[r[-5:] for r in runs_sheet[1:]]}")
+            with page.expect_download(timeout=180000) as dl:
+                page.get_by_role("button", name="Workbook of 20260916_run_a.csv").click()
+            run_book = work / ("with_sheet_" + dl.value.suggested_filename)
+            dl.value.save_as(str(run_book))
+            expect(page.get_by_role("button", name="Workbook of 20260916_run_a.csv")).to_be_enabled(timeout=180000)
+            wbm = openpyxl.load_workbook(run_book, data_only=True)
+            md, rsm = wbm["Metadata"], wbm["Results"]
+            check([md.cell(r, 2).value for r in range(5, 12)] == [
+                "20260916_run_a", "20260916_run_a.csv", "2026-09-16", "XT Wang", "Delta V Plus", "e2e", None],
+                f"the run's Metadata sheet reads {[md.cell(r, 2).value for r in range(5, 12)]}")
+            check([rsm.cell(4 + 24, c).value for c in range(25, 31)] == ["S24", "exact", "P1", 12, "S21", "X24"],
+                  f"the run's Results sheet carries {[rsm.cell(4 + 24, c).value for c in range(25, 31)]} at position 24")
+            rpm = wbm["Replicates"]
+            check([rpm.cell(9, c).value for c in (1, 3, 10, 14, 15)] == [1, 21, None, None, "21, 24"]
+                  and rpm.cell(10, 3).value == 24, "the run's Replicates sheet does not hold S21 and S24 as one group")
+            stats["sheet"] = (len(want_meta), len(runs_sheet) - 1)
             page.get_by_role("navigation", name="Main").get_by_role("button", name="EA-IRMS").click()
             page.get_by_role("button", name="Remove 20260917_run_b.csv").click()
             expect(page.get_by_text("Batch of 2 runs")).to_be_visible()
@@ -716,6 +805,8 @@ def main(argv=None):
           f"workbook values checked, configuration round trip within {stats['round trip']:.1e} relative; "
           f"2 refused uploads shown as written; a batch of 3 runs, {stats['batch'][0]} combined rows equal to each "
           f"run's own table within {stats['batch'][1]:.1e} relative, {stats['batch'][2]} repeat analyses; "
+          f"a sample sheet matched and carried into {stats['sheet'][0]} rows of the combined table, run information "
+          f"on {stats['sheet'][1]} runs and in a run's workbook; "
           f"0 console errors, 0 failed requests; screenshots in {shots}")
     return 0
 

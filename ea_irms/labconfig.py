@@ -24,6 +24,7 @@ from .pipeline import (MAX_STANDARDS, STANDARD_FIELDS, Config, config_from_dict,
                        standards_from_rows)
 
 SWITCH = ("On", "Off", "Auto")
+ONOFF = ("On", "Off")
 MODELS = ("Row", "Background", "Auto")
 ROLES = ("Anchor", "Check", "Drift", "Linearity", "Blank", "Exclude", "Sample")
 STANDARD_HEADERS = ["Match text in Identifier 1", "Role", "Accepted d13C", "Accepted d15N", "%C", "%N",
@@ -31,7 +32,8 @@ STANDARD_HEADERS = ["Match text in Identifier 1", "Role", "Accepted d13C", "Acce
 SETTINGS_HEADERS = ["Setting", "Value", "What it means", "Key"]
 
 # (key, label, kind, note). A row without a key is a heading. Kinds: switch (On, Off or
-# Auto), switch_or_empty, model, number, number_or_empty, whole_or_empty, positions.
+# Auto), switch_or_empty, onoff (On or Off, 1.4.8), model, number, number_or_empty,
+# whole_or_empty, positions.
 SETTINGS = [
     (None, "Corrections", None, None),
     ("blank_correction", "Blank correction", "switch",
@@ -83,7 +85,7 @@ SETTINGS = [
      "number_or_empty", "Marks that sample for a rerun of that element. Empty: no check."),
     ("ref_gas_sd_limit", "Reference-gas SD that is a problem for the whole run (permil)", "number_or_empty",
      "The FIRMS guide gives 0.1 permil for its zero-enrichment test (section 4.3.2). Empty: no check."),
-    (None, "Rerun marks (1.4.7)", None, None),
+    (None, "Rerun marks (1.4.7 and 1.4.8)", None, None),
     ("max_amplitude_mv", "Largest peak amplitude the instrument measures (mV)", "number_or_empty",
      "A peak above the linearity range is marked for a rerun only at or above this amplitude, and a peak at or "
      "above it is marked whatever the range. Empty: every peak above the linearity range is marked, as before "
@@ -91,6 +93,9 @@ SETTINGS = [
     ("rerun_max_1sigma", "Largest 1σ of the final d15N or d13C before a rerun (permil)", "number_or_empty",
      "A sample whose final d15N or d13C has a 1σ above this is marked for a rerun of that element. The 1σ leaves "
      "out the blank, linearity, and drift corrections. Empty: no check."),
+    ("rerun_replicates", "Compare replicates of a sample in one run", "onoff",
+     "On or Off. With a sample sheet, analyses of one sample in a run (the same name, or the same Replicate of) "
+     "whose range is above the critical range of ISO 5725-6 are marked for a rerun of that element (1.4.8)."),
     (None, "Uncertainty", None, None),
     ("u_sample_n", "Sample repeatability, d15N (1σ, permil)", "number_or_empty",
      "Empty: the pooled scatter of the anchor replicates in each run."),
@@ -210,7 +215,8 @@ def config_to_xlsx(config: Config | None = None, path: str | Path | None = None,
     dv_sw = DataValidation(type="list", formula1='"On,Off,Auto"', allow_blank=False)
     dv_swe = DataValidation(type="list", formula1='"On,Off,Auto"', allow_blank=True)
     dv_dm = DataValidation(type="list", formula1='"Row,Background,Auto"', allow_blank=False)
-    for dv in (dv_sw, dv_swe, dv_dm):
+    dv_oo = DataValidation(type="list", formula1='"On,Off"', allow_blank=False)
+    for dv in (dv_sw, dv_swe, dv_dm, dv_oo):
         st.add_data_validation(dv)
     r = 5
     for key, label, kind, note in SETTINGS:
@@ -234,7 +240,7 @@ def config_to_xlsx(config: Config | None = None, path: str | Path | None = None,
         k = st.cell(r, 4, key)
         k.font = f_key
         k.fill = fill_key
-        dv = {"switch": dv_sw, "switch_or_empty": dv_swe, "model": dv_dm}.get(kind)
+        dv = {"switch": dv_sw, "switch_or_empty": dv_swe, "model": dv_dm, "onoff": dv_oo}.get(kind)
         if dv is not None:
             dv.add(f"B{r}")
         r += 1
@@ -288,8 +294,8 @@ def _number(text, whole=False):
 def _read_value(key, kind, raw, problems, where):
     empty = raw is None or (isinstance(raw, str) and not raw.strip())
     text = raw.strip() if isinstance(raw, str) else raw
-    if kind in ("switch", "switch_or_empty", "model"):
-        allowed = MODELS if kind == "model" else SWITCH
+    if kind in ("switch", "switch_or_empty", "model", "onoff"):
+        allowed = MODELS if kind == "model" else ONOFF if kind == "onoff" else SWITCH
         if empty:
             if kind == "switch_or_empty":
                 return None

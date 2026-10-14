@@ -19,6 +19,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
+from .metadata import critical_range_factor, match_positions, match_summary
 from .parse import Position
 
 ATOMIC_C = 12.011
@@ -129,11 +130,15 @@ class Config:
     # (None = off).
     max_amplitude_mv: float | None = 50000.0
     rerun_max_1sigma: float | None = 0.5
+    # 1.4.8: replicates of a sample in one run, named by the sample sheet, whose range is above the
+    # critical range of ISO 5725-6 (f(n) x the repeatability of one analysis) are marked for a rerun of
+    # that element. On or Off; without a sample sheet nothing is compared.
+    rerun_replicates: str = "On"
 
     def __post_init__(self):
         # Older configurations stored the switches as booleans.
         for name in ("linearity_correction", "linearity_correction_c", "drift_correction",
-                     "elemental_correction"):
+                     "elemental_correction", "rerun_replicates"):
             v = getattr(self, name)
             if v is True:
                 setattr(self, name, "On")
@@ -475,22 +480,55 @@ def _reason(flag, config=None):
             or flag.startswith(_PREFIX["n"]) or flag.startswith(_PREFIX["c"]))
 
 
-def _extra_reasons(p, config):
-    """The rerun reasons that are not flags (1.4.7), one per element: a peak at or above the
-    instrument's largest amplitude, and a final delta value whose 1 sigma is above the limit. In the
-    order the workbook writes them: amplitude N, amplitude C, 1 sigma N, 1 sigma C."""
-    out = {"n": [], "c": []}
+def _extra_reasons(p, config, replicates=None):
+    """The rerun reasons that are not flags, as (element, text): a peak at or above the instrument's
+    largest amplitude and a final delta value whose 1 sigma is above the limit (1.4.7), and replicates
+    whose range is above the critical range (1.4.8). In the order the workbook writes them: amplitude
+    N, amplitude C, 1 sigma N, 1 sigma C, replicates N, replicates C."""
+    out = []
     lim = config.max_amplitude_mv
     if lim is not None:
         for el, area, ampl, gas in (("n", p.area_n, p.ampl_n, "N2"), ("c", p.area_c, p.ampl_c, "CO2")):
             if area is not None and ampl is not None and not _above(lim, ampl):
-                out[el].append(f"{gas} peak at or above {lim:.0f} mV")
+                out.append((el, f"{gas} peak at or above {lim:.0f} mV"))
     usig = config.rerun_max_1sigma
     if usig is not None:
         for el, u, name in (("n", p.u_d15n, "d15N"), ("c", p.u_d13c, "d13C")):
             if u is not None and _above(u, usig):
-                out[el].append(f"1σ({name}) {u:.2f} above {usig:.2f}")
+                out.append((el, f"1σ({name}) {u:.2f} above {usig:.2f}"))
+    g = (replicates or {}).get(getattr(p, "replicate_group", None))
+    if g is not None:
+        for el, name in (("n", "d15N"), ("c", "d13C")):
+            if g[el]["over"]:
+                out.append((el, f"replicates at positions {', '.join(str(r) for r in g['rows'])} differ by "
+                                f"{g[el]['range']:.2f} in {name}, above {g[el]['limit']:.2f}"))
     return out
+
+
+def _replicates(positions, F, config, groups):
+    """Replicates of a sample in one run (1.4.8), from the sample sheet: their range against the
+    critical range of ISO 5725-6, section 5.2, f(n) x s, with s the repeatability of one analysis in
+    use (the configuration's, or the pooled anchor replicates') on the calibrated scale, so times the
+    calibration slope. n counts the analyses with a value of that element."""
+    on = str(config.rerun_replicates or "").strip().casefold() == "on"
+    s = {}
+    for el in ("n", "c"):
+        u, m = F[f"unc_{el}"].get("u_sample"), F[f"cal_{el}"].get("slope")
+        s[el] = None if u is None or m is None else u * abs(m)
+    by_row = {p.row: p for p in positions}
+    out = []
+    for g in groups:
+        e = dict(g)
+        for el, attr in (("n", "d15n_final"), ("c", "d13c_final")):
+            vals = [getattr(by_row[r], attr) for r in g["rows"] if getattr(by_row[r], attr) is not None]
+            n = len(vals)
+            rng = (max(vals) - min(vals)) if n >= 2 else None
+            f = critical_range_factor(n)
+            lim = f * s[el] if (f is not None and s[el] is not None) else None
+            e[el] = {"n": n, "range": rng, "factor": f, "limit": lim,
+                     "over": bool(on and rng is not None and lim is not None and _above(rng, lim))}
+        out.append(e)
+    F["replicates"] = {"on": on, "s": s, "groups": out}
 
 
 def _mass_window(p, el, lo_area, hi_area):
@@ -526,6 +564,7 @@ def _rerun_marks(positions, F, config):
                for el in ("n", "c")}
     hi_area = {el: L[f"max_{el}"] or 0 for el in ("n", "c")}
     counts = {"N": 0, "C": 0, "N and C": 0, "Check": 0}
+    reps = {g["group"]: g for g in F.get("replicates", {}).get("groups", [])}
     for p in positions:
         p.rerun = p.rerun_why = p.rerun_mass = None
         p.rerun_mass_lo = p.rerun_mass_hi = None
@@ -533,9 +572,9 @@ def _rerun_marks(positions, F, config):
             continue
         fl = p.flags
         no_n, no_c = "no N peak" in fl, "no C peak" in fl
-        extra = _extra_reasons(p, config)
+        extra = _extra_reasons(p, config, reps)
         need = {el: any(_reason(f, config) and (f in _SIZE[el] or f.startswith(_PREFIX[el])) for f in fl)
-                or bool(extra[el]) for el in ("n", "c")}
+                or any(e == el for e, _ in extra) for el in ("n", "c")}
         both = "possible carryover from an oversized sample" in fl or (no_n and no_c)
         check = "ran before the background settled" in fl or no_n != no_c
         if both or (need["n"] and need["c"]):
@@ -549,9 +588,7 @@ def _rerun_marks(positions, F, config):
         else:
             continue
         p.rerun = mark
-        p.rerun_why = "; ".join([f for f in fl if _reason(f, config)]
-                                + [r for kind in (0, 1) for el in ("n", "c")
-                                   for r in extra[el] if r.startswith("1σ(") == bool(kind)])
+        p.rerun_why = "; ".join([f for f in fl if _reason(f, config)] + [t for _, t in extra])
         counts[mark] += 1
         if mark == "Check":
             continue
@@ -597,13 +634,19 @@ def _rerun_marks(positions, F, config):
                   "lo_area": lo_area, "hi_area": hi_area}
 
 
-def process(positions, config=None):
-    """Apply every correction. Returns (positions, fits)."""
+def process(positions, config=None, samples=None):
+    """Apply every correction. Returns (positions, fits).
+
+    ``samples`` is a sample sheet (ea_irms.metadata.SampleSheet, 1.4.8): each Sample position is
+    matched to it, and replicates of a sample in the run are compared for the rerun marks."""
     config = config or Config()
     alpha = config.significance_level
     positions = sorted(positions, key=lambda p: p.row)
     assign_roles(positions, config)
     F: dict = {}
+    rep_groups = match_positions(positions, samples)
+    F["metadata"] = {"sheet": samples.describe() if samples is not None else None,
+                     "match": match_summary(positions, samples)}
 
     role = lambda r: [p for p in positions if p.role == r]      # noqa: E731
 
@@ -1119,6 +1162,7 @@ def process(positions, config=None):
             if dev is not None and lim is not None and _above(abs(dev), lim):
                 flags.append(f"{name} reference pulse off by {dev:+.2f}")
         p.flags = flags
+    _replicates(positions, F, config, rep_groups)
     _rerun_marks(positions, F, config)
     return positions, F
 
@@ -1199,6 +1243,7 @@ def config_to_dict(config: Config) -> dict:
         "ref_gas_sd_limit": config.ref_gas_sd_limit,
         "max_amplitude_mv": config.max_amplitude_mv,
         "rerun_max_1sigma": config.rerun_max_1sigma,
+        "rerun_replicates": config.rerun_replicates,
     }
 
 
@@ -1211,7 +1256,7 @@ def config_from_dict(data: dict) -> Config:
         elif key in ("exclude_drift_n", "exclude_drift_c", "exclude_elemental"):
             setattr(config, key, _positions_list(value))
         elif key in ("linearity_correction", "linearity_correction_c", "drift_correction",
-                     "elemental_correction") and isinstance(value, bool):
+                     "elemental_correction", "rerun_replicates") and isinstance(value, bool):
             setattr(config, key, "On" if value else "Off")
         elif hasattr(config, key):
             setattr(config, key, value)

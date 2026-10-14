@@ -1,6 +1,7 @@
 """Turn one Isodat export into a correction workbook.
 
     python -m ea_irms run.xls -o run_corrected.xlsx [--config lab.xlsx or lab.json]
+                      [--samples samples.xlsx [--id-column "Sample ID"]]
 """
 from __future__ import annotations
 
@@ -11,6 +12,7 @@ from pathlib import Path
 
 from .parse import ExportFormatError, parse_export
 from .labconfig import LabConfigError, config_from_xlsx, config_to_xlsx
+from .metadata import SampleSheetError, read_sample_sheet, summary_text
 from .pipeline import Config, config_from_dict, config_to_dict, process
 from .workbook import VERSION, build_workbook
 
@@ -22,6 +24,11 @@ def main(argv=None):
     ap.add_argument("--config", help="lab configuration, an Excel file (.xlsx) or JSON")
     ap.add_argument("--write-config", help="write the default configuration and stop; an .xlsx name "
                                            "writes the Excel template, any other name JSON")
+    ap.add_argument("--samples", help="a sample sheet (.xlsx or .csv): its rows for this run's samples go on the "
+                                      "workbook's Metadata sheet and after its Results columns, and the replicates "
+                                      "it names are compared (1.4.8)")
+    ap.add_argument("--id-column", help="the sample sheet's ID column (default: Sample ID, or a column whose name "
+                                        "says ID)")
     ap.add_argument("--no-recalc", action="store_true",
                     help="skip computing the formulas with LibreOffice; the workbook then shows "
                          "values only once Excel opens it")
@@ -58,8 +65,15 @@ def main(argv=None):
         print(f"cannot read {export.name}: {exc}", file=sys.stderr)
         return 2
 
-    positions, fits = process(positions, config)
-    build_workbook(export, out, config, run_name=export.stem)
+    samples = None
+    if args.samples:
+        try:
+            samples = read_sample_sheet(Path(args.samples).read_bytes(), Path(args.samples).name, args.id_column)
+        except (OSError, SampleSheetError) as exc:
+            print(f"cannot read the sample sheet {args.samples}: {exc}", file=sys.stderr)
+            return 2
+    positions, fits = process(positions, config, samples=samples)
+    build_workbook(export, out, config, run_name=export.stem, samples=samples)
     if args.no_recalc:
         baked = False
     else:
@@ -69,6 +83,11 @@ def main(argv=None):
     settled = fits["settling"]["settled_from"]
     flagged = sum(1 for p in positions if p.flags)
     print(f"{len(positions)} positions, {flagged} flagged")
+    if samples is not None:
+        groups = fits["replicates"]["groups"]
+        print(f"sample sheet {samples.name}: {summary_text(fits['metadata']['match'])}; "
+              f"{len(groups)} group{'s' if len(groups) != 1 else ''} of replicates, "
+              f"{sum(1 for g in groups if g['n']['over'] or g['c']['over'])} over the critical range")
     print(f"calibration anchors: {fits['cal_n']['n']}, drift model: {fits['drift_n']['model']}")
     for key, label in (("lin_n", "N linearity"), ("lin_c", "C linearity"),
                        ("drift_n", "N drift"), ("drift_c", "C drift")):

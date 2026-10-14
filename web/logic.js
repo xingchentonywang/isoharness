@@ -14,6 +14,11 @@
 // with the one lab configuration, and keeps its own decisions. The run on screen holds its working
 // state (dec, sel, filt, runDate, dateFrom, last) in this.state; the others keep theirs in run.saved.
 // The combined results post every run with its own configuration to /api/batch/results.xlsx.
+//
+// From isoharness 0.3.0 each run has its information (Operator, Instrument, Project, Notes), kept like
+// its run date, and the batch may have one sample sheet. The service reads the sheet and matches the
+// samples (/api/samplesheet/read); the page keeps the file in this tab and sends it, with each run's
+// information, with every download.
 'use strict';
 
 const FLOW = ['inst', 'setup', 'blank', 'lin', 'drift', 'cal', 'elem', 'unc', 'qc', 'results'];
@@ -35,13 +40,18 @@ const REF_SD_LIMIT = 0.1;
 const OK_ICON = { c: '#0B6E4F', d: 'M6 10.5l2.6 2.6L14 7.6' };
 // The most runs in one batch, as the service combines them (ISOHARNESS_MAX_BATCH_RUNS, default 20).
 const MAX_RUNS = 20;
+// The run information a run carries (ea_irms.metadata.RUN_FIELDS).
+const RUN_FIELDS = ['Operator', 'Instrument', 'Project', 'Notes'];
+// The most rows of the sample-sheet match table drawn on the page; the downloads hold every sample.
+const MAX_MATCH_ROWS = 600;
 const WARN_ICON = { c: '#A33A00', d: 'M10 5.5v5.5M10 14v.1' };
 
 class Component extends DCLogic {
   constructor(props) {
     super(props);
     this.state = { screen: 'upload', boot: null, run: null, runs: [], active: -1, cfg: null, runDate: '', dateFrom: '',
-      busy: '', pending: '', error: null, toast: '', drag: false, dec: null, sel: {}, filt: 'all', last: 'inst' };
+      busy: '', pending: '', error: null, toast: '', drag: false, dec: null, sel: {}, filt: 'all', last: 'inst',
+      runInfo: {}, sheet: null };
     this._mcs = new Map();
     this._runs = 0;
     this._depth = 0;
@@ -174,18 +184,37 @@ class Component extends DCLogic {
   // The working state of the run on screen, as run.saved keeps it for the others.
   stash() {
     const st = this.state;
-    if (st.run) st.run.saved = { dec: st.dec, sel: st.sel, filt: st.filt, runDate: st.runDate, dateFrom: st.dateFrom, last: st.last };
+    if (st.run) st.run.saved = { dec: st.dec, sel: st.sel, filt: st.filt, runDate: st.runDate, dateFrom: st.dateFrom, last: st.last, runInfo: st.runInfo };
   }
 
   restore(run) {
-    const s = run.saved || { dec: run.dec0, sel: {}, filt: 'all', runDate: '', dateFrom: '', last: 'inst' };
-    return { run, dec: s.dec, sel: s.sel, filt: s.filt, runDate: s.runDate, dateFrom: s.dateFrom, last: s.last };
+    const s = run.saved || { dec: run.dec0, sel: {}, filt: 'all', runDate: '', dateFrom: '', last: 'inst', runInfo: {} };
+    return { run, dec: s.dec, sel: s.sel, filt: s.filt, runDate: s.runDate, dateFrom: s.dateFrom, last: s.last, runInfo: s.runInfo || {} };
   }
 
   // The decisions and run date of any run in the batch, the one on screen included.
   decOf(run) { return run === this.state.run ? this.state.dec : (run.saved || {}).dec || run.dec0; }
 
   dateOf(run) { return run === this.state.run ? this.state.runDate : (run.saved || {}).runDate || ''; }
+
+  // The run information of any run in the batch (isoharness 0.3.0), and the fields of it that hold text.
+  infoOf(run) { return (run === this.state.run ? this.state.runInfo : (run.saved || {}).runInfo) || {}; }
+
+  infoJSON(run) {
+    const info = this.infoOf(run), out = {};
+    for (const k of RUN_FIELDS) if (String(info[k] || '').trim()) out[k] = String(info[k]).trim();
+    return out;
+  }
+
+  setInfo(k, v) { this.setState({ runInfo: Object.assign({}, this.state.runInfo, { [k]: v }) }); }
+
+  // The run information of the run shown, copied to every run of the batch.
+  infoToAll() {
+    const st = this.state;
+    if (!st.run || st.busy) return;
+    for (const r of st.runs) if (r !== st.run) r.saved = Object.assign({}, r.saved || {}, { runInfo: Object.assign({}, st.runInfo) });
+    this.setState({ toast: 'Every run of the batch now has the run information of ' + st.run.name + '.' });
+  }
 
   // Show another run of the batch, on the same screen, with the decisions it was left with.
   switchRun(i) {
@@ -203,12 +232,14 @@ class Component extends DCLogic {
     this._mcs.delete(gone.id);
     if (!runs.length) {
       this.setState({ runs, active: -1, run: null, dec: null, sel: {}, filt: 'all', runDate: '', dateFrom: '', last: 'inst',
-        error: null, toast: gone.name + ' was removed.' });
+        runInfo: {}, error: null, toast: gone.name + ' was removed.' });
       this.go('upload');
+      this.refreshSheet();
       return;
     }
     const active = st.active === i ? Math.min(i, runs.length - 1) : st.active > i ? st.active - 1 : st.active;
     this.setState(Object.assign(this.restore(runs[active]), { runs, active, error: null, toast: gone.name + ' was removed from the batch.' }));
+    this.refreshSheet();
   }
 
   // ---------------------------------------------------------------- requests
@@ -248,6 +279,8 @@ class Component extends DCLogic {
     const list = Array.from(files || []).filter(Boolean);
     if (!list.length) return;
     const fails = [];
+    // Run information typed before the first upload goes with every run of that upload.
+    const pre = this.state.runs.length ? null : Object.assign({}, this.state.runInfo || {});
     for (let k = 0; k < list.length; k++) {
       const file = list[k], st = this.state;
       const at = st.runs.findIndex((r) => r.name === file.name);
@@ -258,9 +291,10 @@ class Component extends DCLogic {
       let runDate = this.dateFromName(file.name), dateFrom = runDate ? 'name' : '';
       if (!runDate && !st.runs.length && st.dateFrom === 'you' && st.runDate) { runDate = st.runDate; dateFrom = 'you'; }
       this.setState({ busy: 'process', pending: file.name + (list.length > 1 ? ' (' + (k + 1) + ' of ' + list.length + ')' : ''), error: null, toast: '' });
+      const info = at >= 0 ? Object.assign({}, this.infoOf(st.runs[at])) : Object.assign({}, pre || {});
       const run = await this.send(file, st.cfg, runDate);
       if (run.fail) { fails.push({ name: file.name, detail: run.detail }); continue; }
-      run.saved = { dec: run.dec0, sel: {}, filt: 'all', runDate, dateFrom, last: 'inst' };
+      run.saved = { dec: run.dec0, sel: {}, filt: 'all', runDate, dateFrom, last: 'inst', runInfo: info };
       this.stash();
       const runs = this.state.runs.slice();
       if (at >= 0) { this._mcs.delete(runs[at].id); runs[at] = run; } else runs.push(run);
@@ -274,6 +308,7 @@ class Component extends DCLogic {
     }
     this.setState({ busy: '', pending: '', error });
     this.forceUpdate();
+    if (this.state.sheet && list.length > fails.length) await this.refreshSheet();
   }
 
   // The 2026-09-15 test run, fetched from the service and then read like a dropped file
@@ -324,7 +359,7 @@ class Component extends DCLogic {
       this.setState({ busy: 'process', pending: prev.name + (old.length > 1 ? ' (' + (k + 1) + ' of ' + old.length + ')' : ''), error: null, toast: '' });
       const run = await this.send(prev.file, cfg, s.runDate || '');
       if (run.fail) { fails.push({ name: prev.name, detail: run.detail }); continue; }
-      run.saved = { dec: run.dec0, sel: {}, filt: 'all', runDate: s.runDate || '', dateFrom: s.dateFrom || '', last: 'inst' };
+      run.saved = { dec: run.dec0, sel: {}, filt: 'all', runDate: s.runDate || '', dateFrom: s.dateFrom || '', last: 'inst', runInfo: s.runInfo || {} };
       runs.push(run);
     }
     if (fails.length) {
@@ -340,6 +375,7 @@ class Component extends DCLogic {
       : what + ' processed again with the package defaults; the decisions now start from them.';
     this.setState(Object.assign(this.restore(runs[active]), { busy: '', pending: '', runs, active, cfg, error: null, toast }));
     this.forceUpdate();
+    await this.refreshSheet();      // the configuration's standards table decides which positions are samples
   }
 
   async pickConfig(file) {
@@ -404,6 +440,83 @@ class Component extends DCLogic {
       this.save(await resp.blob(), this.fileName(resp.headers.get('Content-Disposition')) || 'lab_configuration.xlsx');
     } catch (err) {
       this.setState({ error: { title: 'The template was not downloaded', detail: String(err && err.message ? err.message : err) } });
+    }
+  }
+
+  // ---------------------------------------------------------------- the sample sheet (isoharness 0.3.0)
+  // The samples of each run as the page lists them, for the service to match: [{ name, samples: [[row, id]] }].
+  sheetRuns() {
+    return this.state.runs.map((r) => ({ name: r.name,
+      samples: r.port.pos.filter((q) => q.role === 'S').map((q) => [q.r, String(q.id == null ? '' : q.id)]) }));
+  }
+
+  async readSheet(file, idColumn) {
+    const form = new FormData();
+    form.append('file', file, file.name);
+    if (idColumn) form.append('id_column', idColumn);
+    form.append('runs', JSON.stringify(this.sheetRuns()));
+    let resp;
+    try {
+      resp = await fetch('api/samplesheet/read', { method: 'POST', body: form });
+    } catch (err) {
+      return { fail: true, detail: 'The service could not be reached (' + err.message + '). Check the connection and try again.' };
+    }
+    const body = await this.answer(resp);
+    if (!resp.ok || !body || !body.sheet) return { fail: true, detail: resp.ok ? 'The service sent an answer this page cannot read.' : this.detail(resp, body) };
+    return body;
+  }
+
+  async pickSheet(file, idColumn) {
+    if (this.state.busy) return;
+    this.setState({ busy: 'sheet', error: null, toast: '' });
+    const body = await this.readSheet(file, idColumn);
+    if (body.fail) {
+      this.setState({ busy: '', error: { title: file.name + ' was not read as a sample sheet', detail: body.detail } });
+      return;
+    }
+    this.setState({ busy: '', sheet: { file, name: file.name, idColumn: body.sheet.id_column, info: body } });
+  }
+
+  // The batch changed: match its samples to the sheet again.
+  async refreshSheet() {
+    const sh = this.state.sheet;
+    if (!sh) return;
+    const body = await this.readSheet(sh.file, sh.idColumn);
+    if (body.fail) {
+      this.setState({ error: { title: 'The samples were not matched to ' + sh.name + ' again', detail: body.detail } });
+      return;
+    }
+    if (this.state.sheet && this.state.sheet.file === sh.file) this.setState({ sheet: Object.assign({}, this.state.sheet, { info: body }) });
+  }
+
+  clearSheet() {
+    if (this.state.busy) return;
+    this.setState({ sheet: null, error: null, toast: 'The sample sheet was removed; the downloads no longer carry it.' });
+  }
+
+  async downloadSheetTemplate() {
+    const names = [];
+    for (const r of this.state.runs) for (const q of r.port.pos) if (q.role === 'S') names.push(String(q.id == null ? '' : q.id));
+    try {
+      const resp = await fetch('api/samplesheet/template.xlsx', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ names }) });
+      if (!resp.ok) throw new Error(this.detail(resp, await this.answer(resp)));
+      this.save(await resp.blob(), this.fileName(resp.headers.get('Content-Disposition')) || 'sample_sheet.xlsx');
+    } catch (err) {
+      this.setState({ error: { title: 'The sample sheet was not downloaded', detail: String(err && err.message ? err.message : err) } });
+    }
+  }
+
+  // The sample sheet, and a run's information when one is given, go with a download.
+  addMeta(form, run) {
+    const sh = this.state.sheet;
+    if (sh) {
+      form.append('sample_sheet', sh.file, sh.file.name);
+      if (sh.idColumn) form.append('id_column', sh.idColumn);
+    }
+    if (run) {
+      const info = this.infoJSON(run);
+      if (Object.keys(info).length) form.append('run_info', JSON.stringify(info));
     }
   }
 
@@ -475,6 +588,7 @@ class Component extends DCLogic {
     form.append('file', run.file, run.file.name);
     form.append('config', JSON.stringify(config));
     if (kind === 'workbook' && runDate) form.append('run_date', runDate);
+    this.addMeta(form, kind === 'workbook' ? run : null);
     const url = kind === 'workbook' ? 'api/workbook' : 'api/results.csv';
     const what = kind === 'workbook' ? 'The workbook' : 'The results table';
     let resp;
@@ -498,6 +612,8 @@ class Component extends DCLogic {
     for (const r of runs) form.append('files', r.file, r.file.name);
     form.append('configs', JSON.stringify(runs.map((r) => this.configFor(this.decOf(r), r))));
     form.append('run_dates', JSON.stringify(runs.map((r) => this.dateOf(r) || null)));
+    form.append('run_infos', JSON.stringify(runs.map((r) => this.infoJSON(r))));
+    this.addMeta(form, null);
     if (this.state.cfg) form.append('config_name', this.state.cfg.name);
     let resp;
     try {
@@ -1968,6 +2084,13 @@ class Component extends DCLogic {
       setDate: (e) => this.setState({ runDate: e.target.value, dateFrom: e.target.value ? 'you' : '' }),
       dateNote: st.dateFrom === 'name' && st.runDate ? 'Read from the file name; change it if it is wrong. It is printed on the workbook’s Setup sheet.'
         : 'Printed on the workbook’s Setup sheet; leave it empty if the run needs none.',
+      infoLabel: st.runs.length > 1 && run ? 'Run information of ' + run.name : 'Run information',
+      infoFields: RUN_FIELDS.map((k) => ({ k, label: k, id: 'dc-info-' + k.toLowerCase(), value: (st.runInfo || {})[k] || '',
+        set: (e) => this.setInfo(k, e.target.value) })),
+      infoNote: 'Written on the workbook’s Metadata sheet' + (st.runs.length > 1 ? ' and on the Runs sheet of the combined results. Each run keeps its own.'
+        : ', and on the Runs sheet when several runs are combined.') + (run ? '' : ' Typed before an upload, it goes with each run of that upload.'),
+      canInfoAll: st.runs.length > 1, infoAll: () => this.infoToAll(),
+      sheet: this.sheetView(st, busy),
       hasError: !!st.error, errTitle: st.error ? st.error.title : '', errText: st.error ? st.error.detail : '',
       has: !!run, positions: '', date: st.runDate ? this.fdate(st.runDate) : 'no run date',
       heading: st.runs.length > 1 ? 'Correct ' + st.runs.length + ' runs' : 'Correct a run',
@@ -2015,6 +2138,62 @@ class Component extends DCLogic {
       cfgShort: run.cfgName || pkg,
       start: () => this.go(FLOW.includes(st.last) ? st.last : 'inst'),
     });
+  }
+
+  // The sample sheet on the upload screen: the file, its ID column, and how each sample matched.
+  sheetView(st, busy) {
+    const sh = st.sheet, multi = st.runs.length > 1;
+    const v = {
+      has: !!sh, name: sh ? sh.name : 'None chosen', meta: '', busy,
+      button: sh ? 'Choose another sample sheet' : 'Choose a sample sheet',
+      choose: () => { const el = document.getElementById('dc-sheet'); if (el && !this.state.busy) el.click(); },
+      picked: (e) => { const f = e.target.files && e.target.files[0]; e.target.value = ''; if (f) this.pickSheet(f); },
+      clear: () => this.clearSheet(),
+      template: () => this.downloadSheetTemplate(),
+      templateLabel: st.runs.length ? 'Download a sheet with these sample names' : 'Download an empty sample sheet',
+      note: 'A table with one row per sample: its ID, then any columns, such as project, site, species or material, fraction, '
+        + 'collection date, depth, and notes. A sample matches a row when its name equals the ID, or begins with it followed by '
+        + 'a space, a hyphen, or another character that is neither a letter nor a digit (CI 3-2 matches CI 3-2-S); the longest '
+        + 'ID wins, and when no ID fits as written, spaces are ignored (PD1-H matches PD 1). The matched rows are written into '
+        + 'the results tables and each workbook. Analyses of one sample in a run, '
+        + 'with the same name or the same Replicate of, are compared, and a range above the critical range of ISO 5725-6 marks '
+        + 'them for a rerun. The sheet stays in this tab and goes with each download.',
+      cols: [], pickId: (e) => { if (sh && e.target.value !== sh.idColumn) this.pickSheet(sh.file, e.target.value); },
+      summary: '', notes: '', hasNotes: false, written: '', rows: [], hasRows: false, more: '', hasMore: false,
+      grid: multi ? 'minmax(0, 0.45fr) minmax(0, 0.7fr) minmax(0, 1.5fr) minmax(0, 1.3fr) minmax(0, 1.1fr) minmax(0, 0.8fr)'
+        : 'minmax(0, 0.7fr) minmax(0, 1.5fr) minmax(0, 1.3fr) minmax(0, 1.1fr) minmax(0, 0.8fr)',
+      runCell: multi ? 'block' : 'none',
+    };
+    if (!sh) return v;
+    const info = sh.info, d = info.sheet;
+    v.cols = d.columns.map((c) => ({ v: c, t: c, sel: c === sh.idColumn }));
+    v.meta = this.count(d.rows, 'row') + ' · ID column ' + sh.idColumn + (d.sheet ? ' · sheet ' + d.sheet : '');
+    let n = 0, ex = 0, pre = 0, sp = 0, groups = 0;
+    const rows = [];
+    info.runs.forEach((r, i) => {
+      n += r.match.samples; ex += r.match.exact; pre += r.match.prefix; sp += r.match.spaces || 0; groups += r.groups.length;
+      for (const q of r.samples) {
+        const how = String(q.matched_by || '');
+        rows.push({ run: String(i + 1), row: String(q.row), id: q.identifier, sid: q.sample_id || '–',
+          how: !how ? 'Not in the sheet' : (how.startsWith('exact') ? 'Exact name' : 'ID at the start')
+            + (how.endsWith('spaces ignored') ? ', spaces ignored' : ''),
+          fg: how ? '#0B6E4F' : '#A33A00', group: q.group ? 'Group ' + q.group : '' });
+      }
+    });
+    const none = n - ex - pre;
+    v.summary = !st.runs.length ? 'Upload an export to match its samples to this sheet.'
+      : (ex + pre) + ' of ' + this.count(n, 'sample') + ' matched' + (ex + pre ? ' (' + [ex ? ex + ' by the exact name' : '', pre ? pre + ' by an ID the name begins with' : ''].filter(Boolean).join(', ')
+        + (sp ? '; ' + sp + ' of the ' + (ex + pre) + ' only with spaces ignored' : '') + ')' : '')
+        + (none ? '; ' + none + ' not in the sheet' : '') + '. '
+        + (groups ? this.count(groups, 'group') + ' of replicates in one run will be compared.' : 'No sample has replicates in one run.');
+    v.notes = d.notes && d.notes.length ? 'Read with notes: ' + d.notes.join('; ') + '.' : '';
+    v.hasNotes = !!v.notes;
+    v.written = info.columns && info.columns.length ? 'Written after the results columns: ' + this.andList(info.columns) + '.' : '';
+    v.rows = rows.slice(0, MAX_MATCH_ROWS);
+    v.hasRows = rows.length > 0;
+    v.more = rows.length > MAX_MATCH_ROWS ? 'The first ' + MAX_MATCH_ROWS + ' of ' + rows.length + ' samples are listed; the downloads hold all of them.' : '';
+    v.hasMore = !!v.more;
+    return v;
   }
 
   // ---------------------------------------------------------------- the view model
