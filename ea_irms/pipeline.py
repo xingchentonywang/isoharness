@@ -843,9 +843,10 @@ def _rerun_marks(positions, F, config):
     """Mark each sample for a rerun of N, C, or both, or for a check, from its flags.
 
     Only what a rerun can fix marks a sample: the peak's size against the linearity
-    standards and the blank, carryover from an oversized sample, and the reference
-    pulse at that position. A sample run before the background settled, or missing
-    the peak of one element, is marked for a check, and so, under the Background
+    standards and the blank, and the reference pulse at that position. A sample run
+    before the background settled, one whose background rose after an oversized sample
+    (possible carryover, a check from 1.4.14 and a rerun of N and C before it), or
+    missing the peak of one element, is marked for a check, and so, under the Background
     drift model with the drift correction in force, is one with no reference
     background, which was left without a drift correction (finding R-23 of the
     2026-10-14 review). A rerun's suggested mass puts
@@ -875,9 +876,10 @@ def _rerun_marks(positions, F, config):
         extra = _extra_reasons(p, config, reps)
         need = {el: any(_reason(f, config) and (f in _SIZE[el] or f.startswith(_PREFIX[el])) for f in fl)
                 or any(e == el for e, _ in extra) for el in ("n", "c")}
-        both = "possible carryover from an oversized sample" in fl or (no_n and no_c)
-        check = ("ran before the background settled" in fl or no_n != no_c
-                 or any(f in fl for f in _NO_BGD.values()))
+        both = no_n and no_c
+        # 1.4.14 (Tony Wang, 2026-10-16): possible carryover marks a check, not a rerun of N and C
+        check = ("ran before the background settled" in fl or "possible carryover from an oversized sample" in fl
+                 or no_n != no_c or any(f in fl for f in _NO_BGD.values()))
         if both or (need["n"] and need["c"]):
             mark = "N and C"
         elif need["n"]:

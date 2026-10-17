@@ -24,7 +24,7 @@ from .parse import _read_rows, parse_export
 from .pipeline import (ANCHOR_RATIO_LIMIT, ANCHOR_SPREAD_PERMIL, MAX_STANDARDS,
                        MIN_OUTLIER_MONITORS, Config, assign_roles)
 
-VERSION = "1.4.13"
+VERSION = "1.4.14"
 NSTD = MAX_STANDARDS      # rows in the Setup standards table (16 from 1.4.2, 13 before)
 # 1.4.10: the largest export the workbook is built for. Before 1.4.10 it held positions 1 to 120 and
 # 1,000 peak records and left out the rest without a word; it now grows to fit, up to these.
@@ -331,20 +331,22 @@ def build_workbook(export_path, out_path, config: Config | None = None,
               'cannot follow the pulses\' drift, so from 1.4.12 those positions use the tolerance of Setup B41, or '
               'B39 where that is wider.')
     r += 1
-    r = rd(r, 'Rerun marks (1.4.4, 1.4.7, 1.4.8)', F_H1)
+    r = rd(r, 'Rerun marks (1.4.4, 1.4.7, 1.4.8, 1.4.14)', F_H1)
     r = rd(r, 'A sample is marked for what measuring it again can fix, namely the amount, the peak, or the state of '
               'the instrument at its position. It is marked for a rerun of N, C, or both when its peak lies below '
               'the range of the linearity standards (Fits rows 81 to 104) or under the blank multiple in Setup B25; '
               'when its peak reaches the instrument\'s largest amplitude, Setup B69 (1.4.7; a peak above the '
               'linearity range but under it is not marked, and with B69 empty every peak above the range is, as '
-              'before 1.4.7); when it follows an oversized sample and its background rose (Setup B28); when a '
+              'before 1.4.7); when a '
               'reference pulse at its position is off, further than Setup B67 robust SDs from the median of the '
               'run\'s pulses (from 1.4.10 every pulse Isodat did not designate counts, two of CO2 at each position '
               'in a full export); when the 1σ of its final d15N or d13C is above Setup B70 (1.4.7), which a run '
               'with better anchors can fix; or when it has replicates in the run whose range is above the critical '
               'range of ISO 5725-6 (1.4.8, Replicates sheet, switched by Setup B71). A sample with neither peak is '
               'marked for a rerun of N and C. It is marked for a check when it '
-              'ran before the background settled or has the peak of only one element. A value outside the anchors\' '
+              'ran before the background settled, when it follows an oversized sample and its background rose by '
+              'more than Setup B28 (possible carryover, a check from 1.4.14 and a rerun of N and C before), or when '
+              'it has the peak of only one element. A value outside the anchors\' '
               'range is not marked, because a rerun would extrapolate the same way; the fix is an anchor that '
               'brackets it.')
     r = rd(r, 'The suggested mass puts each peak inside the linearity range and above the blank multiple, read from '
@@ -1389,12 +1391,12 @@ def build_workbook(export_path, out_path, config: Config | None = None,
                          f'{R_("fl pulseN")}<>"",{R_("fl amplN")}<>"",{R_("fl uN")}<>"",{R_("fl repN")}<>""),1,0))')
         f[RX['rr C']] = (f'=IF($D{i}<>"Sample",0,IF(OR({R_("why sizeC")}<>"",{R_("fl blankC")}<>"",'
                          f'{R_("fl pulseC")}<>"",{R_("fl amplC")}<>"",{R_("fl uC")}<>"",{R_("fl repC")}<>""),1,0))')
-        f[RX['rr both']] = (f'=IF($D{i}<>"Sample",0,IF(OR({R_("fl carry")}<>"",'
-                            f'AND({R_("fl noN")}<>"",{R_("fl noC")}<>"")),1,0))')
+        f[RX['rr both']] = (f'=IF($D{i}<>"Sample",0,IF(AND({R_("fl noN")}<>"",{R_("fl noC")}<>""),1,0))')
         # Finding R-23: under the Background model with the drift correction in force, a position with no
-        # reference background (Y or AD empty) is marked for a check
+        # reference background (Y or AD empty) is marked for a check; from 1.4.14 (Tony Wang, 2026-10-16)
+        # possible carryover is a check too, no longer a rerun of N and C
         nobg = (f'AND($X{i}<>"",$Y{i}="",Fits!$B$115="Yes")', f'AND($AC{i}<>"",$AD{i}="",Fits!$B$128="Yes")')
-        f[RX['rr check']] = (f'=IF($D{i}<>"Sample",0,IF(OR({R_("fl settle")}<>"",'
+        f[RX['rr check']] = (f'=IF($D{i}<>"Sample",0,IF(OR({R_("fl settle")}<>"",{R_("fl carry")}<>"",'
                              f'AND({R_("fl noN")}<>"",{R_("fl noC")}=""),AND({R_("fl noN")}="",{R_("fl noC")}<>""),'
                              f'{nobg[0]},{nobg[1]}),1,0))')
         f[RX['rerun']] = (f'=IF($D{i}<>"Sample","",IF(OR({R_("rr both")}=1,AND({R_("rr N")}=1,{R_("rr C")}=1)),'
@@ -2096,10 +2098,11 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     rr.cell(2, 1, 'Samples to measure again (Rerun: N, C, or N and C) and to check first, in the order they ran. '
                   'A mark reads what a rerun can fix; README, Rerun marks, says which flags count (from 1.4.7 a '
                   'peak above the linearity range only at Setup B69, and a 1σ above Setup B70; from 1.4.8 replicates '
-                  'above the critical range, on the Replicates sheet). The suggested mass puts the peaks inside the '
+                  'above the critical range, on the Replicates sheet; from 1.4.14 possible carryover marks a check, '
+                  'not a rerun). The suggested mass puts the peaks inside the '
                   'linearity range, from this analysis\'s area per mg above the blank (1.4.10).'
                   ).font = F_NOTE
-    rr.merge_cells("A2:G2"); rr.row_dimensions[2].height = 44
+    rr.merge_cells("A2:G2"); rr.row_dimensions[2].height = 56
     rr['A2'].alignment = Alignment(wrap_text=True, vertical='top')
     rr.cell(4, 1, 'Problems of the whole run').font = F_H1
     rr.cell(5, 1, '=Fits!$B$356').font = F_SM
@@ -2507,11 +2510,12 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     # 1.4.4
     qsec(166, 'Rerun marks')
     qc.cell(167, 1, 'A sample is marked for a rerun when its peak lies below the linearity range or under the blank '
-                    'multiple, reaches the instrument\'s largest amplitude (Setup B69), follows an oversized sample '
-                    'with a background rise, or meets a reference pulse that is off, when its 1σ is above Setup B70, '
+                    'multiple, reaches the instrument\'s largest amplitude (Setup B69), or meets a reference pulse '
+                    'that is off, when its 1σ is above Setup B70, '
                     'or when its replicates differ by more than the critical range (Replicates sheet), and for a rerun '
                     'of N and C when it has neither peak. It is marked for a check when it ran before the background '
-                    'settled, lacks one element\'s peak, or, under the Background drift model, has no reference '
+                    'settled, follows an oversized sample with a background rise (possible carryover, a check from '
+                    '1.4.14), lacks one element\'s peak, or, under the Background drift model, has no reference '
                     'background and so no drift correction. The Rerun sheet lists every mark.').font = F_NOTE
     qline(168, 'Samples marked for a rerun', '=Fits!$B$351', '0',
           '=IF(Fits!$B$351=0,"ok","see the Rerun sheet")')

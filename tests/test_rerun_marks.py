@@ -1,15 +1,17 @@
-"""ea_irms 1.4.4 and 1.4.7: rerun marks, in the engine and in the workbook.
+"""ea_irms 1.4.4, 1.4.7 and 1.4.14: rerun marks, in the engine and in the workbook.
 
 A sample is marked for what a rerun can fix: a peak below the linearity range or
-under the blank multiple, carryover from an oversized sample, or the reference
-pulse at its position off; and for a check when it ran before the background
-settled or lacks one element's peak. From 1.4.7 (Tony, 2026-10-13) a peak above
+under the blank multiple, or the reference pulse at its position off; and for a
+check when it ran before the background settled, lacks one element's peak, or,
+from 1.4.14 (Tony, 2026-10-16), may carry over from an oversized sample before it,
+which marked a rerun of N and C until then. From 1.4.7 (Tony, 2026-10-13) a peak above
 the linearity range is marked only when its amplitude reaches the instrument's
 largest (50,000 mV by default), and a final d15N or d13C whose 1 sigma is above
 0.5 permil marks that element. The engine's marks are checked against those rules
-on the 2026-09-15 test run and on copies of it with masses and shifted reference
-pulses, and the workbook against the engine under eight configurations, after
-LibreOffice has computed the formulas (skipped without it).
+on the 2026-09-15 test run and on copies of it with masses, shifted reference
+pulses, and an oversized sample with a background rise after it, and the workbook
+against the engine under ten configurations, after LibreOffice has computed the
+formulas (skipped without it).
 """
 import csv
 import io
@@ -56,6 +58,11 @@ def check_config(offset):
     return config_from_dict(data)
 
 
+# 1.4.14: position 36's N2 peak made larger than the linearity range (Area 28 from 22.876 to 200 Vs), and the
+# background under the N2 peak of the sample after it, position 37, raised 9.0 mV (24.5 to 33.5)
+CARRY = ((36, 3, "Area 28", 177.124), (37, 3, "BGD 28", 9.0))
+
+
 def test_marks_on_the_test_run():
     positions, F = process(parse_export(RUN), Config())
     marks = {p.row: p.rerun for p in positions if p.rerun}
@@ -93,6 +100,37 @@ def test_a_reference_pulse_off_marks_its_element(tmp_path):
     quiet, _ = process(parse_export(shifted), config_from_dict({"ref_pulse_off_sd": None}))
     assert not any("reference pulse off" in f for p in quiet for f in p.flags)
     assert next(p for p in quiet if p.row == 20).rerun == "Check"
+
+
+def test_possible_carryover_marks_a_check(tmp_path):
+    """1.4.14 (Tony, 2026-10-16): possible carryover marks a check, with no suggested mass, where before it
+    marked a rerun of N and C. An element with a reason of its own is still marked, with the carryover in
+    the Why."""
+    carried = variant(tmp_path, "carry", masses=True, shifts=CARRY)
+    positions, F = process(parse_export(carried), Config())
+    by = {p.row: p for p in positions}
+    assert F["carryover"]["flagged"] == [37] and by[36].oversized
+    assert by[37].role == "Sample" and by[37].carry_rise == pytest.approx(9.0)
+    assert (by[37].rerun, by[37].rerun_why, by[37].rerun_mass) == (
+        "Check", "possible carryover from an oversized sample", None)
+    assert by[38].role == "Drift" and by[38].rerun is None          # exposed, with no rise
+    # CO2 at position 37 reads 6,395 mV, so a limit of 6,000 mV marks C, and only C
+    positions, _ = process(parse_export(carried), config_from_dict({"max_amplitude_mv": 6000}))
+    p37 = next(p for p in positions if p.row == 37)
+    assert p37.rerun == "C" and p37.rerun_mass not in (None, "none")
+    assert p37.rerun_why == "possible carryover from an oversized sample; CO2 peak at or above 6000 mV"
+
+
+def test_texts_put_carryover_among_the_checks(tmp_path):
+    wb = openpyxl.load_workbook(build_workbook(RUN, tmp_path / "texts.xlsx", Config()))
+    readme = " ".join(str(c.value) for c in wb["README"]["B"] if c.value)
+    assert "when it follows an oversized sample and its background rose (Setup B28)" not in readme
+    assert ("It is marked for a check when it ran before the background settled, when it follows an oversized "
+            "sample and its background rose by more than Setup B28 (possible carryover, a check from 1.4.14") in readme
+    qc = wb["QC"]["A167"].value
+    assert qc.index("possible carryover, a check from 1.4.14") > qc.index("It is marked for a check")
+    assert "follows an oversized sample with a background rise, or" not in qc
+    assert "from 1.4.14 possible carryover marks a check, not a rerun" in wb["Rerun"]["A2"].value
 
 
 def test_large_peaks_are_marked_only_at_the_instrument_limit():
@@ -204,7 +242,8 @@ def test_configuration_round_trip_keeps_the_new_settings():
     assert back.max_amplitude_mv is None and back.rerun_max_1sigma == 0.3
 
 
-CASES = ("default", "masses", "pulses", "off", "run_level", "check", "limits", "before_147")
+CASES = ("default", "masses", "pulses", "off", "run_level", "check", "limits", "before_147",
+         "carryover", "carryover_c")
 
 
 @pytest.fixture(scope="module")
@@ -227,6 +266,10 @@ def computed(tmp_path_factory):
                    config_from_dict({"max_amplitude_mv": 3000, "rerun_max_1sigma": 0.25})),
         "before_147": (variant(folder, "before_147", masses=True),
                        config_from_dict({"max_amplitude_mv": None, "rerun_max_1sigma": None})),
+        # 1.4.14: possible carryover alone marks a check, and with a CO2 peak at the limit a rerun of C
+        "carryover": (variant(folder, "carryover", masses=True, shifts=CARRY), Config()),
+        "carryover_c": (variant(folder, "carryover_c", masses=True, shifts=CARRY),
+                        config_from_dict({"max_amplitude_mv": 6000})),
     }
     files = []
     for name, (export, cfg) in cases.items():
