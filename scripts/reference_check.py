@@ -84,7 +84,24 @@ FITS = {"B20": ("lin_n", "applied"), "B95": ("lin_n", "fit", "p"), "B96": ("lin_
         "B237": ("ref_pulse_check", "n_designated"), "B238": ("ref_pulse_check", "mean_ampl"),
         "B239": ("ref_pulse_check", "mean_d13c"), "B240": ("ref_pulse_check", "active"),
         "B244": ("elem_n", "n"), "B245": ("elem_n", "max_bias_pct"), "B246": ("elem_n", "in_force"),
-        "B247": ("elem_c", "n"), "B248": ("elem_c", "max_bias_pct"), "B249": ("elem_c", "in_force")}
+        "B247": ("elem_c", "n"), "B248": ("elem_c", "max_bias_pct"), "B249": ("elem_c", "in_force"),
+        # ea_irms 1.4.13: the anchors read as one material (finding W-13), and the elemental drift correction
+        # against the anchors (empty where the correction is not in force)
+        "B370": ("anchor_material", "limits", "ratio"), "B371": ("anchor_material", "limits", "spread"),
+        "B389": ("anchor_material", "level"),
+        "B394": ("elem_check", "n", "n"), "B395": ("elem_check", "n", "rms_measured"),
+        "B396": ("elem_check", "n", "rms_reported"), "B397": ("elem_check", "n", "added"),
+        "B398": ("elem_check", "n", "level"),
+        "B399": ("elem_check", "c", "n"), "B400": ("elem_check", "c", "rms_measured"),
+        "B401": ("elem_check", "c", "rms_reported"), "B402": ("elem_check", "c", "added"),
+        "B403": ("elem_check", "c", "level")}
+# ea_irms 1.4.13: the anchors of each row of the standards table, one Fits row each from 373 (16 rows, as
+# ea_irms.workbook.NSTD), compared row by row in check_values because a row holds a material only where the
+# run has anchors of it; a row without one reads 0 anchors and no level
+ANCHOR_TOP, ANCHOR_ROWS = 373, 16
+ANCHOR_COLS = {"B": "n", "C": "n_ratio", "D": "ratio_min", "E": "ratio_max", "F": "ratio_x", "G": "d15n_min",
+               "H": "d15n_max", "I": "d15n_spread", "J": "d13c_min", "K": "d13c_max", "L": "d13c_spread",
+               "M": "level"}
 
 
 def num(v):
@@ -171,6 +188,18 @@ def check_values(body, wb):
                 bad.append(("Fits", cell, path, mine, theirs))
         elif mine != theirs:
             bad.append(("Fits", cell, path, mine, theirs))
+    materials = {m["index"]: m for m in (fits.get("anchor_material") or {}).get("materials", [])}
+    for k in range(ANCHOR_ROWS):
+        m = materials.get(k)
+        for col, key in ANCHOR_COLS.items():
+            cell = f"{col}{ANCHOR_TOP + k}"
+            mine, theirs = (m[key] if m else 0 if key in ("n", "n_ratio") else None), ft[cell].value
+            n += 1
+            if isinstance(mine, float):
+                if num(theirs) is None or not near(mine, theirs):
+                    bad.append(("Fits", cell, ("anchor_material", k, key), mine, theirs))
+            elif mine != theirs:
+                bad.append(("Fits", cell, ("anchor_material", k, key), mine, theirs))
     n += 1
     if ft["B356"].value != fits["rerun"]["run_level_text"]:
         bad.append(("Fits", "B356", "problems of the whole run", fits["rerun"]["run_level_text"], ft["B356"].value))

@@ -5,10 +5,14 @@ position (S20, S21, ...), since the test run calls every sample Random; in the s
 each sample's N2 peak reads 0.5 permil higher. Every correction is then the same in the
 two runs, so each sample's two final d15N values differ by 0.5 times the calibration
 slope and its d13C values are equal, which is what the Repeats sheet must show.
+
+Finding W-12: the samples measured in more than one run are paired as the sample sheet
+pairs names, as written and then with the spaces taken out, on the server and on the page.
 """
 import csv
 import io
 import json
+import sys
 from pathlib import Path
 
 import openpyxl
@@ -22,13 +26,17 @@ from isoharness.app import XLSX, app
 from isoharness.batch import BatchRun, combined_csv, label_runs, repeats
 from isoharness.serialize import csv_cells, results_values
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from pagelogic import NODE, renamed, run_page  # noqa: E402
+
 RUN = Path(__file__).resolve().parent / "data" / "20260915_raw.csv"
 client = TestClient(app)
 SHIFT = 0.5
 
 
-def variant(shift=0.0):
-    """The test run with each sample named S<position> and its N2 peak's d15N moved by shift."""
+def variant(shift=0.0, name="S{}"):
+    """The test run with each sample named S<position>, or by the pattern name, and its N2 peak's d15N moved
+    by shift."""
     text = RUN.read_text(encoding="utf-8")
     rows = list(csv.reader(io.StringIO(text)))
     h = rows[0]
@@ -42,7 +50,7 @@ def variant(shift=0.0):
     for i, r in enumerate(rows[1:], start=1):
         row = r[col["Row"]].strip() if r else ""
         if row in samples:
-            r[col["Identifier 1"]] = f"S{row}"
+            r[col["Identifier 1"]] = name.format(row)
             if shift and last28.get(row) == i and r[col["Is Ref _"]].strip() != "1":
                 r[col["d 15N/14N"]] = repr(float(r[col["d 15N/14N"]]) + shift)
     buf = io.StringIO()
@@ -130,6 +138,27 @@ def test_each_run_takes_its_own_configuration(pair):
     assert any("lab.xlsx" in t for t in readme)
 
 
+def test_runs_name_each_runs_configuration_when_given(pair):
+    """isoharness 0.5.0 (finding W-11): config_names gives the Runs sheet a Configuration column; without it the
+    sheet is as before."""
+    off = config_to_dict(Config())
+    on = dict(off, linearity_correction="On")
+    r = send("/api/batch/results.xlsx", pair, configs=json.dumps([off, on]),
+             config_name="lab.xlsx for run 1; own.json for run 2", config_names=json.dumps(["lab.xlsx", "own.json"]))
+    runs = list(openpyxl.load_workbook(io.BytesIO(r.content))["Runs"].iter_rows(values_only=True))
+    col = runs[0].index("Configuration")
+    assert [runs[1][col], runs[2][col]] == ["lab.xlsx", "own.json"]
+    readme = [c.value for c in openpyxl.load_workbook(io.BytesIO(r.content))["README"]["B"] if c.value]
+    assert any("Configuration column" in t for t in readme)
+    r = send("/api/batch/results.xlsx", pair, configs=json.dumps([off, on]), config_names=json.dumps([None, "own.json"]))
+    runs = list(openpyxl.load_workbook(io.BytesIO(r.content))["Runs"].iter_rows(values_only=True))
+    assert runs[1][runs[0].index("Configuration")] == "the package defaults"
+    plain = send("/api/batch/results.xlsx", pair, configs=json.dumps([off, on]))
+    assert "Configuration" not in next(openpyxl.load_workbook(io.BytesIO(plain.content))["Runs"].iter_rows(values_only=True))
+    bad = send("/api/batch/results.xlsx", pair, configs=json.dumps([off, on]), config_names=json.dumps(["one"]))
+    assert bad.status_code == 422 and "config_names" in bad.text
+
+
 def test_two_files_of_one_name_are_told_apart():
     runs = [BatchRun(file="20260915_raw.csv", positions=[], fits={}, config=Config()) for _ in range(3)]
     assert [r.label for r in label_runs(runs)] == ["20260915_raw", "20260915_raw (2)", "20260915_raw (3)"]
@@ -178,3 +207,102 @@ def test_batch_requests_count_as_uploads(pair, monkeypatch):
         assert send("/api/batch/results.xlsx", pair).status_code == 429
     finally:
         limiter.reset()
+
+
+# ---------------------------------------------------------------- finding W-12: names that differ in their spaces
+def _runs(*changes):
+    """A batch of copies of the test run, the identifiers at some positions of each changed ({row: name})."""
+    runs = []
+    for i, changed in enumerate(changes, start=1):
+        positions, fits = process(parse_export(RUN), Config())
+        for p in positions:
+            if p.row in changed:
+                p.identifier = changed[p.row]
+        runs.append(BatchRun(file=f"run{i}.csv", positions=positions, fits=fits, config=Config()))
+    return label_runs(runs)
+
+
+def _pairs(runs):
+    """The Repeats entries of the changed names, the test run's other samples being all Random, as
+    {Name: [(run, row, identifier, how its name matched)]}."""
+    out = {}
+    for e in repeats(runs):
+        if e["Name"] != "Random":
+            out.setdefault(e["Name"], []).append((e["Run"], e["Row"], e["Identifier"], e["Name matched"]))
+    return out
+
+
+def test_repeats_pair_names_that_differ_only_in_their_spaces():
+    # colony 366 written two ways in two runs (finding W-12)
+    assert _pairs(_runs({20: "366 - H+S"}, {20: "366-H+S"})) == {
+        "366 - H+S": [("run1", 20, "366 - H+S", "as written"), ("run2", 20, "366-H+S", "spaces ignored")]}
+
+
+def test_repeats_compare_names_as_written_first():
+    # case and runs of spaces are ignored as written
+    assert _pairs(_runs({21: "CI 3-2  H"}, {21: "ci 3-2 h"})) == {
+        "CI 3-2  H": [("run1", 21, "CI 3-2  H", "as written"), ("run2", 21, "ci 3-2 h", "as written")]}
+    # a name of one run joins, with its spaces taken out, the name that two other runs share as written
+    assert _pairs(_runs({23: "PD 1"}, {23: "PD 1"}, {23: "PD1"})) == {
+        "PD 1": [("run1", 23, "PD 1", "as written"), ("run2", 23, "PD 1", "as written"),
+                 ("run3", 23, "PD1", "spaces ignored")]}
+    # two names each found in two runs as written stay two samples, though they differ only in a space
+    assert _pairs(_runs({24: "A B"}, {24: "A B", 25: "AB"}, {25: "AB"})) == {
+        "A B": [("run1", 24, "A B", "as written"), ("run2", 24, "A B", "as written")],
+        "AB": [("run2", 25, "AB", "as written"), ("run3", 25, "AB", "as written")]}
+
+
+def test_repeats_pair_nothing_within_one_run_or_beyond_the_spaces():
+    # two spellings in one run are not measured in two runs, and Dup is more than a space
+    assert _pairs(_runs({20: "X Y", 21: "XY"}, {})) == {}
+    assert _pairs(_runs({20: "366-H+S"}, {20: "366-H+S Dup"})) == {}
+
+
+def test_the_repeats_sheet_says_which_names_matched_with_the_spaces_taken_out(tmp_path, pair):
+    a, b = tmp_path / "run_a.csv", tmp_path / "run_b.csv"
+    a.write_bytes(variant(name="S {}"))
+    b.write_bytes(variant(SHIFT, name="S{}"))
+    wb = openpyxl.load_workbook(io.BytesIO(send("/api/batch/results.xlsx", [a, b]).content))
+    rows = list(wb["Repeats"].iter_rows(values_only=True))
+    ix = {h: i for i, h in enumerate(rows[0])}
+    assert rows[0][-1] == "Name matched" and len(rows) - 1 == 52
+    for r in rows[1:]:
+        first = r[ix["Run"]] == "run_a"
+        assert r[ix["Name"]] == f"S {r[ix['Row']]}" and r[ix["Identifier"]] == (f"S {r[ix['Row']]}" if first else f"S{r[ix['Row']]}")
+        assert r[ix["Name matched"]] == ("as written" if first else "spaces ignored") and r[ix["Runs"]] == r[ix["Analyses"]] == 2
+    readme = [c.value for c in wb["README"]["B"] if c.value]
+    assert any(t.startswith("Repeats: 26 names found in more than one run: S 20 (spaces ignored), S 21 (spaces ignored),")
+               and t.endswith(", and others. 26 of them matched only with the spaces taken out.") for t in readme), readme
+    assert any("366 - H+S and 366-H+S are one sample" in t for t in readme)
+    # names that match as written leave the sheet as it was, without the column
+    same = openpyxl.load_workbook(io.BytesIO(send("/api/batch/results.xlsx", pair).content))
+    head = next(same["Repeats"].iter_rows(values_only=True))
+    assert "Name matched" not in head and head[-1] == "Flags"
+
+
+@pytest.mark.skipif(not NODE, reason="needs node for the page's logic")
+def test_the_page_pairs_names_as_the_combined_results_do(tmp_path):
+    changes = [{20: "366 - H+S", 21: "CI 3-2  H", 23: "PD 1", 24: "A B", 27: "X Y", 28: "XY"},
+               {20: "366-H+S", 21: "ci 3-2 h", 23: "PD 1", 24: "A B", 25: "AB", 31: "366-H+S Dup"},
+               {23: "PD1", 25: "AB", 27: "XY"}]
+    files = [renamed(tmp_path, names, f"run{i}.csv") for i, names in enumerate(changes, start=1)]
+    bodies = [client.post("/api/process", files={"file": (f.name, f.read_bytes())}).json() for f in files]
+    page = run_page(bodies, "return L.repeats().map((g) => ({ name: g.name, runs: [...g.runs].sort(), count: g.count, alt: g.alt }));")
+    got = {g["name"]: (g["runs"], g["count"], sorted(g["alt"])) for g in page}
+    runs = []
+    for f in files:
+        positions, fits = process(parse_export(f), Config())
+        runs.append(BatchRun(file=f.name, positions=positions, fits=fits, config=Config()))
+    want = {}
+    for e in repeats(label_runs(runs)):
+        if e["Type"] != "Sample":
+            continue
+        g = want.setdefault(e["Name"], [set(), e["Analyses"], set()])
+        g[0].add(int(e["Run"][3:]) - 1)
+        if e["Name matched"] == "spaces ignored":
+            g[2].add(e["Identifier"])
+    want = {k: (sorted(v[0]), v[1], sorted(v[2])) for k, v in want.items()}
+    assert got == want
+    assert got["366 - H+S"] == ([0, 1], 2, ["366-H+S"]) and got["PD 1"] == ([0, 1, 2], 3, ["PD1"])
+    assert got["XY"] == ([0, 2], 3, ["X Y"]) and got["A B"] == ([0, 1], 2, []) and got["AB"] == ([1, 2], 2, [])
+    assert got["CI 3-2  H"] == ([0, 1], 2, []) and "366-H+S Dup" not in got

@@ -6,6 +6,10 @@ describes each run on one row, and lists the samples measured in more than one r
 computes no correction. The means and differences on the Repeats sheet are arithmetic on
 the engine's values. From isoharness 0.3.0 one sample sheet may go with the batch: its
 columns follow the Results columns, and each run's information follows its row on Runs.
+Each run may come with a configuration of its own (finding W-11): the endpoints take one
+configuration per file, and the page names each run's configuration in config_name. The
+samples on Repeats are paired by name as the sample sheet pairs names, with the spaces taken
+out when nothing fits as written (finding W-12).
 """
 from __future__ import annotations
 
@@ -21,7 +25,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from ea_irms.cells import put
-from ea_irms.metadata import RUN_FIELDS, output_columns, output_header, output_values, summary_text
+from ea_irms.metadata import RUN_FIELDS, norm, output_columns, output_header, output_values, summary_text
 from ea_irms.pipeline import Config
 from ea_irms.workbook import VERSION
 
@@ -66,6 +70,7 @@ class BatchRun:
     extra: dict = field(default_factory=dict)
     run_info: dict = field(default_factory=dict)       # Operator, Instrument, Project, Notes (0.3.0)
     config_notes: list = field(default_factory=list)   # what the configuration set for another run (0.4.1)
+    config_name: str | None = None                     # the name of its configuration, as the page gives it (0.5.0)
 
 
 def label_runs(runs: list[BatchRun]) -> list[BatchRun]:
@@ -109,15 +114,20 @@ def run_summary(r: BatchRun) -> dict:
     }
 
 
-def repeats(runs: list[BatchRun]) -> list[dict]:
-    """Samples and check standards measured in more than one run, one entry per analysis.
+AS_WRITTEN, SPACES_OUT = "as written", "spaces ignored"
 
-    A sample is known by its identifier, compared without surrounding spaces and without regard to
-    case; a check standard by its row of the standards table, since each run may write a number
-    after its name. Only names found in two or more runs are listed, with every analysis of them,
-    including repeats within one run. The mean is over the analyses that have the value."""
-    groups: dict[tuple, list] = {}
-    order: list[tuple] = []
+
+def _repeat_groups(runs: list[BatchRun]) -> list[tuple[tuple, list]]:
+    """The names found in two or more runs, each as (key, analyses), where each analysis is (run, position,
+    name, how): how its name matched the group's name, AS_WRITTEN or SPACES_OUT.
+
+    Names are compared as the sample sheet compares them (ea_irms.metadata, finding W-12): as written first,
+    without regard to case, spaces at either end, or runs of spaces (norm); and a name that no name in
+    another run fits that way is compared again with every space taken out, so that 366 - H+S and 366-H+S
+    are one sample. Within one key without spaces, a name already found in two runs as written keeps its own
+    group, and a name of one run joins the first of them; with none, the names of one run each that differ
+    only in their spaces form one group. A name whose runs no other name reaches stays out."""
+    written: dict[tuple, list] = {}           # (role, name as written) -> [(run, position, name)]
     for r in runs:
         for p in r.positions:
             if p.role == "Sample":
@@ -126,16 +136,43 @@ def repeats(runs: list[BatchRun]) -> list[dict]:
                 name = str(r.config.standards[p.std_index][0]).strip()
             else:
                 continue
-            if not name:
+            key = (p.role, norm(name))
+            if not key[1]:
                 continue
-            key = (p.role, name.casefold())
-            if key not in groups:
-                groups[key] = []
-                order.append(key)
-            groups[key].append((r, p, name))
+            written.setdefault(key, []).append((r, p, name))
+    runs_of = {k: {r.index for r, _, _ in v} for k, v in written.items()}
+    nospace: dict[tuple, list] = {}           # (role, name without spaces) -> keys, in order of appearance
+    for key in written:
+        nospace.setdefault((key[0], key[1].replace(" ", "")), []).append(key)
     out = []
-    for key in sorted(order, key=lambda k: (k[0] != "Sample", k[1])):
-        items = groups[key]
+    for keys in nospace.values():
+        paired = [k for k in keys if len(runs_of[k]) >= 2]
+        alone = [k for k in keys if len(runs_of[k]) < 2
+                 and any(runs_of[o] - runs_of[k] for o in keys if o != k)]
+        for k in paired:
+            out.append((k, [(r, p, n, AS_WRITTEN) for r, p, n in written[k]]))
+        if alone and paired:
+            out[len(out) - len(paired)][1].extend((r, p, n, SPACES_OUT) for k in alone for r, p, n in written[k])
+        elif alone:
+            head = alone[0]
+            out.append((head, [(r, p, n, AS_WRITTEN if k == head else SPACES_OUT)
+                               for k in alone for r, p, n in written[k]]))
+    return sorted(out, key=lambda g: (g[0][0] != "Sample", g[0][1]))
+
+
+def repeats(runs: list[BatchRun]) -> list[dict]:
+    """Samples and check standards measured in more than one run, one entry per analysis.
+
+    A sample is known by its identifier and a check standard by its row of the standards table, since each
+    run may write a number after its name; the names are compared as the sample sheet compares them, as
+    written and, when nothing fits that way, with the spaces taken out (_repeat_groups). Only names found in
+    two or more runs are listed, with every analysis of them, including repeats within one run, and each
+    entry says how its name matched the group's (Name matched). The mean is over the analyses that have the
+    value."""
+    out = []
+    for _, group in _repeat_groups(runs):
+        items = [(r, p, name) for r, p, name, _ in group]
+        how = {(r.index, p.row): h for r, p, _, h in group}
         if len({r.index for r, _, _ in items}) < 2:
             continue
         stats = {}
@@ -156,7 +193,7 @@ def repeats(runs: list[BatchRun]) -> list[dict]:
                 "Mean d15N": stats["d15n_final"][0], "SD d15N": stats["d15n_final"][1],
                 "Mean d13C": stats["d13c_final"][0], "SD d13C": stats["d13c_final"][1],
                 "%N": p.pct_n_reported, "%C": p.pct_c_reported, "C:N molar": p.cn_molar_reported,
-                "Rerun": p.rerun, "Flags": "; ".join(p.flags),
+                "Rerun": p.rerun, "Flags": "; ".join(p.flags), "Name matched": how[(r.index, p.row)],
             })
     return out
 
@@ -204,7 +241,9 @@ def _table(ws, top: int, header: list[str], rows, widths: dict, formats: dict | 
 
 
 def combined_xlsx(runs: list[BatchRun], config_name: str | None = None, sheet=None) -> bytes:
-    """The combined results as an Excel file: README, Results, Runs, and Repeats."""
+    """The combined results as an Excel file: README, Results, Runs, and Repeats. A run that carries its
+    configuration's name (BatchRun.config_name, from config_names, isoharness 0.5.0) gets it in a Configuration
+    column of Runs."""
     wb = openpyxl.Workbook()
     rd = wb.active
     rd.title = "README"
@@ -213,6 +252,7 @@ def combined_xlsx(runs: list[BatchRun], config_name: str | None = None, sheet=No
     rd.column_dimensions["B"].width = 110
     reps = repeats(runs)
     names = sorted({e["Name"] for e in reps}, key=str.casefold)
+    spaced = {e["Name"] for e in reps if e["Name matched"] == SPACES_OUT}
     lines = [
         ("title", f"Combined results of {len(runs)} run{'s' if len(runs) != 1 else ''}"),
         ("note", f"Written by isoharness with ea_irms {VERSION}. Each run was corrected on its own, with the "
@@ -229,8 +269,12 @@ def combined_xlsx(runs: list[BatchRun], config_name: str | None = None, sheet=No
                  "(Operator, Instrument, Project, Notes), with a sample sheet how many samples matched it, and "
                  "Configuration notes when the configuration set positions for another run or named none."),
         ("text", "Repeats: samples, and check standards, measured in more than one of these runs, one row per "
-                 "analysis. A sample is matched by its identifier, ignoring case and surrounding spaces; a check "
-                 "standard by its row of the standards table. Every analysis of a matched name is listed, "
+                 "analysis. A sample is matched by its identifier, and a check standard by its row of the "
+                 "standards table, as the sample sheet matches names: as written first, ignoring case, spaces "
+                 "at either end, and runs of spaces, and when no name in another run fits that way, with every "
+                 "space taken out, so that 366 - H+S and 366-H+S are one sample. When a name was matched the "
+                 "second way, a last column, Name matched, says how each analysis's name matched the name in "
+                 "column A. Every analysis of a matched name is listed, "
                  "including repeats within one run. 'minus mean' is the analysis's value less the mean of that "
                  "name's analyses with a value, and SD is their standard deviation (n − 1); these are arithmetic "
                  "on the values in Results, and each analysis keeps its own 1σ, which leaves out differences "
@@ -242,8 +286,12 @@ def combined_xlsx(runs: list[BatchRun], config_name: str | None = None, sheet=No
         lines.append(("text", f"{r.index}. {r.label}: {r.file}"
                               + (f", run of {r.run_date}" if r.run_date else "") + f", {s['Positions']} positions, "
                               f"{s['Samples']} samples."))
-    lines.append(("text", "Configuration: " + (config_name or "the package defaults") + ", with each run's "
-                          "choices written into it (the Runs sheet shows which corrections were in force)."))
+    # W-11: the page names each run's configuration when a run has one of its own, as in "lab.xlsx for runs
+    # 1 and 3; own.json for run 2"
+    lines.append(("text", "Configuration: " + (config_name or "the package defaults") + ". Each run's choices "
+                          "were written into its configuration; the Runs sheet shows which corrections were in "
+                          "force" + (", and in its Configuration column which configuration each run used"
+                                     if any(r.config_name for r in runs) else "") + "."))
     if sheet is not None:
         cols = sheet_columns(runs, sheet)
         lines.append(("text", f"Sample sheet: {sheet.name}, ID column {sheet.id_column}, {len(sheet.rows)} rows. "
@@ -254,9 +302,12 @@ def combined_xlsx(runs: list[BatchRun], config_name: str | None = None, sheet=No
                               + ". A sample matches a row when its name equals the ID or begins with it followed "
                                 "by a character that is neither a letter nor a digit; the longest such ID wins. "
                                 "Columns with no value for any sample of these runs are left out."))
+    listed = [n + (" (spaces ignored)" if n in spaced else "") for n in names]
     lines.append(("text", f"Repeats: {len(names)} name{'s' if len(names) != 1 else ''} found in more than one run"
-                          + (": " + ", ".join(names[:12]) + (", and others" if len(names) > 12 else "") + "."
-                             if names else ".")))
+                          + (": " + ", ".join(listed[:12]) + (", and others" if len(names) > 12 else "") + "."
+                             if names else ".")
+                          + (f" {len(spaced)} of them matched only with the spaces taken out."
+                             if spaced else "")))
     row = 1
     for kind, text in lines:
         c = rd.cell(row, 2, text)
@@ -296,6 +347,9 @@ def combined_xlsx(runs: list[BatchRun], config_name: str | None = None, sheet=No
             srow[f] = r.run_info.get(f) or None
         if sheet is not None:
             srow["Samples matched"] = summary_text(r.fits.get("metadata", {}).get("match", {}))
+    if any(r.config_name for r in runs):            # 0.5.0 (finding W-11): each run's own configuration
+        for r, srow in zip(runs, sums):
+            srow["Configuration"] = r.config_name or "the package defaults"
     if any(r.config_notes for r in runs):           # 0.4.1: only when a configuration said something
         for r, srow in zip(runs, sums):
             srow["Configuration notes"] = "; ".join(r.config_notes) or None
@@ -305,7 +359,7 @@ def combined_xlsx(runs: list[BatchRun], config_name: str | None = None, sheet=No
             "Drift applied": 26, "Elemental drift corrected": 11, "Calibration slope d15N": 11,
             "Calibration slope d13C": 11, "Samples to rerun": 9, "Samples to check": 9,
             "Problems of the whole run": 60, "Operator": 16, "Instrument": 16, "Project": 18, "Notes": 40,
-            "Samples matched": 40, "Configuration notes": 60}
+            "Samples matched": 40, "Configuration": 30, "Configuration notes": 60}
     _table(ru, 1, rh, ([s[h] for h in rh] for s in sums), rwid,
            {"Calibration slope d15N": "0.0000", "Calibration slope d13C": "0.0000"})
     ru.freeze_panes = "B2"
@@ -315,8 +369,10 @@ def combined_xlsx(runs: list[BatchRun], config_name: str | None = None, sheet=No
     ph = ["Name", "Type", "Runs", "Analyses", "Run", "Row", "Identifier", "d15N (permil)", "1σ(d15N)",
           "d15N minus mean", "d13C (permil)", "1σ(d13C)", "d13C minus mean", "Mean d15N", "SD d15N",
           "Mean d13C", "SD d13C", "%N", "%C", "C:N molar", "Rerun", "Flags"]
+    if spaced:                  # W-12: only when a name was matched with its spaces taken out
+        ph.append("Name matched")
     pwid = {"Name": 18, "Type": 8, "Runs": 6, "Analyses": 8, "Run": widths["Run"], "Row": 6, "Identifier": 18,
-            "Rerun": 9, "Flags": 54}
+            "Rerun": 9, "Flags": 54, "Name matched": 14}
     pfmt = {h: "0.00" for h in ("d15N (permil)", "d13C (permil)", "d15N minus mean", "d13C minus mean",
                                 "Mean d15N", "Mean d13C", "%N", "%C", "C:N molar")}
     pfmt.update({h: "0.000" for h in ("1σ(d15N)", "1σ(d13C)", "SD d15N", "SD d13C")})

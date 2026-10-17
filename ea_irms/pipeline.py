@@ -23,7 +23,6 @@ from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal
 
 from .metadata import critical_range_factor, match_positions, match_summary
-from .parse import Position
 
 ATOMIC_C = 12.011
 ATOMIC_N = 14.007
@@ -48,13 +47,34 @@ CARRY_REACH = 2
 MIN_OUTLIER_MONITORS = 5
 # Excel and LibreOffice treat two numbers within about 1e-15 of each other as
 # equal when comparing; the engine allows the same slack so the two agree at a
-# threshold.
+# threshold. Every comparison of a value with a limit goes through _above or
+# _below (finding R-24 of the 2026-10-14 review): "more than" is _above(value,
+# limit), "less than" is _below(value, limit), "at most" is not _above, and "at
+# least" is not _below, the slack scaled by the limit each time.
 _SLACK = 1e-9
 
 
 def _above(a, b):
     """a > b, allowing the rounding slack a spreadsheet comparison allows."""
     return a - b > _SLACK * max(1.0, abs(b))
+
+
+def _below(a, b):
+    """a < b, with the slack of _above, its mirror."""
+    return b - a > _SLACK * max(1.0, abs(b))
+
+
+# 1.4.13 (finding W-13): analyses of one anchor material agree in their C/N peak-area ratio (Area 44 over
+# Area 28) and in their raw d15N and d13C, and capsules of other materials whose names contain an anchor's
+# match text do not. In a survey of 19 runs the largest over the smallest ratio within one anchor material
+# was 1.003 to 1.145 in real runs and 4.10 in the run whose acetanilide capsules were labeled USGS 64 Lin,
+# USGS 64 Drift, and USGS 64 Bypass; the raw d15N and d13C ranges were 0.03 to 0.6 permil in good runs and
+# reached 2.6 and 10.8 permil in runs whose calibration line is already a Caution. The 5 permil limit flags
+# two of those too (raw d13C of one anchor material 5.06 to 10.78 permil apart, carbon measurements that
+# failed), so the check names both causes, a capsule of another material and anchors the instrument did
+# not measure consistently. These are fixed limits in this version, not lab settings.
+ANCHOR_RATIO_LIMIT = 1.5
+ANCHOR_SPREAD_PERMIL = 5.0
 
 DEFAULT_STANDARDS = [
     # match text, role, accepted d13C, accepted d15N, %C, %N, material, u(d13C), u(d15N),
@@ -388,7 +408,7 @@ def _apply(mode, fit, n_used, alpha, minimum=3):
         return False
     if mode == "On":
         return True
-    return fit.get("p") is not None and fit["p"] < alpha
+    return fit.get("p") is not None and _below(fit["p"], alpha)
 
 
 def assign_roles(positions, config):
@@ -589,6 +609,83 @@ def _elemental_uncertainty(positions, F, config, excl_e):
         p.U_cn_mass = None if rel is None else k_cov * p.u_cn_mass
 
 
+def _elemental_check(positions, F, config):
+    """The elemental drift correction against the anchors (1.4.13).
+
+    The anchors carry certified %N and %C and the correction does not use them, so they test it. For each
+    element whose correction is in force, from the anchor analyses _elemental_uncertainty reads (role Anchor,
+    a reported value, a certified value above 0): their RMS relative deviation from certified as measured and
+    as corrected, and what the correction added, all as fractions. ``level`` is Caution when it added more
+    than the gate Auto applies the correction at (elemental_threshold_pct, Setup B36), Note when more than
+    half of it, and OK otherwise, or None with fewer than two anchors; an element whose correction is not in
+    force has None. In PanamaSids2 the correction moved the anchors' %N from 0.65% RMS to 6.5%, because a
+    monitor next to them was left out and the factor of the next one was held flat over them."""
+    gate = config.elemental_threshold_pct / 100.0
+    out = {}
+    for el in ("n", "c"):
+        if not F[f"elem_{el}"]["in_force"]:
+            out[el] = None
+            continue
+        cert, meas, rep = f"pct_{el}", f"pct_{el}_measured", f"pct_{el}_reported"
+        used = [p for p in positions if p.role == "Anchor" and getattr(p, rep) is not None
+                and getattr(p, cert) is not None and getattr(p, cert) > 0]
+        c = {"n": len(used), "rms_measured": None, "rms_reported": None, "added": None, "level": None,
+             "gate_pct": config.elemental_threshold_pct}
+        if len(used) >= 2:
+            c["rms_measured"] = _rms([getattr(p, meas) / getattr(p, cert) - 1.0 for p in used])
+            c["rms_reported"] = _rms([getattr(p, rep) / getattr(p, cert) - 1.0 for p in used])
+            c["added"] = c["rms_reported"] - c["rms_measured"]
+            c["level"] = ("Caution" if _above(c["added"], gate)
+                          else "Note" if _above(c["added"], gate / 2) else "OK")
+        out[el] = c
+    return out
+
+
+def _anchor_material(positions, config):
+    """Whether the anchors of each standards-table row read as one material (1.4.13, finding W-13).
+
+    Matching by text made 12 acetanilide capsules labeled USGS 64 Lin, USGS 64 Drift, or USGS 64 Bypass into
+    USGS 64 anchors beside 3 real ones. For each row with anchor analyses: the C/N peak-area ratio, Area 44
+    over Area 28, of the analyses with both peaks (a CO2 peak set aside as a reference pulse does not count),
+    its smallest and largest value and their quotient, and the smallest and largest raw d15N and d13C and
+    their spread; a quotient or a spread needs two values. ``level`` is Caution when the quotient is above
+    ANCHOR_RATIO_LIMIT or a spread above ANCHOR_SPREAD_PERMIL, OK when at least one of the three could be
+    judged and none is over, and None otherwise. ``over`` names the parts over their limit, as the problem of
+    the whole run writes them, and the overall level is Caution when any row is, OK when any row has a level."""
+    materials = []
+    for idx, entry in enumerate(config.standards):
+        group = [p for p in positions if p.role == "Anchor" and p.std_index == idx]
+        if not group:
+            continue
+        ratios = [p.area_c / p.area_n for p in group
+                  if p.area_n is not None and p.area_c is not None and p.area_n > 0 and p.area_c > 0]
+        d15 = [p.d15n for p in group if p.d15n is not None]
+        d13 = [p.d13c for p in group if p.d13c is not None]
+        m = {"index": idx, "name": entry[0], "n": len(group), "n_ratio": len(ratios),
+             "ratio_min": min(ratios) if ratios else None, "ratio_max": max(ratios) if ratios else None,
+             "ratio_x": max(ratios) / min(ratios) if len(ratios) >= 2 else None,
+             "d15n_min": min(d15) if d15 else None, "d15n_max": max(d15) if d15 else None,
+             "d15n_spread": max(d15) - min(d15) if len(d15) >= 2 else None,
+             "d13c_min": min(d13) if d13 else None, "d13c_max": max(d13) if d13 else None,
+             "d13c_spread": max(d13) - min(d13) if len(d13) >= 2 else None,
+             "positions": [p.row for p in group]}
+        over = []
+        if m["ratio_x"] is not None and _above(m["ratio_x"], ANCHOR_RATIO_LIMIT):
+            over.append(f"C/N peak-area ratio {_xl(m['ratio_min'], 2)} to {_xl(m['ratio_max'], 2)}, "
+                        f"{_xl(m['ratio_x'], 2)} times")
+        for key, name in (("d15n", "d15N"), ("d13c", "d13C")):
+            if m[f"{key}_spread"] is not None and _above(m[f"{key}_spread"], ANCHOR_SPREAD_PERMIL):
+                over.append(f"raw {name} {_xl(m[f'{key}_min'], 2)} to {_xl(m[f'{key}_max'], 2)} permil")
+        judged = any(m[k] is not None for k in ("ratio_x", "d15n_spread", "d13c_spread"))
+        m["over"] = over
+        m["level"] = "Caution" if over else "OK" if judged else None
+        materials.append(m)
+    levels = [m["level"] for m in materials]
+    return {"level": "Caution" if "Caution" in levels else "OK" if any(levels) else None,
+            "limits": {"ratio": ANCHOR_RATIO_LIMIT, "spread": ANCHOR_SPREAD_PERMIL},
+            "materials": materials}
+
+
 # ---- rerun marks (1.4.4) ----------------------------------------------------
 # 1 / the 0.75 quantile of the standard normal distribution: the median absolute
 # deviation times this estimates the SD of normally distributed values.
@@ -597,8 +694,13 @@ _SIZE = {"n": ("N below linearity range", "N above linearity range"),
          "c": ("C below linearity range", "C above linearity range")}
 _PREFIX = {"n": ("N peak only ", "N2 reference pulse off by "),
            "c": ("C peak only ", "CO2 reference pulse off by ")}
+# Finding R-23 of the 2026-10-14 review: under the Background drift model, with the drift correction in force,
+# a position with no reference background is left as it was after linearity, and marked for a check.
+_NO_BGD = {"n": "N not drift-corrected: no reference background",
+           "c": "C not drift-corrected: no reference background"}
 _PLAIN = ("no N peak", "no C peak", "CO2 peak rejected as a reference pulse",
-          "ran before the background settled", "possible carryover from an oversized sample")
+          "ran before the background settled", "possible carryover from an oversized sample",
+          _NO_BGD["n"], _NO_BGD["c"])
 
 
 def _xl(x, places: int, sign: bool = False) -> str:
@@ -677,7 +779,7 @@ def _extra_reasons(p, config, replicates=None):
     lim = config.max_amplitude_mv
     if lim is not None:
         for el, area, ampl, gas in (("n", p.area_n, p.ampl_n, "N2"), ("c", p.area_c, p.ampl_c, "CO2")):
-            if area is not None and ampl is not None and not _above(lim, ampl):
+            if area is not None and ampl is not None and not _below(ampl, lim):
                 out.append((el, f"{gas} peak at or above {_xl(lim, 0)} mV"))
     usig = config.rerun_max_1sigma
     if usig is not None:
@@ -743,7 +845,10 @@ def _rerun_marks(positions, F, config):
     Only what a rerun can fix marks a sample: the peak's size against the linearity
     standards and the blank, carryover from an oversized sample, and the reference
     pulse at that position. A sample run before the background settled, or missing
-    the peak of one element, is marked for a check. A rerun's suggested mass puts
+    the peak of one element, is marked for a check, and so, under the Background
+    drift model with the drift correction in force, is one with no reference
+    background, which was left without a drift correction (finding R-23 of the
+    2026-10-14 review). A rerun's suggested mass puts
     each peak inside the linearity range (and above the blank multiple), read from
     this analysis's area per mg. Problems of the whole run are listed once, not on
     every sample.
@@ -771,7 +876,8 @@ def _rerun_marks(positions, F, config):
         need = {el: any(_reason(f, config) and (f in _SIZE[el] or f.startswith(_PREFIX[el])) for f in fl)
                 or any(e == el for e, _ in extra) for el in ("n", "c")}
         both = "possible carryover from an oversized sample" in fl or (no_n and no_c)
-        check = "ran before the background settled" in fl or no_n != no_c
+        check = ("ran before the background settled" in fl or no_n != no_c
+                 or any(f in fl for f in _NO_BGD.values()))
         if both or (need["n"] and need["c"]):
             mark = "N and C"
         elif need["n"]:
@@ -825,6 +931,10 @@ def _rerun_marks(positions, F, config):
                          "from 1")
         if c.get("sd_limit") is not None:
             items.append(f"{name} anchor residual SD {_xl(c['sd'], 3)} permil, above {_num_text(c['sd_limit'])}")
+    # 1.4.13 (finding W-13): anchors of one label that do not read as one material, one item per row
+    for m in (F.get("anchor_material") or {}).get("materials", []):
+        if m["level"] == "Caution":
+            items.append(f"anchors labeled {m['name']} do not read as one material: " + "; ".join(m["over"]))
     off = [p.row for p in positions if p.role == "Check"
            and any(f.startswith(("check d15N off by", "check d13C off by")) for f in p.flags)]
     if off:
@@ -838,13 +948,21 @@ def _rerun_marks(positions, F, config):
                                     "U_cn_molar")):
         used = [p for p in positions if p.role == "Anchor" and getattr(p, big_u) is not None
                 and cert(p) is not None]
-        within = sum(1 for p in used if abs(getattr(p, val) - cert(p)) <= getattr(p, big_u))
+        within = sum(1 for p in used if not _above(abs(getattr(p, val) - cert(p)), getattr(p, big_u)))
         if used and within < len(used):
             items.append(f"anchors outside {_k_sigma(config.coverage_k)}, {name}: {len(used) - within} of {len(used)}")
+    # 1.4.13: the elemental drift correction against the anchors, which it does not use, at Note or Caution;
+    # the numbers in percent, rounded as the workbook's TEXT rounds them
+    for el, name in (("n", "%N"), ("c", "%C")):
+        c = (F.get("elem_check") or {}).get(el)
+        if c and c["level"] in ("Note", "Caution"):
+            items.append(f"elemental drift correction moves the anchors' {name} {_xl(c['added'] * 100, 2)} points "
+                         f"further from certified (RMS {_xl(c['rms_measured'] * 100, 2)}% as measured, "
+                         f"{_xl(c['rms_reported'] * 100, 2)}% corrected)")
     if config.ref_gas_sd_limit is not None:
         for el, name in (("n", "N2"), ("c", "CO2")):
             g = F[f"ref_gas_{el}"]
-            if g["n"] >= 3 and g["sd"] is not None and g["sd"] >= config.ref_gas_sd_limit:
+            if g["n"] >= 3 and g["sd"] is not None and not _below(g["sd"], config.ref_gas_sd_limit):
                 items.append(f"{name} reference pulses SD {_xl(g['sd'], 2)} permil, at or above "
                              f"{_xl(config.ref_gas_sd_limit, 2)}")
     F["rerun"] = {"counts": counts, "run_level": items,
@@ -939,7 +1057,7 @@ def process(positions, config=None, samples=None):
             return False
         if config.blank_correction == "On":
             return True
-        return block["n"] >= 3 and block["sd"] is not None and block["sd"] <= 2.0
+        return block["n"] >= 3 and block["sd"] is not None and not _above(block["sd"], 2.0)
 
     F["blank_n"]["in_force"] = in_force(F["blank_n"])
     F["blank_c"]["in_force"] = in_force(F["blank_c"])
@@ -1011,6 +1129,11 @@ def process(positions, config=None, samples=None):
                   "fit": chosen}
         F[out]["in_force"] = _apply(config.drift_correction, chosen, len(pairs), alpha)
         F[out]["applied"] = chosen["slope"] if F[out]["in_force"] else 0.0
+        F[out]["no_background"] = []
+    # Finding R-23 of the 2026-10-14 review: under the Background model a position with no reference
+    # background has no x on that scale. Before, its position number stood in, so positions and millivolts
+    # were mixed in one correction; it is now left as it was after linearity, and while the correction is in
+    # force no_background lists it and Flags says so.
     for p in positions:
         for out, src, dst in (("drift_n", "d15n_lin", "d15n_drift"),
                               ("drift_c", "d13c_lin", "d13c_drift")):
@@ -1018,10 +1141,20 @@ def process(positions, config=None, samples=None):
             if v is None:
                 setattr(p, dst, None)
                 continue
-            x = float(p.row) if F[out]["model"] == "Row" or p.ref_bgd_n is None else p.ref_bgd_n
+            if F[out]["model"] == "Row":
+                x = float(p.row)
+            elif p.ref_bgd_n is None:
+                setattr(p, dst, v)
+                if F[out]["in_force"]:
+                    F[out]["no_background"].append(p.row)
+                continue
+            else:
+                x = p.ref_bgd_n
             setattr(p, dst, v - F[out]["applied"] * (x - F[out]["pivot"]))
 
-    # Drift monitors that disagree with the others, in units of the others' scatter.
+    # Drift monitors that disagree with the others, in units of the others' scatter. Under the Background
+    # model a monitor with no reference background has no x, so it is not in the fit and gets no residual
+    # (None), and it is never called an outlier (finding R-23).
     for p in positions:
         p.t_drift_n = p.t_drift_c = None
     for el, yattr, out, dst in (("n", "d15n_lin", "drift_n", "t_drift_n"),
@@ -1033,7 +1166,7 @@ def process(positions, config=None, samples=None):
                                          p.row not in excluded[el]))
         F[out]["outliers"] = sorted(p.row for p in monitors
                                     if getattr(p, dst) is not None
-                                    and abs(getattr(p, dst)) > config.monitor_outlier_t
+                                    and _above(abs(getattr(p, dst)), config.monitor_outlier_t)
                                     and p.row not in excluded[el])
 
     # ---- calibration -----------------------------------------------------
@@ -1238,6 +1371,8 @@ def process(positions, config=None, samples=None):
 
     # ---- uncertainty of %N, %C, and C:N (1.4.3) -------------------------------
     _elemental_uncertainty(positions, F, config, excl_e)
+    # 1.4.13: the anchors, which the elemental drift correction does not use, test it
+    F["elem_check"] = _elemental_check(positions, F, config)
 
     # ---- size limits -----------------------------------------------------
     min_n = config.min_area_n if config.min_area_n is not None else (F["lin_n"]["min"] or 0)
@@ -1253,8 +1388,8 @@ def process(positions, config=None, samples=None):
     # is exposed when one of the CARRY_REACH positions before it is above the
     # linearity range; its rise is measured against the last reading that was
     # not exposed, so a slow change across the run does not count.
-    over = {p.row: bool((max_n and p.area_n is not None and p.area_n > max_n)
-                        or (max_c and p.area_c is not None and p.area_c > max_c))
+    over = {p.row: bool((max_n and p.area_n is not None and _above(p.area_n, max_n))
+                        or (max_c and p.area_c is not None and _above(p.area_c, max_c)))
             for p in positions}
     ref = None
     for p in positions:
@@ -1297,8 +1432,8 @@ def process(positions, config=None, samples=None):
     excess_level = (max(p.ref_bgd_n for p in reads[:SETTLE_START]) - level) if reads else 0.0
     settled = 1
     if (config.settled_threshold and excess > 0
-            and not excess < SETTLE_MIN_EXCESS - _SLACK
-            and not excess_level < SETTLE_MIN_EXCESS - _SLACK):
+            and not _below(excess, SETTLE_MIN_EXCESS)
+            and not _below(excess_level, SETTLE_MIN_EXCESS)):
         settled, streak, start = None, 0, None
         for p in reads:
             if p.carry_exposed:
@@ -1332,7 +1467,7 @@ def process(positions, config=None, samples=None):
     mfit = _fit([r for r, _ in mon], [b for _, b in mon])
     F["monitor_bgd"] = {"n": len(mon), "min": min(b for _, b in mon) if mon else None,
                         "max": max(b for _, b in mon) if mon else None, "fit": mfit,
-                        "trend": (mfit is not None and mfit["p"] is not None and mfit["p"] < alpha)}
+                        "trend": (mfit is not None and mfit["p"] is not None and _below(mfit["p"], alpha))}
 
     # ---- working gas, from the reference pulses Isodat did not use --------
     # The pulse Isodat designates as the reference carries the assigned value
@@ -1349,11 +1484,13 @@ def process(positions, config=None, samples=None):
                   "mean": sum(ys) / len(ys) if ys else None,
                   "sd": _sd(ys), "range": (max(ys) - min(ys)) if ys else None,
                   "fit": fit,
-                  "trend": (fit is not None and fit["p"] is not None and fit["p"] < alpha)}
+                  "trend": (fit is not None and fit["p"] is not None and _below(fit["p"], alpha))}
 
     # ---- run-level checks --------------------------------------------------
     checks = [p for p in role("Check") if p.d15n_final is not None or p.d13c_final is not None]
     F["checks"] = {"n": len(checks), "materials": sorted({p.identifier for p in checks})}
+    # 1.4.13 (finding W-13): do the anchors of each row read as one material?
+    F["anchor_material"] = _anchor_material(positions, config)
 
     # ---- the reference pulse at each position (1.4.4) ----------------------
     # Against the run's own scatter: the median and a robust SD, so that the
@@ -1377,17 +1514,17 @@ def process(positions, config=None, samples=None):
         flags = []
         if p.area_n is None:
             flags.append("no N peak")
-        elif min_n and p.area_n < min_n:
+        elif min_n and _below(p.area_n, min_n):
             flags.append("N below linearity range")
-        elif max_n and p.area_n > max_n:
+        elif max_n and _above(p.area_n, max_n):
             flags.append("N above linearity range")
         if p.area_c is None:
             flags.append("no C peak")
             if getattr(p, "c_rejected", False):
                 flags.append("CO2 peak rejected as a reference pulse")
-        elif min_c and p.area_c < min_c:
+        elif min_c and _below(p.area_c, min_c):
             flags.append("C below linearity range")
-        elif max_c and p.area_c > max_c:
+        elif max_c and _above(p.area_c, max_c):
             flags.append("C above linearity range")
         if p.area_c is not None and getattr(p, "c_before", 0) >= 2:
             # 1.4.12 (finding W-09): the one next to the designated pulse was taken
@@ -1396,12 +1533,12 @@ def process(positions, config=None, samples=None):
                                  (p.d13c_final, F["cal_c"], "d13C")):
             if (value is not None and p.role in ("Sample", "Check")
                     and fit.get("acc_min") is not None
-                    and not fit["acc_min"] <= value <= fit["acc_max"]):
+                    and (_below(value, fit["acc_min"]) or _above(value, fit["acc_max"]))):
                 flags.append(f"{name} outside anchor range")
         if p.role == "Check":
             for got, acc, name in ((p.d15n_final, p.acc15, "d15N"),
                                    (p.d13c_final, p.acc13, "d13C")):
-                if got is not None and acc is not None and abs(got - acc) > config.check_offset_permil:
+                if got is not None and acc is not None and _above(abs(got - acc), config.check_offset_permil):
                     flags.append(f"check {name} off by {_xl(got - acc, 2, sign=True)}")
         if p.role == "Drift":
             for el, name in (("n", "N"), ("c", "C")):
@@ -1411,10 +1548,13 @@ def process(positions, config=None, samples=None):
                     flags.append(f"{name} drift monitor outlier")
             if p.row in excl_e:
                 flags.append("excluded from elemental correction")
+        for el in ("n", "c"):                    # finding R-23: left without a drift correction
+            if p.row in F[f"drift_{el}"]["no_background"]:
+                flags.append(_NO_BGD[el])
         if config.min_blank_multiple and p.role != "Blank":
             for area, ab, name in ((p.area_n, F["blank_n"]["area"], "N"),
                                    (p.area_c, F["blank_c"]["area"], "C")):
-                if area is not None and ab > 0 and area < ab * config.min_blank_multiple:
+                if area is not None and ab > 0 and _below(area, ab * config.min_blank_multiple):
                     flags.append(f"{name} peak only {_xl(area / ab, 1)}x the blank")
         if p.row < F["settling"]["settled_from"]:
             flags.append("ran before the background settled")

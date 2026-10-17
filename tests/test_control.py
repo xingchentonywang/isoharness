@@ -42,6 +42,14 @@ def test_westgard_rules_fire_where_they_should():
     assert westgard([0.5, -0.5, 1.5, -1.5], mean, sd) == [[], [], [], []]
 
 
+def test_an_observation_on_a_limit_is_not_beyond_it():
+    # -29.7 is 3 SD above a mean of -30.0 with an SD of 0.1 in decimal arithmetic and 3.000000000000007 SD in
+    # floats; as at every other limit in ea_irms (finding R-24 of the 2026-10-14 review) it is not beyond 3 SD
+    assert (-29.7 - -30.0) / 0.1 > 3 and westgard([-29.7], -30.0, 0.1) == [[]]
+    assert westgard([-29.6999], -30.0, 0.1) == [["1_3s"]]
+    assert (-29.4 - -29.6) / 0.1 > 2 and westgard([-29.4, -29.4], -29.6, 0.1) == [[], []]   # on the 2_2s limit
+
+
 def test_evaluate_marks_the_offending_points():
     h = _history(25, 8)
     lim, _ = set_limits([v for _, v in h], [d for d, _ in h])

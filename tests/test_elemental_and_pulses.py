@@ -6,7 +6,6 @@ workbook, computed by LibreOffice, against the engine.
 """
 import csv
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -21,7 +20,7 @@ from ea_irms.parse import parse_export                                          
 from ea_irms.pipeline import (Config, DEFAULT_STANDARDS, MAX_STANDARDS, config_from_dict,  # noqa: E402
                               config_to_dict, process)
 from ea_irms.workbook import build_workbook                                           # noqa: E402
-from test_statistics import HEADER, _sequence                                         # noqa: E402
+from test_statistics import _sequence                                         # noqa: E402
 
 SOFFICE = shutil.which("soffice") or shutil.which("libreoffice")
 

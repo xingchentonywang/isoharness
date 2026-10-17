@@ -11,10 +11,17 @@ import gzip
 import json
 from dataclasses import dataclass
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from typing import Any, Iterable, Iterator
 
 import psycopg
 from psycopg.rows import dict_row
+
+# The highest migration in db/ that this module is written for. An export names
+# it, so a file downloaded today can still be read once the schema has moved on.
+# db/ is not in the container image, so the number is kept here, and
+# tests/test_store.py holds it to the files.
+SCHEMA = "003"
 
 
 @dataclass
@@ -75,9 +82,16 @@ def create_lab(admin_dsn: str, identity: Identity, name: str,
 
 
 def labs_for(conn) -> list[dict]:
+    """The caller's labs, one row each with the caller's own role.
+
+    The join keeps only the caller's membership row. Row-level security still decides which labs can be
+    seen; without this condition a lab with several members came back once per member, each time with
+    that member's role (isoharness 0.5.0).
+    """
     return conn.execute(
         "SELECT l.id, l.name, l.institution, m.role FROM labs l "
-        "JOIN lab_members m ON m.lab_id = l.id ORDER BY l.name").fetchall()
+        "JOIN lab_members m ON m.lab_id = l.id AND m.user_id = app.current_user_id() "
+        "ORDER BY l.name").fetchall()
 
 
 def get_or_create_instrument(conn, lab_id: str, name: str,
@@ -294,20 +308,51 @@ def raw_export(conn, run_id: str) -> tuple[str | None, bytes | None]:
 
 
 def export_lab(conn, lab_id: str) -> dict:
-    """Everything a lab owns, for the download-my-data button."""
+    """Everything a lab owns that the caller may read, for the download-my-data button.
+
+    That is the lab row, its members, instruments, configurations, runs,
+    positions, and check results, each list under the name of its table. Every
+    member may read all of it, so any member can download the lab's data. A
+    caller who is not a member gets the same keys with nothing in them.
+    ``schema`` names the migration the rows were read under, and
+    ``exported_at`` the time of the export in UTC.
+    """
+    def rows(sql: str) -> list[dict]:
+        return conn.execute(sql, (lab_id,)).fetchall()
+
     return {
+        "schema": SCHEMA,
+        "exported_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "lab": conn.execute("SELECT * FROM labs WHERE id = %s", (lab_id,)).fetchone(),
-        "instruments": conn.execute("SELECT * FROM instruments WHERE lab_id = %s",
-                                    (lab_id,)).fetchall(),
-        "runs": conn.execute("SELECT * FROM runs WHERE lab_id = %s", (lab_id,)).fetchall(),
-        "positions": conn.execute("SELECT * FROM positions WHERE lab_id = %s",
-                                  (lab_id,)).fetchall(),
-        "check_results": conn.execute("SELECT * FROM check_results WHERE lab_id = %s",
-                                      (lab_id,)).fetchall(),
+        "lab_members": rows("SELECT lab_id, user_id, role, added_at FROM lab_members "
+                            "WHERE lab_id = %s ORDER BY added_at, user_id"),
+        "instruments": rows("SELECT * FROM instruments WHERE lab_id = %s ORDER BY name"),
+        "lab_configs": rows("SELECT * FROM lab_configs WHERE lab_id = %s ORDER BY name"),
+        "runs": rows("SELECT * FROM runs WHERE lab_id = %s ORDER BY uploaded_at, id"),
+        "positions": rows("SELECT * FROM positions WHERE lab_id = %s "
+                          "ORDER BY run_id, position"),
+        "check_results": rows("SELECT * FROM check_results WHERE lab_id = %s "
+                              "ORDER BY run_id, id"),
     }
 
 
 def delete_lab_data(conn, lab_id: str) -> None:
-    """The delete-my-data button. Cascades take the children."""
+    """The delete-my-data button: deletes the lab and everything it owns.
+
+    Deleting the lab row lets the foreign keys' cascades take every row under it
+    in the same statement: its members, instruments, configurations, runs,
+    positions, and check results. Only an owner may do this. The database
+    enforces that on its own (the DELETE policy on labs, db/003), and a member's
+    DELETE would simply match no row; the check here is so that a member is told
+    so, with PermissionError, rather than shown a delete that removed nothing.
+
+    A lab that has gone by the time it is deleted, because another owner
+    deleted it a moment before, raises LookupError.
+    """
     with conn.transaction():
-        conn.execute("DELETE FROM runs WHERE lab_id = %s", (lab_id,))
+        if not conn.execute("SELECT app.is_owner(%s) AS is_owner",
+                            (lab_id,)).fetchone()["is_owner"]:
+            raise PermissionError("only an owner of the lab can delete it")
+        deleted = conn.execute("DELETE FROM labs WHERE id = %s", (lab_id,)).rowcount
+        if deleted != 1:
+            raise LookupError(f"expected to delete lab {lab_id}, deleted {deleted} rows")

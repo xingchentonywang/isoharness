@@ -3,10 +3,13 @@
 Uses the 2026-09-15 sequence rather than invented numbers, so the round trip is
 checked against values the rest of the suite already holds to the workbook.
 """
-import gzip
+import json
 import os
 import subprocess
 import sys
+import threading
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import psycopg
@@ -46,6 +49,10 @@ def _export_from_template(folder):
 
 ALICE = store.Identity("google|alice", "alice@lab-a.edu", "Alice")
 BOB = store.Identity("google|bob", "bob@lab-b.edu", "Bob")
+CAROL = store.Identity("google|carol", "carol@lab-c.edu", "Carol")
+DAVE = store.Identity("google|dave", "dave@lab-c.edu", "Dave")
+TABLES = ("labs", "lab_members", "instruments", "lab_configs",
+          "runs", "positions", "check_results")
 
 
 @pytest.fixture(scope="module")
@@ -167,36 +174,148 @@ def test_a_connection_without_an_identity_sees_nothing(saved):
         assert store.labs_for(conn) == []
 
 
-def test_export_and_delete_return_a_lab_its_data_and_then_remove_it(saved):
-    """Both buttons have to work before other labs are asked to trust this.
+@pytest.fixture
+def third_lab(saved):
+    """A lab of its own, so that deleting it cannot disturb the other tests.
 
-    Uses a lab of its own so that deleting cannot disturb the other tests,
-    whatever order they run in.
+    Carol owns it and Dave is a member who is not an owner. It holds a copy of
+    the saved run, one instrument, one lab configuration, and one check result
+    (the run has no check standard under the default configuration), so every
+    table has a row in it. A new one is made for every test that asks for it.
     """
-    third = store.Identity("google|carol", "carol@lab-c.edu", "Carol")
-    store.register_user(DSN_SUPER, third)
-    lab = store.create_lab(DSN_SUPER, third, "Third Lab")
-    with store.connect(DSN_APP, third) as conn:
+    store.register_user(DSN_SUPER, CAROL)
+    store.register_user(DSN_SUPER, DAVE)
+    lab = store.create_lab(DSN_SUPER, CAROL, "Third Lab")
+    with store.connect(DSN_APP, CAROL) as conn:
         instrument = store.get_or_create_instrument(conn, lab, "Delta V")
-        store.save_run(conn, lab_id=lab, instrument_id=instrument, identity=third,
-                       positions=saved["positions"], fits=saved["fits"],
-                       config={}, tool_version="1.1.0", run_name="copy",
-                       raw_bytes=saved["raw"], raw_filename="copy.xls")
+        run = store.save_run(conn, lab_id=lab, instrument_id=instrument, identity=CAROL,
+                             positions=saved["positions"], fits=saved["fits"],
+                             config={}, tool_version="1.1.0", run_name="copy",
+                             raw_bytes=saved["raw"], raw_filename="copy.xls")
+        conn.execute("INSERT INTO check_results (lab_id, run_id, material, n, measured_d15n, "
+                     "accepted_d15n, offset_d15n) VALUES (%s, %s, 'USGS 66', 1, 40.9, 40.83, 0.07)",
+                     (lab, run))
+        conn.execute("INSERT INTO lab_configs (lab_id, name, config, is_default) "
+                     "VALUES (%s, 'Corals', %s, true)",
+                     (lab, json.dumps({"drift_model": "row"})))
+        conn.execute("INSERT INTO lab_members (lab_id, user_id) VALUES (%s, %s)",
+                     (lab, DAVE.user_id))
+    return lab
 
-    with store.connect(DSN_APP, third) as conn:
+
+def _rows_of(lab):
+    """How many rows the lab has in each table, as the migration role sees them."""
+    with psycopg.connect(DSN_SUPER) as conn:
+        return {table: conn.execute(
+                    f"SELECT count(*) FROM {table} "
+                    f"WHERE {'id' if table == 'labs' else 'lab_id'} = %s", (lab,)).fetchone()[0]
+                for table in TABLES}
+
+
+def test_export_and_delete_return_a_lab_its_data_and_then_remove_it(saved, third_lab):
+    """Both buttons have to work before other labs are asked to trust this."""
+    lab = third_lab
+    with store.connect(DSN_APP, CAROL) as conn:
         bundle = store.export_lab(conn, lab)
-        assert len(bundle["runs"]) == 1
-        assert len(bundle["positions"]) == 56
-        assert bundle["lab"]["name"] == "Third Lab"
+    assert bundle["lab"]["name"] == "Third Lab"
+    assert len(bundle["runs"]) == 1
+    assert len(bundle["positions"]) == 56
+    assert len(bundle["check_results"]) == 1 + sum(p.role == "Check" for p in saved["positions"])
+    assert [i["name"] for i in bundle["instruments"]] == ["Delta V"]
+    assert [(c["name"], c["config"], c["is_default"]) for c in bundle["lab_configs"]] == \
+        [("Corals", {"drift_model": "row"}, True)]
+    assert {m["user_id"]: m["role"] for m in bundle["lab_members"]} == \
+        {CAROL.user_id: "owner", DAVE.user_id: "member"}
+    assert all(set(m) == {"lab_id", "user_id", "role", "added_at"}
+               for m in bundle["lab_members"])
+    # The schema it names is the newest migration, so store.SCHEMA keeps up with db/.
+    assert bundle["schema"] == MIGRATIONS[-1].name[:3]
+    exported = datetime.fromisoformat(bundle["exported_at"])
+    assert exported.utcoffset() == timedelta(0)
+    assert abs(datetime.now(timezone.utc) - exported) < timedelta(minutes=5)
+
+    with store.connect(DSN_APP, CAROL) as conn:
         store.delete_lab_data(conn, lab)
+    assert _rows_of(lab) == dict.fromkeys(TABLES, 0), "the lab or something under it is left"
 
-    with store.connect(DSN_APP, third) as conn:
+    with store.connect(DSN_APP, CAROL) as conn:
         assert store.lab_history(conn, lab) == []
-        assert store.export_lab(conn, lab)["positions"] == []
-
+        assert store.export_lab(conn, lab)["lab"] is None
     with store.connect(DSN_APP, ALICE) as conn:
         assert len(store.lab_history(conn, saved["lab"])) == 1, \
             "deleting one lab's data touched another lab"
+
+
+def test_any_member_can_export_the_lab(third_lab):
+    with store.connect(DSN_APP, CAROL) as conn:
+        by_owner = store.export_lab(conn, third_lab)
+    with store.connect(DSN_APP, DAVE) as conn:
+        by_member = store.export_lab(conn, third_lab)
+    with store.connect(DSN_APP, BOB) as conn:
+        by_stranger = store.export_lab(conn, third_lab)
+    for bundle in (by_owner, by_member, by_stranger):
+        del bundle["exported_at"]
+    assert by_member == by_owner
+    assert by_stranger["lab"] is None
+    assert all(by_stranger[t] == [] for t in TABLES if t != "labs"), \
+        "someone outside the lab exported some of it"
+
+
+def test_labs_for_gives_each_lab_once_with_the_callers_own_role(third_lab):
+    """isoharness 0.5.0: the lab list joined every member's row, so a lab with two members came back twice."""
+    with store.connect(DSN_APP, CAROL) as conn:
+        mine = [(str(r["id"]), r["role"]) for r in store.labs_for(conn) if str(r["id"]) == third_lab]
+    with store.connect(DSN_APP, DAVE) as conn:
+        theirs = [(str(r["id"]), r["role"]) for r in store.labs_for(conn) if str(r["id"]) == third_lab]
+    with store.connect(DSN_APP, BOB) as conn:
+        stranger = [r for r in store.labs_for(conn) if str(r["id"]) == third_lab]
+    assert mine == [(third_lab, "owner")]
+    assert theirs == [(third_lab, "member")]
+    assert stranger == []
+
+
+def test_only_an_owner_can_delete_the_lab(third_lab):
+    """A member who is not an owner, or someone from another lab, is told so and
+    nothing is removed."""
+    before = _rows_of(third_lab)
+    assert all(before.values())
+    for who in (DAVE, BOB):
+        with pytest.raises(PermissionError, match="only an owner"):
+            with store.connect(DSN_APP, who) as conn:
+                store.delete_lab_data(conn, third_lab)
+        assert _rows_of(third_lab) == before, f"{who.name} removed something"
+
+
+def test_deleting_a_lab_another_owner_has_just_deleted_raises(third_lab):
+    """Two owners pressing delete at once. The second DELETE waits for the first,
+    then finds no row, and must say so rather than return as if it had worked."""
+    with store.connect(DSN_APP, CAROL) as conn:
+        conn.execute("UPDATE lab_members SET role = 'owner' WHERE lab_id = %s AND user_id = %s",
+                     (third_lab, DAVE.user_id))
+    outcome = {}
+
+    def carol_deletes():
+        try:
+            with store.connect(DSN_APP, CAROL) as conn:
+                store.delete_lab_data(conn, third_lab)
+            outcome["carol"] = "deleted"
+        except Exception as exc:          # reported by the assertion below
+            outcome["carol"] = exc
+
+    thread = threading.Thread(target=carol_deletes)
+    with store.connect(DSN_APP, DAVE) as conn:
+        assert conn.execute("DELETE FROM labs WHERE id = %s", (third_lab,)).rowcount == 1
+        dave = conn.info.backend_pid
+        thread.start()
+        with psycopg.connect(DSN_SUPER, autocommit=True) as admin:
+            deadline = time.monotonic() + 10
+            while thread.is_alive() and time.monotonic() < deadline and not admin.execute(
+                    "SELECT count(*) FROM pg_stat_activity WHERE %s = ANY(pg_blocking_pids(pid))",
+                    (dave,)).fetchone()[0]:
+                time.sleep(0.02)
+    thread.join(timeout=30)
+    assert isinstance(outcome.get("carol"), LookupError), outcome
+    assert _rows_of(third_lab) == dict.fromkeys(TABLES, 0)
 
 
 def test_identity_does_not_outlive_the_transaction(saved, monkeypatch):

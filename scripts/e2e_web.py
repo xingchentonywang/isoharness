@@ -24,7 +24,11 @@ already running there (the container image, say), opens the page in Chromium
    choice), the charts of each sample's change against kσ, and the quality-check
    summary's links back to every step, and changing decisions on the way: the blank switch,
    a drift monitor left out of the d15N fit, the drift model, a monitor left out of
-   the elemental correction, and the d15N repeatability (the drift monitors' SD);
+   the elemental correction, and the d15N repeatability (the drift monitors' SD); and (finding R-29) that each
+   figure's drawing is an image named for its number, what it plots against what, its points, and the selected
+   one, that the figures' lines and gray marks reach 3:1 against the page, that the sequence's bars are at least
+   24 px wide, that the current step, the selected position and the chosen filter say so, and that each button
+   back from the quality checks names its check;
 5. checks that every value the results screen shows (mass, d15N, 1σ, d13C, 1σ, %N,
    %C, C:N, and the flags) equals, to the shown precision, the results table the
    service returns for the same decisions, built here from the processed
@@ -48,7 +52,16 @@ already running there (the container image, say), opens the page in Chromium
    and results screens at 400 px wide;
 10. loads the page afresh, checks the landing page at 400 px and 1440 px wide, follows
    the brand back to the home page and checks it at 400 px, and reads the example run
-   through its button.
+   through its button;
+11. (finding W-11, with W-12) adds two copies of the test run at once, each sample named by its
+   position, as S 20 in the first and S20 in the second; downloads the first run's configuration,
+   switches its blank correction On, and chooses it for the second run alone; checks the batch list, that
+   the second run's results follow that configuration (the service's table for it, and its blank switch)
+   and the first run's do not, that its results table, configuration, and workbook are its own, that the
+   combined results table equals each run's own table, that the combined Excel file names both
+   configurations and pairs the names that differ only in their spaces (Name matched), as the page does;
+   that a configuration naming another run gives the second run a note of its own (R-08); goes back to the
+   batch's configuration; and checks the sequence at 400 px wide.
 
 Any console error, page error, failed request, or HTTP error the test did not
 cause on purpose fails the run. Prints one result line; exits 1 on failure.
@@ -60,7 +73,6 @@ import csv
 import io
 import json
 import math
-import os
 import re
 import socket
 import subprocess
@@ -101,6 +113,12 @@ MOVED = {"lin": ["Effect of the linearity choice", "Sample size against the size
          "drift": ["Effect of the drift choice", "Drift monitors agree"],
          "cal": ["Calibration line", "Anchors bracket the samples", "Check standard"],    # the first from 1.4.12
          "elem": ["Elemental content"]}
+# Two checks the page shows when the engine sends their data (the anchors' material, and the elemental
+# correction judged at the anchors); without it the page shows neither, so the steps' lists above hold either way.
+ENGINE_CHECKS = {"cal": ("Anchors read as one material each", "C/N peak-area ratio"),
+                 "elem": ("Elemental correction at the anchors", "the elemental gate (")}
+# The Wong colors of the data marks, which keep their hue whatever their contrast (finding R-29), and white.
+WONG = {"#0072B2", "#D55E00", "#E69F00", "#56B4E9", "#CC79A7", "#009E73", "#F0E442", "#FFFFFF"}
 # The decisions the test makes, and the drift monitors it leaves out.
 EXCL_N, EXCL_E = 18, 55
 
@@ -189,9 +207,9 @@ def rows_of(text):
     return {int(r["Row"]): r for r in csv.DictReader(io.StringIO(text))}
 
 
-def variant(path: Path, samples: set, shift=0.0) -> bytes:
-    """The test run with each sample (its positions in samples) named S<position> and its N2 peak's
-    d15N moved by shift, as tests/test_batch.py builds it: the sample peak is the position's last
+def variant(path: Path, samples: set, shift=0.0, name="S{}") -> bytes:
+    """The test run with each sample (its positions in samples) named S<position>, or by the pattern name, and
+    its N2 peak's d15N moved by shift, as tests/test_batch.py builds it: the sample peak is the position's last
     mass-28 peak."""
     rows = list(csv.reader(io.StringIO(path.read_text(encoding="utf-8"))))
     h = rows[0]
@@ -201,7 +219,7 @@ def variant(path: Path, samples: set, shift=0.0) -> bytes:
     for i, r in enumerate(rows[1:], start=1):
         row = r[col["Row"]].strip() if r else ""
         if row in samples:
-            r[col["Identifier 1"]] = f"S{row}"
+            r[col["Identifier 1"]] = name.format(row)
             if shift and last28.get(row) == i and r[col["Is Ref _"]].strip() != "1":
                 r[col["d 15N/14N"]] = repr(float(r[col["d 15N/14N"]]) + shift)
     buf = io.StringIO()
@@ -278,6 +296,74 @@ def compare(page_rows, table, label):
 def sd(values):
     m = sum(values) / len(values)
     return math.sqrt(sum((v - m) ** 2 for v in values) / (len(values) - 1))
+
+
+def book_cells(path, table, label="workbook"):
+    """A downloaded workbook's computed Results sheet against a results table's rows, at every column of BOOK;
+    returns how many values LibreOffice computed."""
+    book = openpyxl.load_workbook(path, data_only=True)["Results"]
+    cells = 0
+    for row, rec in table.items():
+        for c, col in BOOK.items():
+            mine_v = rec[col]
+            theirs = book.cell(4 + row, c).value
+            theirs = theirs if isinstance(theirs, (int, float)) and not isinstance(theirs, bool) else None
+            check((mine_v == "") == (theirs is None), f"{label} row {row} {col}: {theirs!r} against {mine_v!r}")
+            if theirs is not None:
+                cells += 1
+                check(abs(float(mine_v) - theirs) <= 1e-9 * max(1.0, abs(theirs)),
+                      f"{label} row {row} {col}: {theirs!r} against {mine_v!r}")
+    return cells
+
+
+def results_rows(page):
+    """The values the results screen shows for each sample, as the cells read."""
+    return page.eval_on_selector_all(
+        'section[aria-label="Samples"] [role="table"] > [role="row"]:not(:first-child)',
+        """els => els.map(b => { const c = [...b.children].map(x => x.textContent);
+             return { r: c[0], id: c[1], amt: c[2], aN: c[3], dN: c[4], UN: c[5], dC: c[6], UC: c[7],
+                      pN: c[8], pC: c[9], cn: c[10],
+                      flags: [...b.children[11].children].map(x => x.getAttribute('title')) }; })""")
+
+
+def contrast(color, ground="#FFFFFF"):
+    """The WCAG 2 contrast ratio of two colors written #RRGGBB."""
+    def lum(h):
+        def lin(c):
+            c /= 255
+            return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+        h = h.lstrip("#")
+        r, g, b = (lin(int(h[i:i + 2], 16)) for i in (0, 2, 4))
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+    hi, lo = sorted((lum(color), lum(ground)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def figures(page, scr):
+    """Finding R-29 on the screen shown: each figure's drawing is an image whose name begins with the figure's
+    number and title and says what it plots against what and how many marks; every line and gray mark (the
+    axes, gray dots, error bars or rug ticks, lines, points, and rings; the bands and the grid aside) reaches
+    3:1 against the white page unless it is a Wong color of the data. Returns the names, by figure number."""
+    figs = page.eval_on_selector_all("figure.dc-figure", """fs => fs.map(f => {
+        const h = f.querySelector('h2, h3'), svg = f.querySelector('svg[role=img]');
+        return { head: h ? h.textContent.trim() : '', alt: svg ? svg.getAttribute('aria-label') : null,
+                 marks: svg ? [...svg.querySelectorAll(':scope > path')].map((p, i) => [i, p.getAttribute('stroke'),
+                   p.getAttribute('fill'), p.getAttribute('d') || '']) : [] }; })""")
+    names = {}
+    for f in figs:
+        num, _, title = f["head"].partition(" ")[2].partition(" ")
+        if f["alt"] is None:
+            continue            # a figure with nothing to draw says why in its text
+        check(f["alt"].startswith(f"Fig. {num}, {title}: ") and " against " in f["alt"]
+              and re.search(r"\b\d+ [a-z]", f["alt"].split(" against ", 1)[1]), f"{scr}: Fig. {num} is named {f['alt']!r}")
+        names[num] = f["alt"]
+        for i, stroke, fill, d in f["marks"]:
+            if i < 3 or not d:
+                continue
+            for what, c in (("stroke", stroke), ("fill", fill)):
+                if c and c != "none" and c.upper() not in WONG:
+                    check(contrast(c) >= 3.0, f"{scr}: Fig. {num}, mark {i}: its {what} {c} is {contrast(c):.2f}:1 against white")
+    return names
 
 
 def main(argv=None):
@@ -456,7 +542,7 @@ def main(argv=None):
                         expect(page.locator("figure", has_text=title)).to_have_count(1)
                     expect(page.get_by_text("26 positions ran before the background settled at position 27")).to_be_visible()
                     expect(page.get_by_text("under the 0.1‰ limit the FIRMS guide")).to_have_count(2)
-                    check(page.get_by_role("button", name=re.compile(r"^Step 1, ")).count() == 0,
+                    check(page.get_by_role("button", name=re.compile(r"Step 1, Instrument")).count() == 0,
                           "the instrument screen links to itself")
                 if scr == "setup":
                     expect(page.get_by_text("Package defaults, ea_irms " + ver + ".")).to_be_visible()
@@ -471,8 +557,22 @@ def main(argv=None):
                 else:
                     check(how.count() == 0, f"{scr}: an explanation on a screen that corrects nothing")
                 titles = page.locator('section[aria-label="Checks"] strong').all_text_contents()
+                extra = {t for t, _ in ENGINE_CHECKS.values()}
                 if scr in MOVED:
-                    check(titles == MOVED[scr], f"{scr}: its checks are {titles}, not {MOVED[scr]}")
+                    check([t for t in titles if t not in extra] == MOVED[scr], f"{scr}: its checks are {titles}, not {MOVED[scr]}")
+                    if scr in ENGINE_CHECKS and ENGINE_CHECKS[scr][0] in titles:
+                        box = page.locator('section[aria-label="Checks"] > div', has_text=ENGINE_CHECKS[scr][0])
+                        expect(box).to_contain_text(ENGINE_CHECKS[scr][1])
+                # finding R-29: the figures' names and marks, the current step, and the selected position
+                figures(page, scr)
+                rail = page.locator("nav[aria-label='Correction steps'] button[aria-current=step]")
+                expect(rail).to_have_count(1)
+                expect(rail).to_contain_text(BUTTONS[scr])
+                if scr not in ("results",):
+                    bars = page.locator(".dc-ribbon button")
+                    widths = bars.evaluate_all("bs => bs.map(b => b.getBoundingClientRect().width)")
+                    check(len(widths) == 56 and min(widths) >= 24 - 1e-6, f"{scr}: the sequence's bars are {min(widths):.1f} px at the least")
+                    expect(page.locator('.dc-ribbon button[aria-current="true"]')).to_have_count(1)
                 if scr in ("blank", "lin", "drift"):
                     for el in ("δ¹⁵N", "δ¹³C"):
                         expect(page.locator("figure", has_text="Change in " + el)).to_have_count(1)
@@ -515,6 +615,12 @@ def main(argv=None):
                     point.click()
                     expect(chart.get_by_role("button", name=re.compile(rf", position {EXCL_N}: .*Left out"))).to_have_count(1)
                     expect(chart).to_contain_text("12 of 13 in the fit")
+                    # R-29: the figure's name gives what it plots, its points, and the selected one, which is current
+                    alt = figures(page, scr)["1"]
+                    check(alt.startswith("Fig. 1, δ¹⁵N of the drift monitors: δ¹⁵N after linearity (‰) against position in the run, 13 points; ")
+                          and re.search(rf"the selected position is [^,]+, position {EXCL_N}: .*left out$", alt), f"the drift figure is named {alt!r}")
+                    expect(chart.locator('button.dc-hit[aria-current="true"]')).to_have_count(1)
+                    expect(page.locator('.dc-ribbon button[aria-current="true"]')).to_have_attribute("aria-label", re.compile(rf"^Position {EXCL_N}, "))
                     page.get_by_role("group", name="Model").get_by_role("button", name="Background").click()
                     expect(chart).to_contain_text("against background")
                 if scr == "elem":
@@ -522,18 +628,31 @@ def main(argv=None):
                     chart.get_by_role("button", name=re.compile(rf", position {EXCL_E}: ")).click()
                     expect(chart).to_contain_text("12 of 13 monitors used")
                 if scr == "qc":
-                    # every check of the run, each with a button back to the step it belongs to
-                    back = page.get_by_role("button", name="Step 1, Instrument")
+                    # every check of the run, each with a button back to the step it belongs to, which reads
+                    # Step 1, Instrument and is named for its check (finding R-29), so no two share a name
+                    back = page.get_by_role("button", name=re.compile(r"^Go to Step 1, Instrument, for "))
                     expect(back).to_have_count(5)
+                    labels = back.evaluate_all("bs => bs.map(b => [b.getAttribute('aria-label'), b.textContent.trim()])")
+                    check(len({a for a, _ in labels}) == 5 and {t for _, t in labels} == {"Step 1, Instrument"}
+                          and [a.split(", for ", 1)[1] for a, _ in labels] == titles[:5],
+                          f"the buttons back to the instrument read {labels}")
                     for step, names in MOVED.items():
-                        label = f"Step {SCREENS.index(step) + 1}, {BUTTONS[step]}"
-                        expect(page.get_by_role("button", name=label)).to_have_count(len(names))
-                    check(titles[5:] == [t for step in MOVED for t in MOVED[step]], f"quality checks listed as {titles}")
-                    for label, step in (("Step 1, Instrument", "inst"), ("Step 4, Linearity", "lin")):
-                        page.get_by_role("button", name=label).first.click()
+                        label = f"Go to Step {SCREENS.index(step) + 1}, {BUTTONS[step]}, for "
+                        for t in names:
+                            expect(page.get_by_role("button", name=label + t, exact=True)).to_have_count(1)
+                    check([t for t in titles[5:] if t not in extra] == [t for step in MOVED for t in MOVED[step]],
+                          f"quality checks listed as {titles}")
+                    for label, step in (("Go to Step 1, Instrument, for Carryover", "inst"),
+                                        ("Go to Step 4, Linearity, for Effect of the linearity choice", "lin")):
+                        page.get_by_role("button", name=label, exact=True).click()
                         heading(step)
                         page.locator("nav[aria-label='Correction steps'] button", has_text="Quality checks").click()
                         heading("qc")
+                if scr == "results":
+                    filters = page.get_by_role("group", name="Filter the samples").get_by_role("button")
+                    pressed = filters.evaluate_all("bs => bs.map(b => [b.textContent.trim(), b.getAttribute('aria-pressed')])")
+                    check([p for _, p in pressed] == ["true", "false", "false", "false"] and pressed[0][0].startswith("All "),
+                          f"the results filters read {pressed}")
                 if scr == "unc":
                     group = page.get_by_role("group", name="δ¹⁵N repeatability")
                     group.get_by_role("button", name="Drift monitors").click()
@@ -544,12 +663,7 @@ def main(argv=None):
                     page.get_by_role("button", name="Continue to " + BUTTONS[SCREENS[SCREENS.index(scr) + 1]]).first.click()
 
             # ---- the results screen against the service, decisions built here without the page
-            page_rows = page.eval_on_selector_all(
-                'section[aria-label="Samples"] [role="table"] > [role="row"]:not(:first-child)',
-                """els => els.map(b => { const c = [...b.children].map(x => x.textContent);
-                     return { r: c[0], id: c[1], amt: c[2], aN: c[3], dN: c[4], UN: c[5], dC: c[6], UC: c[7],
-                              pN: c[8], pC: c[9], cn: c[10],
-                              flags: [...b.children[11].children].map(x => x.getAttribute('title')) }; })""")
+            page_rows = results_rows(page)
             check(len(page_rows) >= 5, f"the results screen lists {len(page_rows)} samples")
             status, _, body = post(base, "/api/process", RUN)
             processed = json.loads(body)["config"]
@@ -619,18 +733,7 @@ def main(argv=None):
             compare(page_rows, rows_of(got["Results table"].read_text()), "results screen against the downloaded table")
 
             # the workbook: computed by LibreOffice, and holding the same values
-            book = openpyxl.load_workbook(got["Workbook"], data_only=True)["Results"]
-            cells = 0
-            for row, rec in round_trip.items():
-                for c, col in BOOK.items():
-                    mine_v = rec[col]
-                    theirs = book.cell(4 + row, c).value
-                    theirs = theirs if isinstance(theirs, (int, float)) and not isinstance(theirs, bool) else None
-                    check((mine_v == "") == (theirs is None), f"workbook row {row} {col}: {theirs!r} against {mine_v!r}")
-                    if theirs is not None:
-                        cells += 1
-                        check(abs(float(mine_v) - theirs) <= 1e-9 * max(1.0, abs(theirs)),
-                              f"workbook row {row} {col}: {theirs!r} against {mine_v!r}")
+            cells = book_cells(got["Workbook"], round_trip)
             check(cells > 100, f"only {cells} computed values in the workbook")
             stats["book"] = cells
 
@@ -752,15 +855,17 @@ def main(argv=None):
             with page.expect_request(lambda r: r.url.endswith("/api/samplesheet/read") and r.method == "POST"):
                 page.set_input_files("#dc-sheet", str(sheet))
             summary = page.locator('[data-dc="sheet-summary"]')
-            # S21 and S24 of the two copies match; S2 matches none of S20 to S29, whose next character is a digit
+            # S21 and S24 of the two copies match; S2 matches none of S20 to S29, whose next character is a digit.
+            # Findings R-30 and R-34: the run in which no group of replicates formed is named.
             expect(summary).to_have_text("4 of 78 samples matched (4 by the exact name); 74 not in the sheet. "
-                                         "2 groups of replicates in one run will be compared.", timeout=30000)
+                                         "2 groups of replicates within a run will be compared; none formed in "
+                                         "20260915_raw.csv.", timeout=30000)
             matched = page.locator('[aria-label="How each sample matched the sheet"] [role=row]')
             check(matched.count() == 79, f"the match table has {matched.count() - 1} rows, not 78")
             shot("1440-sample-sheet.png")
             page.select_option("#dc-sheet-id", "Alt ID")
             expect(summary).to_have_text("0 of 78 samples matched; 78 not in the sheet. "
-                                         "No sample has replicates in one run.", timeout=30000)
+                                         "No group of replicates formed in any run.", timeout=30000)
             page.select_option("#dc-sheet-id", "Sample ID")
             expect(summary).to_contain_text("4 of 78 samples matched", timeout=30000)
             page.get_by_role("button", name="Start the corrections").click()
@@ -929,6 +1034,178 @@ def main(argv=None):
             check(page.get_by_role("heading", level=1, name="Correct a run").count() == 1,
                   "the upload screen has no heading once a run is read")
 
+            # ---- finding W-11: a configuration for one run of a batch. With W-12: the two copies name each sample
+            # S 20 and S20, which the samples measured in more than one run pair with the spaces taken out.
+            page.goto(base + "/ea-irms")
+            copy_a, copy_b = work / "20260918_copy_a.csv", work / "20260919_copy_b.csv"
+            copy_a.write_bytes(variant(RUN, samples, name="S {}"))
+            copy_b.write_bytes(variant(RUN, samples, name="S{}"))
+            page.set_input_files("#dc-export", [str(copy_a), str(copy_b)])
+            expect(page.get_by_text("Batch of 2 runs")).to_be_visible(timeout=60000)
+            listed = page.locator('section[aria-label="Runs in this batch"] li')
+            for k in range(2):
+                expect(listed.nth(k)).to_contain_text("Configuration: the batch’s, the package defaults")
+            batch_back = page.get_by_role("button", name=re.compile(r"^Use the batch’s configuration for "))
+            expect(batch_back).to_have_count(0)
+            # the first run's configuration, downloaded from the page, with one switch changed: the blank On
+            page.get_by_role("button", name=f"Show {copy_a.name}").click()
+            page.get_by_role("button", name="Start the corrections").click()
+            heading("inst")
+            page.locator("nav[aria-label='Correction steps'] button", has_text="Results").click()
+            heading("results")
+            files = page.locator('section[aria-label="Files and methods"]')
+            with page.expect_download(timeout=30000) as dl:
+                files.get_by_role("button", name=re.compile("^Configuration")).click()
+            cfg_a = work / ("w11_" + dl.value.suggested_filename)
+            dl.value.save_as(str(cfg_a))
+            expect(files.get_by_role("button", name=re.compile("^Configuration"))).to_be_enabled(timeout=30000)
+            status, _, body = post(base, "/api/config/read", cfg_a)
+            check(status == 200, f"/api/config/read answered {status} for {cfg_a.name}")
+            from_a = json.loads(body)["config"]
+            check(from_a["blank_correction"] == "Auto" and from_a["run_file"] == copy_a.name,
+                  f"the first run's configuration reads {from_a['blank_correction']!r} for {from_a['run_file']!r}")
+            own = dict(from_a, blank_correction="On")
+            own_file = work / "copy_b_blank_on.json"
+            own_file.write_text(json.dumps(own))
+            # chosen for the second run alone, on its row of the batch
+            page.get_by_role("navigation", name="Main").get_by_role("button", name="EA-IRMS").click()
+            with page.expect_request(lambda r: r.url.endswith("/api/process") and r.method == "POST"):
+                page.set_input_files("#dc-run-config-2", str(own_file))
+            expect(page.locator(".dc-toast").get_by_text(f"{copy_b.name} was processed again with its own configuration, "
+                                                         f"{own_file.name}; its decisions now start from it.")).to_be_visible(timeout=60000)
+            expect(listed.nth(0)).to_contain_text("Configuration: the batch’s, the package defaults")
+            expect(listed.nth(1)).to_contain_text(f"Configuration: its own, {own_file.name}")
+            expect(page.get_by_role("button", name=f"Use the batch’s configuration for {copy_b.name}", exact=True)).to_have_count(1)
+            check("note" not in listed.nth(1).inner_text(), f"batch row 2 reads {listed.nth(1).inner_text()!r}")
+            shot("1440-run-config.png")
+            status, _, body = post(base, "/api/results.csv", copy_b, {"config": json.dumps(own)})
+            own_text = body.decode()
+            own_table = rows_of(own_text)
+            status, _, body = post(base, "/api/results.csv", copy_a)
+            table_a = rows_of(body.decode())
+            status, _, body = post(base, "/api/results.csv", copy_b)
+            plain_b = rows_of(body.decode())
+            # the first run is as the package defaults give it; its own table is the one the combined table holds
+            page.get_by_role("button", name="Start the corrections").click()
+            heading("results")
+            expect(page.get_by_text("Run 1 of 2")).to_be_visible()
+            compare(results_rows(page), table_a, "the first run, with the batch's configuration")
+            with page.expect_download(timeout=60000) as dl:
+                files.get_by_role("button", name=re.compile("^Results table")).click()
+            table_own_a = work / ("w11_" + dl.value.suggested_filename)
+            dl.value.save_as(str(table_own_a))
+            expect(files.get_by_role("button", name=re.compile("^Results table"))).to_be_enabled(timeout=60000)
+            # the second run follows its own configuration: the service's table for it, and its blank switch
+            page.get_by_role("navigation", name="Runs").get_by_role("button", name=re.compile(copy_b.name)).click()
+            expect(page.get_by_text("Run 2 of 2")).to_be_visible()
+            rows_b = results_rows(page)
+            n_b, _, _ = compare(rows_b, own_table, "the second run, with its own configuration")
+            moved_b = sum(1 for r in rows_b if not agree(r["dN"], plain_b[int(r["r"])]["d15N (permil)"], 2)[0])
+            check(moved_b > 0, "the second run's own configuration moved no shown d15N")
+            page.locator("nav[aria-label='Correction steps'] button", has_text="Blank").click()
+            heading("blank")
+            expect(page.get_by_role("group", name="Blank correction").get_by_role("button", name="On")).to_have_attribute("aria-pressed", "true")
+            page.locator("nav[aria-label='Correction steps'] button", has_text="Setup").click()
+            heading("setup")
+            expect(page.get_by_text(f"From {own_file.name}.")).to_be_visible()
+            page.locator("nav[aria-label='Correction steps'] button", has_text="Results").click()
+            heading("results")
+            # its workbook, results table, and configuration are its own
+            got_b = {}
+            for label, timeout in (("Workbook", 180000), ("Results table", 60000), ("Configuration", 30000)):
+                with page.expect_download(timeout=timeout) as dl:
+                    files.get_by_role("button", name=re.compile("^" + label)).click()
+                got_b[label] = work / ("w11_" + dl.value.suggested_filename)
+                dl.value.save_as(str(got_b[label]))
+                expect(files.get_by_role("button", name=re.compile("^" + label))).to_be_enabled(timeout=timeout)
+            diff, _ = table_diff(got_b["Results table"].read_text(), own_text)
+            check(not diff, "the second run's results table is not its configuration's: " + "; ".join(diff[:3]))
+            status, _, body = post(base, "/api/config/read", got_b["Configuration"])
+            cfg_b = json.loads(body)["config"]
+            check(cfg_b["blank_correction"] == "On" and cfg_b["run_file"] == copy_b.name,
+                  f"the second run's configuration reads {cfg_b['blank_correction']!r} for {cfg_b['run_file']!r}")
+            cells_b = book_cells(got_b["Workbook"], own_table, "the second run's workbook")
+            check(cells_b > 100, f"only {cells_b} computed values in the second run's workbook")
+            # the combined results: each run's rows are its own table, and the Excel file names both configurations
+            comb = {}
+            for label, key in (("Combined results, all 2 runs", "xlsx"), ("Combined results table", "csv")):
+                with page.expect_download(timeout=120000) as dl:
+                    files.get_by_role("button", name=re.compile("^" + label)).click()
+                comb[key] = work / ("w11_" + dl.value.suggested_filename)
+                dl.value.save_as(str(comb[key]))
+                expect(files.get_by_role("button", name=re.compile("^" + label))).to_be_enabled(timeout=120000)
+            clines = comb["csv"].read_text().splitlines()
+            check(len(clines) == 113, f"the combined table has {len(clines)} lines, not 113")
+            for k, (stem, own_t) in enumerate(((copy_a.stem, table_own_a.read_text()), (copy_b.stem, got_b["Results table"].read_text()))):
+                check(clines[1 + 56 * k:1 + 56 * (k + 1)] == [stem + "," + ln for ln in own_t.splitlines()[1:]],
+                      f"the combined table's rows of {stem} are not that run's own table")
+            cb = openpyxl.load_workbook(comb["xlsx"])
+            readme = [c.value for c in cb["README"]["B"] if c.value]
+            want = (f"Configuration: the package defaults for run 1; {own_file.name} for run 2. Each run's choices were written "
+                    "into its configuration; the Runs sheet shows which corrections were in force, and in its Configuration "
+                    "column which configuration each run used.")
+            check(want in readme, f"the combined README names the configurations as {[t for t in readme if t.startswith('Configuration')]}")
+            # isoharness 0.5.0: config_names gives each run's configuration its own cell on Runs
+            runs_rows = list(cb["Runs"].iter_rows(values_only=True))
+            ccol = runs_rows[0].index("Configuration") if "Configuration" in runs_rows[0] else None
+            check(ccol is not None and [r[ccol] for r in runs_rows[1:3]] == ["the package defaults", own_file.name],
+                  f"the Runs sheet names the configurations as {[r[ccol] for r in runs_rows[1:3]] if ccol is not None else None}")
+            runs_c = list(cb["Runs"].iter_rows(values_only=True))
+            col = runs_c[0].index("Blank subtracted")
+            check([r[col] for r in runs_c[1:]] == ["no", "N only"], f"the Runs sheet's blanks read {[r[col] for r in runs_c[1:]]}")
+            # W-12: S 20 of the first run and S20 of the second are one sample, matched with the spaces taken out
+            rep = list(cb["Repeats"].iter_rows(values_only=True))
+            ix = {h: i for i, h in enumerate(rep[0])}
+            check("Name matched" in ix and len(rep) - 1 == 52, f"the Repeats sheet has {len(rep) - 1} rows, headed {rep[0]}")
+            for r in rep[1:]:
+                pos, first = r[ix["Row"]], r[ix["Run"]] == copy_a.stem
+                check(r[ix["Name"]] == f"S {pos}" and r[ix["Identifier"]] == (f"S {pos}" if first else f"S{pos}")
+                      and r[ix["Name matched"]] == ("as written" if first else "spaces ignored") and r[ix["Runs"]] == 2,
+                      f"a Repeats row reads {r}")
+            reps = page.locator('[aria-label="Samples measured in more than one run"] [role=row]')
+            check(reps.count() - 1 == 26, f"{reps.count() - 1} samples measured in more than one run, not 26")
+            for i in range(1, reps.count()):
+                cell = reps.nth(i).locator("[role=cell]").first.inner_text().split("\n")
+                check(len(cell) == 2 and cell[1] == "with " + cell[0].replace(" ", "") + ", spaces ignored",
+                      f"the page pairs {cell}")
+            expect(page.locator('section[aria-label="All runs"]')).to_contain_text("with the spaces taken out (all 26)")
+            # R-08 per run: a configuration naming another run, chosen for the second run, gives it a note of its own
+            page.get_by_role("navigation", name="Main").get_by_role("button", name="EA-IRMS").click()
+            with page.expect_request(lambda r: r.url.endswith("/api/process") and r.method == "POST"):
+                page.set_input_files("#dc-run-config-2", str(got["Configuration"]))
+            expect(page.locator(".dc-toast").get_by_text(f"its own configuration, {got['Configuration'].name}")).to_be_visible(timeout=60000)
+            expect(listed.nth(1)).to_contain_text("Read without errors; 1 note on the configuration")
+            check("note" not in listed.nth(0).inner_text(), f"batch row 1 reads {listed.nth(0).inner_text()!r}")
+            # a configuration for the batch processes the run that takes it, and the other keeps its own
+            with page.expect_request(lambda r: r.url.endswith("/api/process") and r.method == "POST"):
+                page.set_input_files("#dc-config", str(work / "lab-config.json"))
+            expect(page.locator(".dc-toast").get_by_text(
+                f"The run that takes the batch’s configuration was processed again with lab-config.json; the decisions now "
+                f"start from it. {copy_b.name} keeps its own configuration.")).to_be_visible(timeout=60000)
+            expect(listed.nth(0)).to_contain_text("Configuration: the batch’s, lab-config.json")
+            expect(listed.nth(1)).to_contain_text(f"Configuration: its own, {got['Configuration'].name}")
+            # and the second run goes back to the batch's
+            with page.expect_request(lambda r: r.url.endswith("/api/process") and r.method == "POST"):
+                page.get_by_role("button", name=f"Use the batch’s configuration for {copy_b.name}", exact=True).click()
+            expect(page.locator(".dc-toast").get_by_text(f"{copy_b.name} was processed again with the batch’s configuration, "
+                                                         "lab-config.json; its decisions now start from it.")).to_be_visible(timeout=60000)
+            expect(listed.nth(1)).to_contain_text("Configuration: the batch’s, lab-config.json")
+            expect(batch_back).to_have_count(0)
+            check("note" not in listed.nth(1).inner_text(), f"batch row 2 reads {listed.nth(1).inner_text()!r}")
+            # R-29 at 400 px: the sequence keeps 24 px bars and scrolls within its box, not the page
+            page.set_viewport_size({"width": 400, "height": 1000})
+            page.get_by_role("button", name="Start the corrections").click()
+            page.locator("nav[aria-label='Correction steps'] button", has_text="Drift").click()
+            heading("drift")
+            widths = page.locator(".dc-ribbon button").evaluate_all("bs => bs.map(b => b.getBoundingClientRect().width)")
+            box = page.locator(".dc-ribbon").evaluate("t => { const s = t.closest('.dc-scroll'); return [s.scrollWidth, s.clientWidth]; }")
+            check(min(widths) >= 24 - 1e-6 and box[0] > box[1], f"at 400 px the bars are {min(widths):.1f} px and the strip {box}")
+            wide = page.evaluate("document.documentElement.scrollWidth")
+            check(wide <= 400, f"the drift screen is {wide} px wide at a 400 px viewport")
+            shot("400-drift.png")
+            page.set_viewport_size({"width": 1440, "height": 1000})
+            stats["own"] = (n_b, moved_b, cells_b, len(rep) - 1)
+
             context.close()
             browser.close()
         check(not noise, "unexpected console errors or failed requests:\n  " + "\n  ".join(noise))
@@ -954,7 +1231,10 @@ def main(argv=None):
           f"run's own table within {stats['batch'][1]:.1e} relative, {stats['batch'][2]} repeat analyses; "
           f"a sample sheet matched and carried into {stats['sheet'][0]} rows of the combined table, run information "
           f"on {stats['sheet'][1]} runs and in a run's workbook; one run's configuration kept to that run in a "
-          f"batch, the other taking its own {stats['scoped']} monitors; "
+          f"batch, the other taking its own {stats['scoped']} monitors; a run with a configuration of its own "
+          f"({stats['own'][0]} samples equal to the service's table for it, {stats['own'][1]} d15N values moved by it, "
+          f"{stats['own'][2]} values of its workbook), the combined table equal to each run's own, and "
+          f"{stats['own'][3]} repeat analyses paired with the spaces taken out; "
           f"0 console errors, 0 failed requests; screenshots in {shots}")
     return 0
 

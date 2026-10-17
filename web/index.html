@@ -19,8 +19,9 @@ header { border-bottom: 1px solid var(--rule); }
 nav { flex: 1 1 auto; display: flex; flex-wrap: wrap; gap: 2px 8px; }
 nav a { display: inline-flex; align-items: center; min-height: 44px; padding: 10px 8px 8px; border-bottom: 2px solid transparent; color: var(--text); font-size: 15px; text-decoration: none; }
 nav a:hover { color: var(--ink); border-bottom-color: var(--ink); }
-.api { display: inline-flex; align-items: center; min-height: 44px; padding: 0 4px; color: var(--text); font-size: 14px; font-weight: 600; text-decoration: none; }
+.api { display: inline-flex; align-items: center; gap: 4px; min-height: 44px; padding: 0 4px; color: var(--text); font-size: 14px; font-weight: 600; text-decoration: none; }
 .api:hover { color: var(--ink); }
+.api svg { flex: 0 0 auto; }
 main { max-width: 1360px; margin: 0 auto; padding: 28px 24px 56px; display: flex; flex-direction: column; gap: 40px; }
 .intro { max-width: 860px; padding-top: 24px; display: flex; flex-direction: column; gap: 22px; }
 h1 { margin: 0; font-family: 'Newsreader', Georgia, serif; font-weight: 400; font-size: clamp(40px, 4.6vw, 64px); line-height: 1.04; letter-spacing: -0.015em; text-wrap: balance; }
@@ -51,7 +52,7 @@ footer .bar { padding-block: 18px 28px; color: var(--muted); font-size: 13.5px; 
 <div class="bar">
 <a class="brand" href="./" aria-label="isoharness, all instruments">isoharness</a>
 <nav aria-label="Main"><a href="ea-irms">EA-IRMS</a></nav>
-<a class="api" href="api/docs">API</a>
+<a class="api" href="https://github.com/xingchentonywang/isoharness#the-api" target="_blank" rel="noopener" aria-label="API, described in the README on GitHub, which opens in a new tab">API<svg width="11" height="11" viewBox="0 0 12 12" aria-hidden="true"><path d="M4.5 2.5h5v5M9.5 2.5L3 9" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"></path></svg></a>
 </div>
 </header>
 

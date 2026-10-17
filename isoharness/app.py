@@ -9,12 +9,15 @@ The site itself (``web/``) is served from the same address: the page at ``/``,
 the preview port at ``/engine.js`` (``port/engine.js``, the file CI checks).
 Uploads are limited per client address in any hour: workbooks, which LibreOffice
 computes, to ``ISOHARNESS_UPLOADS_PER_HOUR`` (default 60), and the requests the engine
-answers alone (processing a run, the results tables, reading a configuration) to
+answers alone (processing a run, the results tables, reading a configuration or writing one
+as Excel, and the sample sheets) to
 ``ISOHARNESS_READS_PER_HOUR`` (default 600, from isoharness 0.2.0, since a batch sends
 one request per run); 0 turns either off. Several runs can be combined into one results
 table (isoharness 0.2.0), at most ``ISOHARNESS_MAX_BATCH_RUNS`` (default 20) in a request.
 A sample sheet and each run's information (isoharness 0.3.0) go with the request that needs
-them, as the export does, and are read for that request only.
+them, as the export does, and are read for that request only. A request body is counted as it
+arrives and refused once it passes the upload limit (review finding R-25, BodyLimit), and the
+API's documentation page is served only with ``ISOHARNESS_API_DOCS=1`` (R-28).
 
     uvicorn isoharness.app:app --host 0.0.0.0 --port 8000
 """
@@ -26,16 +29,19 @@ import logging
 import os
 import re
 import shutil
+import signal
+import subprocess
 import tempfile
 import threading
 import time
 from collections import OrderedDict, deque
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, asynccontextmanager, contextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.datastructures import Headers, MutableHeaders
 
 from ea_irms.labconfig import LabConfigError, config_to_xlsx, read_config_json, read_lab_config
 from ea_irms.metadata import (MAX_ROWS, SHEET_SUFFIXES, SampleSheetError, clean_run_info, match_positions,
@@ -103,7 +109,9 @@ PORT_ENGINE = ROOT / "port" / "engine.js"
 # warmup/, where the Dockerfile copies it; in the repository, in tests/data/.
 EXAMPLE = next((p for p in (ROOT / "warmup" / "20260915_raw.csv",
                             ROOT / "tests" / "data" / "20260915_raw.csv") if p.is_file()), None)
-LIMITED = ("/api/process", "/api/workbook", "/api/results.csv", "/api/config/read",
+# Every POST endpoint is limited (tests/test_hardening.py checks that none is missing); /api/config.xlsx
+# joined the others under the reads allowance with review finding R-32.
+LIMITED = ("/api/process", "/api/workbook", "/api/results.csv", "/api/config/read", "/api/config.xlsx",
            "/api/batch/results.xlsx", "/api/batch/results.csv",
            "/api/samplesheet/read", "/api/samplesheet/template.xlsx")
 BATCH = ("/api/batch/results.xlsx", "/api/batch/results.csv")
@@ -113,15 +121,38 @@ BATCH = ("/api/batch/results.xlsx", "/api/batch/results.csv")
 # has a limit of its own.
 HEAVY = ("/api/workbook",)
 WINDOW_S = 3600.0
-# The page's own scripts and styles, Google Fonts, and calls back to this address.
+# The page's own scripts and styles, Google Fonts, and calls back to this address. style-src keeps
+# 'unsafe-inline' (review finding R-35) because the pages set their styles inline: each page has a
+# <style> block, and the EA-IRMS page's markup has hundreds of style attributes, which hashes could
+# allow only one by one, with every edit to the page. An inline style cannot run script, and script-src
+# allows no inline script.
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' "
        "https://fonts.googleapis.com; font-src https://fonts.gstatic.com; "
        "img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; "
        "base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+# On every response. X-Frame-Options (review finding R-35) tells older browsers what frame-ancestors
+# 'none' in the pages' policy tells current ones: no page, of this site or another, may show these
+# responses in a frame.
+SECURITY_HEADERS = (("X-Content-Type-Options", "nosniff"), ("Referrer-Policy", "no-referrer"),
+                    ("X-Frame-Options", "DENY"))
+# The room a request body has beyond the upload limit, for the form's own fields and boundaries.
+FORM_ROOM = 1024 * 1024
 
 
 def max_upload_bytes() -> int:
     return int(float(os.environ.get("ISOHARNESS_MAX_UPLOAD_MB", "10")) * 1024 * 1024)
+
+
+def max_body_bytes() -> int:
+    """The most a request body may hold (review finding R-25): the upload limit and FORM_ROOM."""
+    return max_upload_bytes() + FORM_ROOM
+
+
+def api_docs() -> bool:
+    """Whether the API's documentation page (/api/docs) and its OpenAPI description (/api/openapi.json)
+    are served: only with ISOHARNESS_API_DOCS=1 (review finding R-28), because the page loads its scripts
+    from a CDN and so is served without the content policy. Read once, when the app is built."""
+    return os.environ.get("ISOHARNESS_API_DOCS", "").strip() == "1"
 
 
 def uploads_per_hour() -> int:
@@ -217,14 +248,65 @@ class UploadLimiter:
 limiter = UploadLimiter()
 
 
+_libreoffice_version: dict = {}
+_libreoffice_version_lock = threading.Lock()
+
+
+def libreoffice_version() -> str | None:
+    """The first line of ``soffice --version``, such as "LibreOffice 25.2.3.2 520(Build:2)", read once and
+    kept (review finding R-26). The image takes LibreOffice from Debian's archive without a pinned
+    version, so /api/version says which one a deployment got. None without LibreOffice, or when it does
+    not answer within 30 s. The read starts with the service (_lifespan), so requests find it done."""
+    with _libreoffice_version_lock:
+        if "value" not in _libreoffice_version:
+            _libreoffice_version["value"] = _read_libreoffice_version()
+        return _libreoffice_version["value"]
+
+
+def _read_libreoffice_version(timeout: float = 30.0) -> str | None:
+    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    if not soffice:
+        return None
+    try:
+        # A process group of its own, as in ea_irms.workbook.bake_values, so a LibreOffice that does not
+        # answer is stopped with everything it started. --version leaves the user profile alone.
+        proc = subprocess.Popen([soffice, "--version"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        return None
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        proc.communicate()
+        return None
+    if proc.returncode != 0:
+        return None
+    lines = [line.strip() for line in out.decode("utf-8", "replace").splitlines() if line.strip()]
+    return lines[0][:200] if lines else None
+
+
+@asynccontextmanager
+async def _lifespan(_app):
+    # LibreOffice's version is read in the background while the service starts, so neither the start
+    # nor a request waits for it.
+    threading.Thread(target=libreoffice_version, name="libreoffice-version", daemon=True).start()
+    yield
+
+
+_DOCS = api_docs()
 app = FastAPI(
     title="isoharness API",
     version=__version__,
     description="Stable isotope data reduction. These endpoints serve the EA-IRMS page, with ea_irms. "
                 "Uploaded files are deleted as soon as they are processed, and nothing is stored.",
-    docs_url="/api/docs",
+    docs_url="/api/docs" if _DOCS else None,
     redoc_url=None,
-    openapi_url="/api/openapi.json",
+    openapi_url="/api/openapi.json" if _DOCS else None,
+    lifespan=_lifespan,
 )
 
 
@@ -249,30 +331,118 @@ async def limit_uploads(request: Request, call_next):
     return await call_next(request)
 
 
-@app.middleware("http")
-async def security_headers(request: Request, call_next):
-    response = await call_next(request)
-    response.headers.setdefault("X-Content-Type-Options", "nosniff")
-    response.headers.setdefault("Referrer-Policy", "no-referrer")
-    if not request.url.path.startswith("/api/"):
-        # The API's own docs page loads its scripts from a CDN, so it keeps no policy.
-        response.headers.setdefault("Content-Security-Policy", CSP)
-    return response
+def _too_large(path: str, close: bool = False) -> JSONResponse:
+    """The refusal of a request body over max_body_bytes(), in the words the service has always used."""
+    limit = max_upload_bytes() // (1024 * 1024)
+    batch = path in BATCH
+    what = "the exports together are" if batch else "the upload is"
+    return JSONResponse({"detail": f"{what} larger than the {limit} MB this service accepts"
+                                   f"{' in one request' if batch else ''}"},
+                        status_code=413, headers={"Connection": "close"} if close else None)
 
 
-@app.middleware("http")
-async def refuse_large_bodies(request: Request, call_next):
-    """Turn away a declared body far over the limit before reading it. The form's
-    own fields and boundaries get 1 MB of room; the file itself is checked again
-    as it is written."""
-    declared = request.headers.get("content-length", "")
-    if declared.isdigit() and int(declared) > max_upload_bytes() + 1024 * 1024:
-        limit = max_upload_bytes() // (1024 * 1024)
-        what = ("the exports together are" if request.url.path in BATCH else "the upload is")
-        return JSONResponse({"detail": f"{what} larger than the {limit} MB this service accepts"
-                                       f"{' in one request' if request.url.path in BATCH else ''}"},
-                            status_code=413)
-    return await call_next(request)
+class _BodyTooLarge(HTTPException):
+    """Raised to the app from receive once the body has passed the limit, so that it stops reading."""
+
+    def __init__(self):
+        super().__init__(413, "the request body is larger than this service accepts")
+
+
+class BodyLimit:
+    """Refuse a request body over max_body_bytes() as it arrives (review finding R-25).
+
+    A Content-Length over the limit is refused at once, before any of the body is read. A body sent
+    without one, in chunks, is counted as it arrives: once it passes the limit, the app reading it is
+    stopped and the request refused, where until now Starlette stored the whole form before an endpoint
+    looked at its size. Both refusals are a 413 with the message the service gave before, and the
+    endpoints still check each file as they read it, with messages that name the file. A chunked body
+    could go on without end, so its refusal also closes the connection. A body with a Content-Length
+    ends where it says, so after that refusal the server reads the rest and discards it, and the client,
+    which may still be sending, gets the answer."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        limit = max_body_bytes()
+        declared = Headers(scope=scope).get("content-length", "")
+        if declared.isdigit() and int(declared) > limit:
+            await _too_large(scope["path"])(scope, receive, send)
+            return
+        received, over, started = 0, False, False
+
+        async def counted_receive():
+            nonlocal received, over
+            if over:
+                raise _BodyTooLarge()
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > limit:
+                    over = True
+                    raise _BodyTooLarge()
+            return message
+
+        async def checked_send(message):
+            nonlocal started
+            if over and not started:
+                return      # the refusal below answers in place of what the app sends now
+            if message["type"] == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            await self.app(scope, counted_receive, checked_send)
+        except Exception:
+            if not over or started:
+                raise
+        if over and not started:
+            await _too_large(scope["path"], close=True)(scope, receive, send)
+
+
+class SecurityHeaders:
+    """The security headers on every response the app sends, refusals included, since this middleware
+    sits outside the others; the pages also get the content policy. The API's answers get no policy, as
+    before: its documentation page, served only with ISOHARNESS_API_DOCS=1, loads its scripts from a CDN.
+    A response that sets one of these headers itself keeps its own value."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        page = not scope["path"].startswith("/api/")
+
+        async def send_with_headers(message):
+            if message["type"] == "http.response.start":
+                message.setdefault("headers", [])
+                headers = MutableHeaders(scope=message)
+                for name, value in SECURITY_HEADERS:
+                    headers.setdefault(name, value)
+                if page:
+                    headers.setdefault("Content-Security-Policy", CSP)
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
+
+
+# The last middleware added runs first: SecurityHeaders, then BodyLimit, then limit_uploads. A body over
+# the limit is refused before it counts toward the hour's allowance, as before, and every refusal
+# carries the security headers.
+app.add_middleware(BodyLimit)
+app.add_middleware(SecurityHeaders)
+
+
+@app.exception_handler(500)
+async def _server_error(request: Request, exc: Exception):
+    """The answer to an error the service did not expect, as Starlette words it, with the security headers
+    (review finding R-35): Starlette sends it from outside every middleware added here."""
+    return PlainTextResponse("Internal Server Error", status_code=500, headers=dict(SECURITY_HEADERS))
 
 
 def _stem(name: str) -> str:
@@ -440,8 +610,11 @@ def client(request: Request):
 
 @app.get("/api/version")
 def version():
+    """The versions, whether LibreOffice is present, and which LibreOffice (review finding R-26: read once
+    when the service starts, see libreoffice_version; null without it)."""
     return {"isoharness": __version__, "ea_irms": VERSION,
-            "libreoffice": bool(shutil.which("soffice") or shutil.which("libreoffice"))}
+            "libreoffice": bool(shutil.which("soffice") or shutil.which("libreoffice")),
+            "libreoffice_version": libreoffice_version()}
 
 
 @app.get("/api/defaults")
@@ -602,15 +775,22 @@ def _batch(files: list[UploadFile], configs: str | None, run_dates: str | None, 
 def batch_results_xlsx(files: list[UploadFile] = File(...), configs: str | None = Form(None),
                        run_dates: str | None = Form(None), config_name: str | None = Form(None),
                        sample_sheet: UploadFile | None = File(None), id_column: str | None = Form(None),
-                       run_infos: str | None = Form(None)):
+                       run_infos: str | None = Form(None), config_names: str | None = Form(None)):
     """Several runs' results in one Excel file (isoharness 0.2.0): Results, every position of every run
     with a Run column first; Runs, one row per run; Repeats, the samples measured in more than one run.
     ``configs`` is a JSON list with one configuration per file, or one object for all of them;
     ``run_dates`` a JSON list of dates or nulls. Each run is corrected on its own. One sample sheet
     goes with all the runs, and ``run_infos`` is a JSON list with each run's information, or one
-    object for all of them (0.3.0)."""
+    object for all of them (0.3.0). ``config_names`` is a JSON list with the name of each run's configuration
+    (or null for the package defaults); with it the Runs sheet gets a Configuration column (0.5.0, finding
+    W-11), while ``config_name`` stays the one line the README sheet gives."""
     sheet = _sheet(sample_sheet, id_column)
     runs = _batch(files, configs, run_dates, sheet, run_infos)
+    if config_names is not None and config_names.strip():
+        for r, cname in zip(runs, _json_list(config_names, "config_names", len(runs))):
+            if cname is not None and not isinstance(cname, str):
+                raise HTTPException(422, "config_names must hold a name or null for each file")
+            r.config_name = (cname or "").strip()[:200] or None
     name = f"combined_{len(runs)}_run{'s' if len(runs) != 1 else ''}_results_ea_irms_v{VERSION}.xlsx"
     data = combined_xlsx(runs, (config_name or "").strip()[:200] or None, sheet)
     notes = [f"{r.file}: {n}" for r in runs for n in r.config_notes]
@@ -775,9 +955,13 @@ def preview_port():
 
 
 class _Site(StaticFiles):
-    """The page's files, revalidated on each load so a new release shows at once."""
+    """The page's files, revalidated on each load so a new release shows at once. Source maps are not
+    served (review finding R-35): a request for one is answered 404, as for a file that is not there, and
+    the image leaves them out (.dockerignore)."""
 
     async def get_response(self, path, scope):
+        if path.lower().endswith(".map"):     # path is the file's own path, after StaticFiles normalized it
+            raise HTTPException(404)
         response = await super().get_response(path, scope)
         response.headers.setdefault("Cache-Control", "no-cache")
         return response
@@ -799,4 +983,4 @@ if (WEB / "index.html").is_file():
 else:
     @app.get("/")
     def root():
-        return {"service": "isoharness", "version": __version__, "docs": "/api/docs"}
+        return {"service": "isoharness", "version": __version__, "docs": "/api/docs" if _DOCS else None}

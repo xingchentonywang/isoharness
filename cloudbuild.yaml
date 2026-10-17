@@ -1,0 +1,151 @@
+# Cloud Build for isoharness: test the commit, then deploy it (isoharness 0.5.0).
+#
+# The Cloud Build trigger that deploys the service on a push to main runs this file once it is set to
+# "Cloud Build configuration file (yaml or json)", location cloudbuild.yaml (DEPLOY.md, Deploy only after the
+# tests pass). Every step must succeed before Push starts, so a commit whose tests fail is never deployed and
+# the service keeps the revision it has. The steps:
+#
+#   Build      the image Cloud Run will run, from the Dockerfile, with the classic builder (no BuildKit)
+#   Database   Postgres 16 for the store and isolation tests, as a container named pg on this build's network
+#   Tests      the whole test suite, as the Engine and API job of GitHub's CI runs it; none may be skipped
+#   Port       the browser's preview port against the engine, the cases of CI and two more
+#   Smoke      the new image started as a container named app, and scripts/smoke.py against it
+#   Push       the image to Artifact Registry
+#   Deploy     a new revision of the Cloud Run service with that image
+#
+# Build, Database and Port start together; Tests waits for Database, Smoke for Build, Push for all of them.
+# The page's browser test (scripts/e2e_web.py) runs in GitHub's CI only.
+#
+# The substitutions below are the ones Cloud Run's continuous deployment writes into the trigger it creates;
+# the trigger's own values, where it has them, take precedence. Images from Docker Hub are pulled through
+# mirror.gcr.io, which serves the same images without Docker Hub's rate limits. A $ meant for bash is written $$,
+# since Cloud Build reads $NAME and ${NAME} as its own substitutions.
+
+substitutions:
+  _AR_HOSTNAME: us-east5-docker.pkg.dev
+  _AR_PROJECT_ID: isoharness
+  _AR_REPOSITORY: cloud-run-source-deploy
+  _SERVICE_NAME: isoharness
+  _DEPLOY_REGION: us-east5
+  _PLATFORM: managed
+  _TRIGGER_ID: ''
+  _IMAGE: ${_AR_HOSTNAME}/${_AR_PROJECT_ID}/${_AR_REPOSITORY}/${REPO_NAME}/${_SERVICE_NAME}:${COMMIT_SHA}
+  # the Python image of the tests and the port, the base image of the Dockerfile (same digest)
+  _PYTHON: mirror.gcr.io/library/python:3.13-slim-trixie@sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f
+
+steps:
+  - id: Build
+    waitFor: ['-']
+    name: gcr.io/cloud-builders/docker
+    env: ['DOCKER_BUILDKIT=0']
+    args: ['build', '--no-cache', '-t', '${_IMAGE}', '-f', 'Dockerfile', '.']
+
+  - id: Database
+    waitFor: ['-']
+    name: gcr.io/cloud-builders/docker
+    args: ['run', '-d', '--name', 'pg', '--network', 'cloudbuild',
+           '-e', 'POSTGRES_HOST_AUTH_METHOD=trust', '-e', 'POSTGRES_DB=ea_test',
+           'mirror.gcr.io/library/postgres:16']
+
+  - id: Tests
+    waitFor: ['Database']
+    name: '${_PYTHON}'
+    env:
+      - 'EA_TEST_SUPER_DSN=postgresql://postgres@pg:5432/ea_test'
+      - 'EA_TEST_APP_DSN=postgresql://ea_login@pg:5432/ea_test'
+      - 'DEBIAN_FRONTEND=noninteractive'
+      - 'PIP_DISABLE_PIP_VERSION_CHECK=1'
+      - 'PIP_ROOT_USER_ACTION=ignore'
+    entrypoint: bash
+    args:
+      - '-c'
+      - |
+        set -euo pipefail
+        apt-get update -qq
+        apt-get install -y -qq --no-install-recommends libreoffice-calc-nogui fonts-liberation postgresql-client nodejs > /dev/null
+        pip install -q -r requirements-dev.txt
+        for i in $$(seq 1 60); do pg_isready -q -h pg -U postgres && break; sleep 1; done
+        pg_isready -h pg -U postgres
+        python -m pytest -q -rs | tee build_pytest.log
+        if grep -q " skipped" build_pytest.log; then echo "a test was skipped"; exit 1; fi
+
+  - id: Port
+    waitFor: ['-']
+    name: '${_PYTHON}'
+    env: ['PIP_DISABLE_PIP_VERSION_CHECK=1', 'PIP_ROOT_USER_ACTION=ignore']
+    entrypoint: bash
+    args:
+      - '-c'
+      - |
+        set -euo pipefail
+        pip install -q -r requirements.txt
+        python scripts/port_cases.py tests/data/20260915_raw.csv --out build/port
+        python scripts/port_cases.py tests/data/20260915_raw.csv --config tests/data/config_check_standard.json --out build/port_check
+        python scripts/port_cases.py tests/data/20260915_raw.csv --as-filtered --out build/port_filtered
+        python scripts/port_cases.py tests/data/20260915_raw.csv --with-carbon-blank --out build/port_carbon
+        python scripts/port_cases.py tests/data/20260915_raw.csv --no-ref-background --out build/port_nobgd
+
+  - id: Port in node
+    waitFor: ['Port']
+    name: mirror.gcr.io/library/node:22-slim
+    entrypoint: bash
+    args:
+      - '-c'
+      - |
+        set -euo pipefail
+        for d in port port_check port_filtered port_carbon port_nobgd; do
+          node port/test_port.js build/$$d/port_input.json build/$$d/cases.json
+        done
+
+  - id: Start the image
+    waitFor: ['Build']
+    name: gcr.io/cloud-builders/docker
+    args: ['run', '-d', '--name', 'app', '--network', 'cloudbuild', '${_IMAGE}']
+
+  - id: Smoke
+    waitFor: ['Start the image']
+    name: '${_PYTHON}'
+    env: ['PIP_DISABLE_PIP_VERSION_CHECK=1', 'PIP_ROOT_USER_ACTION=ignore']
+    entrypoint: bash
+    args:
+      - '-c'
+      - |
+        set -euo pipefail
+        pip install -q openpyxl==3.1.5
+        python - <<'PY'
+        import time, urllib.request
+        for _ in range(120):
+            try:
+                urllib.request.urlopen("http://app:8000/api/health", timeout=5).read()
+                break
+            except OSError:
+                time.sleep(1)
+        else:
+            raise SystemExit("the new image did not answer /api/health within two minutes")
+        page = urllib.request.urlopen("http://app:8000/", timeout=30).read().decode()
+        assert "<title>isoharness</title>" in page, "the home page's title is not isoharness"
+        served = urllib.request.urlopen("http://app:8000/engine.js", timeout=30).read()
+        assert served == open("port/engine.js", "rb").read(), "the image serves another port/engine.js"
+        PY
+        python scripts/smoke.py http://app:8000 tests/data/20260915_raw.csv
+
+  - id: Push
+    waitFor: ['Tests', 'Port in node', 'Smoke']
+    name: gcr.io/cloud-builders/docker
+    args: ['push', '${_IMAGE}']
+
+  - id: Deploy
+    waitFor: ['Push']
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args: ['run', 'services', 'update', '${_SERVICE_NAME}', '--platform=${_PLATFORM}', '--image=${_IMAGE}',
+           '--labels=managed-by=gcp-cloud-build-deploy-cloud-run,commit-sha=${COMMIT_SHA},gcb-build-id=${BUILD_ID},gcb-trigger-id=${_TRIGGER_ID}',
+           '--region=${_DEPLOY_REGION}', '--quiet']
+
+images: ['${_IMAGE}']
+timeout: 2400s
+options:
+  substitutionOption: ALLOW_LOOSE
+  dynamicSubstitutions: true
+  logging: CLOUD_LOGGING_ONLY
+tags: ['gcp-cloud-build-deploy-cloud-run', 'gcp-cloud-build-deploy-cloud-run-managed', 'isoharness']

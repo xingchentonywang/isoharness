@@ -61,6 +61,17 @@ for (const [ci, C] of cases.entries()) {
   for (const [el, k] of [['n', 'calN'], ['c', 'calC']]) { chk(M.cal[el].slope, F[k][0], k); chk(M.cal[el].intercept, F[k][1], k); chk(M.cal[el].sd, F[k][2], k); }
   for (const [el, k] of [['n', 'uncN'], ['c', 'uncC']]) { chk(M.unc[el].pooled, F[k][0], k); chk(M.unc[el].uS, F[k][1], k); }
   for (const [el, k] of [['n', 'elemN'], ['c', 'elemC']]) { chk(M.elem[el].inForce, F[k][0], k); chk(M.elem[el].maxBias, F[k][1], k); chk(M.elem[el].n, F[k][2], k); }
+  // ea_irms 1.4.13: the elemental drift correction against the anchors (null where it is not in force)
+  for (const [el, k] of [['n', 'elemCheckN'], ['c', 'elemCheckC']]) {
+    const got = M.elem[el].check, want = F[k];
+    if (want == null || got == null) {
+      comps++;
+      if ((want == null) !== (got == null)) { fitMism++; console.log('elemental check', ci, el, got, want); }
+      continue;
+    }
+    chk(got.level, want[0], k + 'level'); chk(got.rmsMeas, want[1], k + 'rmsMeas'); chk(got.rmsRep, want[2], k + 'rmsRep');
+    chk(got.added, want[3], k + 'added'); chk(got.n, want[4], k + 'n');
+  }
 }
 
 const nSet = cases.filter((C) => C.case.settings).length;

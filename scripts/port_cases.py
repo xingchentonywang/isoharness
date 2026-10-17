@@ -19,6 +19,12 @@ sample CO2, an undesignated CO2 pulse ahead of the designated one, as in the
 2025 exports. The reference-pulse check then sets those pulses aside, which the
 port must flag as the engine does.
 
+With --no-ref-background the background of the N2 reference peak is first
+blanked at one sample position and one drift monitor (no_background_variant),
+so that under the Background drift model those two are left without a drift
+correction and flagged, which the port must do as the engine does (finding R-23
+of the 2026-10-14 review).
+
 Decisions start from --config (or the package defaults). The port reads those seven
 settings from the block (port/engine.js, settings()); a case with "settings"
 overrides them on both sides. The standards, the reference-pulse windows, the
@@ -135,6 +141,46 @@ def carbon_blank_variant(src: Path, dst: Path, standards=None) -> Path:
     return dst
 
 
+def no_background_variant(src: Path, dst: Path, standards=None) -> Path:
+    """Write ``src`` with the background of the N2 reference peak left empty at one sample position and one
+    drift monitor, the first of each in the second half of the run (finding R-23 of the 2026-10-14 review).
+    The cell emptied is BGD 28 of the position's last designated mass-28 peak in Peak Nr order, the one the
+    parser reads as ref_bgd_n; no_background_rows names the two positions in the file written."""
+    from ea_irms.pipeline import DEFAULT_STANDARDS, Config, assign_roles
+    with open(src, newline="", encoding="utf-8-sig") as fh:
+        rows = list(csv.reader(fh))
+    head, body = rows[0], rows[1:]
+    i = {k: n for n, k in enumerate(head)}
+    positions = sorted(assign_roles(parse_export(src), Config(standards=standards or list(DEFAULT_STANDARDS))),
+                       key=lambda p: p.row)
+    later = positions[len(positions) // 2:]
+    picked = [next((p.row for p in later if p.role == role and p.ref_bgd_n is not None), None)
+              for role in ("Sample", "Drift")]
+    if None in picked:
+        raise ValueError(f"{Path(src).name} has no sample or no drift monitor with a reference background in the "
+                         "second half of the run")
+    last = {}                                       # position -> (Peak Nr, record) of its last designated N2 peak
+    for n, r in enumerate(body):
+        try:
+            pos, nr = int(float(r[i["Row"]])), float(r[i["Peak Nr"]])
+        except ValueError:
+            continue                                # a TCD record, without a Peak Nr
+        if pos in picked and r[i["Ampl  28"]].strip() and r[i["Is Ref _"]].strip() == "1" \
+                and (pos not in last or nr >= last[pos][0]):
+            last[pos] = (nr, n)
+    for _, n in last.values():
+        body[n] = list(body[n])
+        body[n][i["BGD 28"]] = ""
+    with open(dst, "w", newline="", encoding="utf-8") as fh:
+        csv.writer(fh).writerows([head] + body)
+    return dst
+
+
+def no_background_rows(export: Path) -> list:
+    """The positions of ``export`` whose designated N2 peak carries no background (no_background_variant)."""
+    return sorted(p.row for p in parse_export(export) if p.ref_area_n is not None and p.ref_bgd_n is None)
+
+
 def random_decisions(rng, monitors):
     return {"blank": rng.choice(SWITCH), "linN": rng.choice(SWITCH), "linC": rng.choice(SWITCH),
             "drift": rng.choice(SWITCH), "model": rng.choice(["Row", "Background", "Auto"]),
@@ -193,6 +239,11 @@ def engine_case(export, base: Config, c: dict) -> dict:
             "uncC": [f["unc_c"]["pooled_sd"], f["unc_c"]["u_sample"]],
             "elemN": [f["elem_n"]["in_force"], f["elem_n"]["max_bias"], f["elem_n"]["n"]],
             "elemC": [f["elem_c"]["in_force"], f["elem_c"]["max_bias"], f["elem_c"]["n"]]}
+    # ea_irms 1.4.13: the elemental drift correction against the anchors, None where it is not in force
+    for el, key in (("n", "elemCheckN"), ("c", "elemCheckC")):
+        chk = f["elem_check"][el]
+        fits[key] = None if chk is None else [chk["level"], chk["rms_measured"], chk["rms_reported"],
+                                              chk["added"], chk["n"]]
     return {"case": c, "rows": rows, "fits": fits}
 
 
@@ -209,6 +260,9 @@ def main(argv=None):
                     help="rewrite the export as a filtered one first (see above)")
     ap.add_argument("--with-carbon-blank", action="store_true",
                     help="give each blank capsule a sample CO2 peak first (carbon_blank_variant, 1.4.10)")
+    ap.add_argument("--no-ref-background", action="store_true",
+                    help="empty the N2 reference background at one sample and one drift monitor first "
+                         "(no_background_variant, finding R-23)")
     args = ap.parse_args(argv)
 
     export = Path(args.export)
@@ -217,6 +271,9 @@ def main(argv=None):
     base = config_from_dict(json.loads(Path(args.config).read_text())) if args.config else Config()
     if args.with_carbon_blank:
         export = carbon_blank_variant(export, out / f"{export.stem}_carbon_blank.csv", base.standards)
+    if args.no_ref_background:
+        export = no_background_variant(export, out / f"{export.stem}_no_ref_background.csv", base.standards)
+        print(f"no reference background at positions {', '.join(map(str, no_background_rows(export)))}")
     if args.as_filtered:
         export = filtered_variant(export, out / f"{export.stem}_filtered.csv")
     positions, fits = process(parse_export(export), base)

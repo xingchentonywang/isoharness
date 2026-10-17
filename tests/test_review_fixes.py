@@ -13,7 +13,6 @@ import shutil
 import statistics
 import subprocess
 import sys
-import threading
 import time
 import zipfile
 from pathlib import Path

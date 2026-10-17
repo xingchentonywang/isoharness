@@ -67,21 +67,24 @@ def westgard(values, mean: float, sd: float) -> list[list[str]]:
     R_4s   two consecutive observations more than 4 SD apart
     4_1s   four consecutive observations beyond 1 SD on the same side
     10_x   ten consecutive observations on the same side of the mean
-    These are the rules in figure 18 of the guide.
+    These are the rules in figure 18 of the guide. "Beyond" a number of SD allows the slack of every other
+    limit in ea_irms (pipeline._above and _below, finding R-24 of the 2026-10-14 review), so an observation on
+    a limit is not beyond it; the side of the mean is exact.
     """
+    from .pipeline import _above, _below
     z = [(v - mean) / sd for v in values]
     out: list[list[str]] = [[] for _ in z]
     for i, zi in enumerate(z):
-        if abs(zi) > 3:
+        if _above(abs(zi), 3):
             out[i].append("1_3s")
         if i >= 1:
-            if abs(zi) > 2 and abs(z[i - 1]) > 2 and (zi > 0) == (z[i - 1] > 0):
+            if _above(abs(zi), 2) and _above(abs(z[i - 1]), 2) and (zi > 0) == (z[i - 1] > 0):
                 out[i].append("2_2s")
-            if abs(zi - z[i - 1]) > 4:
+            if _above(abs(zi - z[i - 1]), 4):
                 out[i].append("R_4s")
         if i >= 3:
             window = z[i - 3:i + 1]
-            if all(w > 1 for w in window) or all(w < -1 for w in window):
+            if all(_above(w, 1) for w in window) or all(_below(w, -1) for w in window):
                 out[i].append("4_1s")
         if i >= 9:
             window = z[i - 9:i + 1]

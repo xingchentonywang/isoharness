@@ -6,7 +6,6 @@ drift between the two code paths shows up here rather than in someone's data.
 """
 import csv
 import os
-import subprocess
 import sys
 from pathlib import Path
 

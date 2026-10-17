@@ -1,5 +1,5 @@
 **
-!requirements.txt
+!requirements.lock
 !ea_irms/**
 !isoharness/**
 !web/**
@@ -7,3 +7,5 @@
 !tests/data/20260915_raw.csv
 **/__pycache__
 **/*.pyc
+# Source maps stay out of the image; the service does not serve them (review finding R-35).
+**/*.map

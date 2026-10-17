@@ -108,6 +108,9 @@ def port_input(positions, fits, config: Config, file_name: str, size: int,
                    "trend": F["monitor_bgd"]["trend"]},
         "pulseCheck": {"active": F["ref_pulse_check"]["active"],
                        "filtered": F["ref_pulse_check"]["filtered"]},
+        # ea_irms 1.4.13 (finding W-13): whether the anchors of each standards-table row read as one material,
+        # from the raw peaks, so no decision on the page changes it
+        "anchorMaterial": _anchor_material(F.get("anchor_material")),
         "atomic": {"c": ATOMIC_C, "n": ATOMIC_N},
         # Read by port/engine.js (settings()); the names are the port's.
         "settings": {"alpha": config.significance_level, "outlierT": config.monitor_outlier_t,
@@ -117,9 +120,24 @@ def port_input(positions, fits, config: Config, file_name: str, size: int,
                      "firstDrift": config.first_drift_position,
                      # 1.4.12 (finding W-02): the calibration line's limits, read by the page's checks
                      "calSlopeNote": config.cal_slope_note, "calSlopeCaution": config.cal_slope_caution,
-                     "calSdNote": config.cal_sd_note, "calSdCaution": config.cal_sd_caution},
+                     "calSdNote": config.cal_sd_note, "calSdCaution": config.cal_sd_caution,
+                     # 1.4.13 (finding R-22): the reference-gas SD at or above which the run has a problem
+                     "refSdLimit": config.ref_gas_sd_limit},
     }
     return clean(data)
+
+
+def _anchor_material(block) -> dict | None:
+    """ea_irms 1.4.13: F["anchor_material"] in the port block's names."""
+    if block is None:
+        return None
+    pair = lambda m, key: (None if m[f"{key}_min"] is None else [m[f"{key}_min"], m[f"{key}_max"]])  # noqa: E731
+    return {"level": block["level"],
+            "limits": {"ratio": block["limits"]["ratio"], "spread": block["limits"]["spread"]},
+            "materials": [{"name": m["name"], "si": m["index"], "n": m["n"], "ratio": pair(m, "ratio"),
+                           "ratioX": m["ratio_x"], "d15n": pair(m, "d15n"), "d13c": pair(m, "d13c"),
+                           "positions": list(m["positions"]), "over": list(m["over"]), "level": m["level"]}
+                          for m in block["materials"]]}
 
 
 # The workbook's Results sheet, column for column (ea_irms 1.4.5): each value followed by its 1 sigma.

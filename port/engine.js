@@ -1,8 +1,10 @@
-// isoharness preview port: the ea_irms 1.4.2 steps that depend on a user's choices
-// (blank, linearity, drift, calibration, elemental content, uncertainty), in
-// JavaScript so the page can redraw at once. The engine on the server stays the
-// only source of saved or downloaded numbers; continuous integration holds this
-// port to it (scripts/port_cases.py, port/test_port.js).
+// isoharness preview port: the ea_irms steps that depend on a user's choices
+// (blank, linearity, drift, calibration, elemental content, uncertainty), as of
+// ea_irms 1.4.13, in JavaScript so the page can redraw at once; from 1.4.13 it also
+// tests the elemental drift correction against the anchors (M.elem.n.check and
+// M.elem.c.check). The engine on the server stays the only source of saved or
+// downloaded numbers; continuous integration holds this port to it
+// (scripts/port_cases.py, port/test_port.js).
 //
 // runModel(D, dec) takes the "port" block of POST /api/process and the user's
 // decisions. The configuration's settings that act inside these steps (the
@@ -101,7 +103,11 @@ class PortEngine {
     return Math.sqrt(a.reduce((s, q) => s + (q - m) ** 2, 0) / (a.length - 1));
   }
 
+  // ea_irms _above and _below: a value against a limit, with the slack a spreadsheet comparison allows.
+  // "At most" is !above and "at least" is !below (finding R-24 of the 2026-10-14 review).
   above(a, b) { return a - b > 1e-9 * Math.max(1, Math.abs(b)); }
+
+  below(a, b) { return b - a > 1e-9 * Math.max(1, Math.abs(b)); }
 
   // x as the workbook's TEXT(x, "0.00") writes it (ea_irms 1.4.10, _xl): to 15 significant digits
   // first, as a spreadsheet keeps a number, then to the given decimals with a half rounded away
@@ -124,7 +130,7 @@ class PortEngine {
   applies(mode, f, n, alpha) {
     if (mode === 'Off' || f == null || n < 3) return false;
     if (mode === 'On') return true;
-    return f.p != null && f.p < alpha;
+    return f.p != null && this.below(f.p, alpha);
   }
 
   stud(f, x, y, inc) {
@@ -148,7 +154,9 @@ class PortEngine {
     const S = { alpha: 0.05, outlierT: 4.0, checkOffset: 0.5, blankMultiple: 3.0, k: 2.0, elemGate: 5.0,
       firstDrift: null,
       // ea_irms 1.4.12 (finding W-02): the calibration line's limits, for the page's checks
-      calSlopeNote: 0.05, calSlopeCaution: 0.10, calSdNote: 0.3, calSdCaution: 1.0 };
+      calSlopeNote: 0.05, calSlopeCaution: 0.10, calSdNote: 0.3, calSdCaution: 1.0,
+      // ea_irms 1.4.13 (finding R-22): the reference-gas SD at or above which the run has a problem
+      refSdLimit: 0.1 };
     const given = D && D.settings ? D.settings : {};
     for (const key of Object.keys(S)) if (key in given) S[key] = given[key];
     return S;
@@ -176,7 +184,7 @@ class PortEngine {
         sd: this.sdev(b.map((q) => q[dk])),
       };
       blk.inForce = dec.blank === 'Off' || blk.n < 1 ? false
-        : dec.blank === 'On' ? true : blk.n >= 3 && blk.sd != null && blk.sd <= 2.0;
+        : dec.blank === 'On' ? true : blk.n >= 3 && blk.sd != null && !this.above(blk.sd, 2.0);
       M.blank[el] = blk;
       for (const q of P) {
         let v = q[dk];
@@ -230,18 +238,27 @@ class PortEngine {
       };
       Dr.inForce = this.applies(dec.drift, f, pr.length, alpha);
       Dr.applied = Dr.inForce ? f.slope : 0;
+      Dr.noBgd = [];
       M.drift[el] = Dr;
+      // ea_irms (finding R-23 of the 2026-10-14 review): under the Background model a position with no
+      // reference background keeps its linearity-corrected value, and while the correction is in force
+      // noBgd lists it for its flag; a monitor without one has no residual (stud returns null for x null)
       for (const q of P) {
         const v = q[el].lin;
         if (v == null) { q[el].drift = null; continue; }
-        const x = model === 'Row' || q.rbgd == null ? q.r : q.rbgd;
+        if (model !== 'Row' && q.rbgd == null) {
+          q[el].drift = v;
+          if (Dr.inForce) Dr.noBgd.push(q.r);
+          continue;
+        }
+        const x = model === 'Row' ? q.r : q.rbgd;
         q[el].drift = v - Dr.applied * (x - Dr.pivot);
       }
       for (const q of mons) {
         const x = model === 'Row' ? q.r : q.rbgd;
         Dr.t[q.r] = this.stud(f, x, q[el].lin, !excl.has(q.r));
       }
-      Dr.outliers = mons.filter((q) => Dr.t[q.r] != null && Math.abs(Dr.t[q.r]) > S.outlierT && !excl.has(q.r))
+      Dr.outliers = mons.filter((q) => Dr.t[q.r] != null && this.above(Math.abs(Dr.t[q.r]), S.outlierT) && !excl.has(q.r))
         .map((q) => q.r).sort((a, b) => a - b);
     }
     // ea_irms 1.4.10: the scale needs anchors of two materials with different accepted values; with
@@ -361,27 +378,47 @@ class PortEngine {
       q.pctC = q.pctCm == null ? null : q.pctCm / q.fc;
       q.cn = q.cnm == null ? null : q.cnm * q.fn / q.fc;
     }
+    // ea_irms 1.4.13: the elemental drift correction against the anchors, whose certified %N and %C it does
+    // not use. From the anchors with a reported value and a certified one above 0: their RMS relative
+    // deviation from certified as measured and as corrected, and what the correction added; a Caution above
+    // the elemental gate, a Note above half of it, OK otherwise, and no level with fewer than two anchors.
+    // Null for an element whose correction is not in force.
+    const rms = (vals) => Math.sqrt(vals.reduce((s, v) => s + v * v, 0) / vals.length);
+    for (const [el, mk, rk, ck] of [['n', 'pctNm', 'pctN', 'certN'], ['c', 'pctCm', 'pctC', 'certC']]) {
+      if (!M.elem[el].inForce) { M.elem[el].check = null; continue; }
+      const used = anchors.filter((q) => q[rk] != null && q[ck] != null && q[ck] > 0);
+      const C = { n: used.length, rmsMeas: null, rmsRep: null, added: null, level: null };
+      if (used.length >= 2) {
+        const gate = S.elemGate / 100;
+        C.rmsMeas = rms(used.map((q) => q[mk] / q[ck] - 1));
+        C.rmsRep = rms(used.map((q) => q[rk] / q[ck] - 1));
+        C.added = C.rmsRep - C.rmsMeas;
+        C.level = this.above(C.added, gate) ? 'Caution' : this.above(C.added, gate / 2) ? 'Note' : 'OK';
+      }
+      M.elem[el].check = C;
+    }
     const L = D.limits, settled = D.settle.settled_from;
     for (const q of P) {
       const fl = [];
       if (q.aN == null) fl.push('no N peak');
-      else if (L.min_n && q.aN < L.min_n) fl.push('N below linearity range');
-      else if (L.max_n && q.aN > L.max_n) fl.push('N above linearity range');
+      else if (L.min_n && this.below(q.aN, L.min_n)) fl.push('N below linearity range');
+      else if (L.max_n && this.above(q.aN, L.max_n)) fl.push('N above linearity range');
       if (q.aC == null) {
         fl.push('no C peak');
         if (q.rej) fl.push('CO2 peak rejected as a reference pulse');
-      } else if (L.min_c && q.aC < L.min_c) fl.push('C below linearity range');
-      else if (L.max_c && q.aC > L.max_c) fl.push('C above linearity range');
+      } else if (L.min_c && this.below(q.aC, L.min_c)) fl.push('C below linearity range');
+      else if (L.max_c && this.above(q.aC, L.max_c)) fl.push('C above linearity range');
       // ea_irms 1.4.12 (finding W-09): the CO2 peak next to the designated pulse was taken
       if (q.aC != null && q.cpre) fl.push(q.cpre + ' CO2 peaks before the reference pulse, the last one used');
       for (const [v, f, name] of [[q.n.fin, M.cal.n, 'd15N'], [q.c.fin, M.cal.c, 'd13C']]) {
-        if (v != null && (q.role === 'S' || q.role === 'K') && f.accMin != null && !(f.accMin <= v && v <= f.accMax)) {
+        if (v != null && (q.role === 'S' || q.role === 'K') && f.accMin != null
+            && (this.below(v, f.accMin) || this.above(v, f.accMax))) {
           fl.push(name + ' outside anchor range');
         }
       }
       if (q.role === 'K') {
         for (const [got, acc, name] of [[q.n.fin, q.acc15, 'd15N'], [q.c.fin, q.acc13, 'd13C']]) {
-          if (got != null && acc != null && Math.abs(got - acc) > S.checkOffset) {
+          if (got != null && acc != null && this.above(Math.abs(got - acc), S.checkOffset)) {
             fl.push('check ' + name + ' off by ' + this.xl(got - acc, 2, true));
           }
         }
@@ -393,9 +430,13 @@ class PortEngine {
         }
         if (exE.has(q.r)) fl.push('excluded from elemental correction');
       }
+      // ea_irms (finding R-23): no reference background under the Background model, so no drift correction
+      for (const [el, nm] of [['n', 'N'], ['c', 'C']]) {
+        if (M.drift[el].noBgd.includes(q.r)) fl.push(nm + ' not drift-corrected: no reference background');
+      }
       if (q.role !== 'B' && S.blankMultiple) {
         for (const [a, ab, nm] of [[q.aN, M.blank.n.area, 'N'], [q.aC, M.blank.c.area, 'C']]) {
-          if (a != null && ab > 0 && a < ab * S.blankMultiple) fl.push(nm + ' peak only ' + this.xl(a / ab, 1) + 'x the blank');
+          if (a != null && ab > 0 && this.below(a, ab * S.blankMultiple)) fl.push(nm + ' peak only ' + this.xl(a / ab, 1) + 'x the blank');
         }
       }
       if (q.r < settled) fl.push('ran before the background settled');
