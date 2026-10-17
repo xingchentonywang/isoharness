@@ -62,13 +62,26 @@ SETTINGS = [
     ("check_offset_permil", "Check standard offset (permil)", "number",
      "Flag a check standard further than this from its accepted value."),
     ("min_area_n", "Minimum Area 28 (Vs)", "number_or_empty",
-     "Empty: the smallest linearity standard in the run."),
+     "Empty: the floor the run's size series sets (from 1.4.15), its smallest linearity standard unless that "
+     "reads off the line through the larger ones. A value here sets the floor outright."),
     ("min_area_c", "Minimum Area 44 (Vs)", "number_or_empty",
-     "Empty: the smallest linearity standard in the run."),
+     "Empty: the floor the run's size series sets, as for Area 28."),
     ("max_area_n", "Maximum Area 28 (Vs)", "number_or_empty",
      "Empty: the largest linearity standard in the run."),
     ("max_area_c", "Maximum Area 44 (Vs)", "number_or_empty",
      "Empty: the largest linearity standard in the run."),
+    ("floor_offset_permil", "Size series floor: a standard further than this from the line through the larger "
+     "ones raises the floor (permil)", "number_or_empty",
+     "Walking up from the smallest linearity standard while three or more larger ones remain, a standard this far "
+     "from the line through the larger ones, after the blank step, moves the floor to the next standard (1.4.15). "
+     "Empty: the smallest standard is the floor, as before 1.4.15."),
+    ("floor_sd_multiple", "Size series floor: or this many times that line's residual SD, where that is larger",
+     "number_or_empty", "Empty: the distance above alone."),
+    ("no_series_min_area_n", "Minimum Area 28 in a run without a size series (Vs)", "number_or_empty",
+     "The lab's smallest N2 peak, used only in a run with no linearity standards; a peak below it is marked for "
+     "a rerun (1.4.15). Empty: no limit there."),
+    ("no_series_min_area_c", "Minimum Area 44 in a run without a size series (Vs)", "number_or_empty",
+     "As for Area 28. Empty: no limit there."),
     ("min_blank_multiple", "Minimum peak area, x the blank", "number_or_empty",
      "A peak under this multiple of the blank is flagged, since there the blank correction carries the blank's "
      "scatter into the value. Empty: no check."),
@@ -111,8 +124,9 @@ SETTINGS = [
      "above it is marked whatever the range. Empty: every peak above the linearity range is marked, as before "
      "1.4.7."),
     ("rerun_max_1sigma", "Largest 1σ of the final d15N or d13C before a rerun (permil)", "number_or_empty",
-     "A sample whose final d15N or d13C has a 1σ above this is marked for a rerun of that element. The 1σ leaves "
-     "out the blank, linearity, and drift corrections. Empty: no check."),
+     "A sample whose final d15N or d13C has a 1σ above this is marked for a rerun of that element. From 1.4.15 "
+     "the 1σ holds the corrections in force and the drift monitors' scatter, as the rows under Uncertainty say. "
+     "Empty: no check."),
     ("rerun_replicates", "Compare replicates of a sample in one run", "onoff",
      "On or Off. With a sample sheet, analyses of one sample in a run (the same name, or the same Replicate of) "
      "whose range is above the critical range of ISO 5725-6 are marked for a rerun of that element (1.4.8)."),
@@ -132,6 +146,18 @@ SETTINGS = [
      "replicates behind 1σ are many."),
     ("balance_u_mg", "Balance, 1σ of one weighing (mg)", "number_or_empty",
      "Empty: the weighing term is left out of the uncertainty of %N and %C."),
+    ("kragten_corrections", "1σ of d15N and d13C holds the corrections in force", "onoff",
+     "On or Off. On adds the terms of the blank, linearity, and drift corrections applied: each fitted slope moved "
+     "by its standard error, the blank's delta by the SD of its capsules, and every step after it refitted "
+     "(Kragten; 1.4.15). Off: the 1σ of 1.4.14."),
+    ("monitor_repeatability", "Drift monitors' scatter in place of the repeatability", "switch",
+     "On, Off or Auto. Where the drift monitors' final values (outliers and positions left out of the fit not "
+     "counted) scatter more than the repeatability above, their SD takes its place in 1σ: Auto when they scatter "
+     "more at the significance level (one-sided F test), On whenever they scatter more (1.4.15)."),
+    ("ace_scatter_check", "Check every acetanilide analysis against the samples' 1σ", "onoff",
+     "On or Off. On: where the size series and the drift monitors together scatter more than the repeatability "
+     "the samples' 1σ carries, at the significance level, that element's samples are marked for a check and the "
+     "run lists it as a problem (1.4.15)."),
     (None, "One run only (leave these empty in a lab configuration)", None, None),
     ("first_drift_position", "First position to use in the drift fit", "whole_or_empty",
      "Empty: every position."),
@@ -339,6 +365,9 @@ RANGES = {
     "u_sample_n": (0.0, None, True, None), "u_sample_c": (0.0, None, True, None),
     "coverage_k": (0.0, None, False, None), "balance_u_mg": (0.0, None, True, None),
     "elemental_threshold_pct": (0.0, None, True, None), "first_drift_position": (1, None, True, None),
+    # 1.4.15
+    "floor_offset_permil": (0.0, None, False, None), "floor_sd_multiple": (0.0, None, True, None),
+    "no_series_min_area_n": (0.0, None, True, None), "no_series_min_area_c": (0.0, None, True, None),
 }
 
 

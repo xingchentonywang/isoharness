@@ -104,8 +104,11 @@ def test_groups_and_limits(export):
 
 
 def test_marks_and_reasons(export):
-    plain, _ = process(parse_export(export), Config())
-    positions, F = process(parse_export(export), Config(), samples=sheet())
+    # 1.4.15: the acetanilide's whole-run check, which fires on the test run and puts its flag in every sample's
+    # Why, is off, so the Why reads the sample's own reasons and the replicates'
+    cfg = Config(ace_scatter_check="Off")
+    plain, _ = process(parse_export(export), cfg)
+    positions, F = process(parse_export(export), cfg, samples=sheet())
     before = {p.row: p.rerun for p in plain}
     by = {p.row: p for p in positions}
     rows = "21, 24, 49"
@@ -123,7 +126,8 @@ def test_marks_and_reasons(export):
     changed = {r for r in before if before[r] != by[r].rerun}
     assert changed == {21, 24, 31, 32, 33, 35, 48, 49}
     # Off: the groups are still described, and nothing is marked for them
-    off, F_off = process(parse_export(export), config_from_dict({"rerun_replicates": "Off"}), samples=sheet())
+    off, F_off = process(parse_export(export), config_from_dict({"rerun_replicates": "Off", "ace_scatter_check": "Off"}),
+                         samples=sheet())
     assert not F_off["replicates"]["on"] and not any(g[el]["over"] for g in F_off["replicates"]["groups"]
                                                      for el in ("n", "c"))
     assert {p.row: p.rerun for p in off} == before

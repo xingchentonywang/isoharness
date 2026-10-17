@@ -1128,7 +1128,10 @@ class Component extends DCLogic {
     const sh = this.stepShift(M, d, key, el);
     const titleOn = 'Change in ' + iso + ' from ' + what[0], titleOff = 'Change in ' + iso + ' ' + what[1];
     if (!sh) {
-      return this.none(titleOn, col, key === 'blank' ? 'No blank capsule gave ' + (el === 'n' ? 'an' : 'a') + ' ' + gas + ' peak, so ' + iso + ' has no blank to subtract.'
+      // ea_irms 1.4.15: blank capsules that gave no peak put the blank below detection
+      return this.none(titleOn, col, key === 'blank' ? (M.blank[el].belowDetection
+        ? 'No blank capsule gave ' + (el === 'n' ? 'an' : 'a') + ' ' + gas + ' peak, so the ' + (el === 'n' ? 'nitrogen' : 'carbon') + ' blank is below detection and ' + iso + ' has nothing to subtract.'
+        : 'This run has no blank capsules, so ' + iso + ' has no blank to subtract.')
         : key === 'lin' ? 'The size series has fewer than three ' + gas + ' peaks, so no slope can be applied to ' + iso + '.'
           : 'Fewer than three monitors are in the ' + iso + ' fit, so no drift slope can be applied.');
     }
@@ -1463,7 +1466,11 @@ class Component extends DCLogic {
       ['C above linearity range', 'CO2 large'], ['d15N outside anchor range', 'δ¹⁵N extrapolated'],
       ['d13C outside anchor range', 'δ¹³C extrapolated'], ['possible carryover from an oversized sample', 'Carryover'],
       ['ran before the background settled', 'Unsettled'], ['no N peak', 'No N2 peak'], ['no C peak', 'No CO2 peak'],
-      ['CO2 peak rejected as a reference pulse', 'CO2 was a pulse']];
+      ['CO2 peak rejected as a reference pulse', 'CO2 was a pulse'],
+      // ea_irms 1.4.15: under the floor the size series sets, under the lab's minimum peak, and the acetanilide's scatter
+      ['N below series floor', 'N2 under the floor'], ['C below series floor', 'CO2 under the floor'],
+      ['N below the minimum peak', 'N2 under the minimum'], ['C below the minimum peak', 'CO2 under the minimum'],
+      ['acetanilide d15N scatter above 1σ', 'δ¹⁵N scatter high'], ['acetanilide d13C scatter above 1σ', 'δ¹³C scatter high']];
     for (const [a, b] of t) if (s === a) return b;
     const two = /^(\d+) CO2 peaks before the reference pulse, the last one used$/.exec(s);      // ea_irms 1.4.12
     if (two) return two[1] + ' CO2 peaks';
@@ -1485,10 +1492,28 @@ class Component extends DCLogic {
     };
   }
 
+  // ea_irms 1.4.15: whether a position's peak of el is under the floor, whichever flag says so (under the size series,
+  // under a floor the series moved up, or under the lab's minimum peak in a run without a series), or above the series
+  belowFloor(q, el) {
+    const nm = el === 'n' ? 'N ' : 'C ';
+    return q.flags.some((f) => f === nm + 'below linearity range' || f === nm + 'below series floor' || f === nm + 'below the minimum peak');
+  }
+
+  aboveRange(q, el) { return q.flags.includes((el === 'n' ? 'N' : 'C') + ' above linearity range'); }
+
+  // The floor of el as the Summary and the checks name it: its area and where it came from.
+  floorText(M, el) {
+    const lim = M.limits && M.limits[el];
+    if (!lim || lim.src == null) return 'none';
+    if (!lim.min) return 'none, the configuration sets 0';
+    return this.fx(lim.min, 2) + ', ' + ({ configuration: 'from the configuration', 'series floor': 'set by the series',
+      'smallest standard': 'the smallest standard', 'lab minimum': 'the lab’s minimum' }[lim.src] || lim.src);
+  }
+
   focus(scr) {
     if (scr === 'inst') return () => true;
     if (scr === 'blank') return (q) => q.role === 'B' || q.flags.some((f) => / the blank$/.test(f));
-    if (scr === 'lin') return (q) => q.role === 'L' || q.flags.some((f) => /linearity range/.test(f));
+    if (scr === 'lin') return (q) => q.role === 'L' || q.flags.some((f) => /linearity range|series floor|minimum peak/.test(f));
     if (scr === 'drift') return (q) => q.role === 'D';
     if (scr === 'cal') return (q) => q.role === 'A' || q.role === 'S';
     if (scr === 'elem') return (q) => q.role === 'D' || ((q.role === 'A' || q.role === 'L') && q.amt);
@@ -1611,7 +1636,11 @@ class Component extends DCLogic {
           row('Change (‰)', (el) => dif(q[el].blank, q[el].raw, 3)),
         ];
         for (const el of E) {
-          if (!B[el].n) out.after.push({ t: 'No blank capsule gave ' + (el === 'n' ? 'an' : 'a') + ' ' + gas[el] + ' peak, so ' + iso(el) + ' has no blank to subtract.' });
+          if (!B[el].n) {
+            out.after.push({ t: B[el].belowDetection ? 'No blank capsule gave ' + (el === 'n' ? 'an' : 'a') + ' ' + gas[el] + ' peak, so the '
+              + (el === 'n' ? 'nitrogen' : 'carbon') + ' blank is below detection. It was measured and is too small to see, so ' + iso(el) + ' has nothing to subtract.'
+              : 'This run has no blank capsules, so ' + iso(el) + ' has no blank to subtract.' });
+          }
           else if (!B[el].inForce) out.after.push({ t: 'The blank is not subtracted from ' + iso(el) + ' in this run, so ' + iso(el) + ' after this step is the raw value.' });
           else if (!big(el) && q[ak[el]] != null) out.after.push({ t: 'This ' + gas[el] + ' peak is not larger than the blank, so its ' + iso(el) + ' is left as it is.' });
         }
@@ -1640,6 +1669,15 @@ class Component extends DCLogic {
           if (l.fit && !l.inForce) out.after.push({ t: 'The ' + iso(el) + ' correction is not applied in this run (' + this.peq(l.fit.p) + '), so b counts as 0 and the value is unchanged.' });
           if (q.flags.includes(nm + ' above linearity range') || q.flags.includes(nm + ' below linearity range')) {
             out.after.push({ t: 'This sample’s ' + gas[el] + ' peak lies outside the size range of the series, so ' + (l.inForce ? 'its correction is extrapolated.' : 'a correction would be extrapolated.') });
+          }
+          // ea_irms 1.4.15: a peak under the floor is marked for a rerun of that element
+          const fl = M.limits[el];
+          if (fl && this.belowFloor(q, el)) {
+            const where = { 'series floor': ', which the series moved up because its smaller standards lie off the line through the larger ones',
+              'smallest standard': ', the smallest standard of the series', configuration: ', which the configuration sets',
+              'lab minimum': ', the lab’s minimum peak for a run without a size series' }[fl.src] || '';
+            out.after.push({ t: 'This sample’s ' + gas[el] + ' peak is smaller than the floor, ' + this.fx(fl.min, 2) + ' Vs' + where
+              + ', so it is flagged and marked for a rerun of ' + nm + '.' });
           }
         }
       }
@@ -1728,25 +1766,47 @@ class Component extends DCLogic {
         if (!q.amt) out.after.push({ t: 'This sample was not weighed, so it has no %N or %C; its C:N (molar) needs no mass.' });
       }
     } else if (scr === 'unc') {
-      const U = M.unc, C = M.cal;
-      out.lines = lines('1σ adds three variances, each carried through the calibration line at the sample’s measured value. They are the '
-        + 'repeatability of one analysis, s, times the slope m; the anchors’ certified 1σ; and the standard errors of the anchors’ '
+      // ea_irms 1.4.15: 1σ also holds the Kragten terms of the corrections in force, and the drift monitors' SD takes the
+      // place of s × m where it is larger
+      const U = M.unc, C = M.cal, kr = set.kragten === 'On', mr = set.monitorRep;
+      out.lines = lines('1σ adds variances. Three come from the calibration line, each carried through it at the sample’s measured value: '
+        + 'the repeatability of one analysis, s, times the slope m; the anchors’ certified 1σ; and the standard errors of the anchors’ '
         + 'measured means. The last two grow with the distance of the sample’s measured value from the anchors’ mean.');
-      out.formulas = lines('1σ = √[(s × m)² + certified term + measured-means term]', this.kSig(M) + ' = ' + this.num(set.k) + ' × 1σ');
+      out.lines.push({ t: kr ? 'Each correction in force adds a term of its own, as a Kragten spreadsheet does. The blank’s δ is moved by the SD '
+        + 'of the blank capsules, or the linearity or drift slope by its standard error. Every later step is fitted again, and the change '
+        + 'in the sample’s final value is the term.' : 'The configuration leaves out the terms of the blank, linearity, and drift corrections.' });
+      if (mr !== 'Off') {
+        out.lines.push({ t: 'The drift monitors are one material analyzed through the run, so the scatter of their final values shows the '
+          + 'repeatability of one analysis after every correction. Where their SD is larger than s × m' + (mr === 'Auto'
+          ? ' by a one-sided F test at p < ' + alpha : '') + ', it takes the place of s × m.' });
+      }
+      out.formulas = lines('1σ = √[(s × m)² + certified term + measured-means term' + (kr ? ' + blank term² + linearity term² + drift term²' : '') + ']',
+        this.kSig(M) + ' = ' + this.num(set.k) + ' × 1σ');
       q = this.exampleOf(M, sel, (p) => p.n.u != null || p.c.u != null);
       if (q) {
-        const p = (el) => q[el].parts || null, w = (x) => v(x, 6);
+        const p = (el) => (q[el].u != null && q[el].parts) || null, w = (x) => v(x, 6);
+        const mon = (el) => (U[el].monitors && U[el].monitors.used ? U[el].monitors : null);
+        const term = (el, k) => (q[el].terms && q[el].terms[k] != null ? q[el].terms[k] : null);
+        const sq = (el, k) => (term(el, k) == null ? 0 : term(el, k) * term(el, k));
+        const rep = (el) => (mon(el) ? mon(el).sd * mon(el).sd : p(el).rep);
         const row = (k, f) => ({ k, a: f('n'), b: f('c') });
         out.rows = [
           row('Repeatability s (‰)', (el) => v(U[el].uS, 4)),
           row('Calibration slope m', (el) => v(C[el].slope, 5)),
-          row('(s × m)² (‰²)', (el) => (p(el) ? w(p(el).rep) : '')),
-          row('Certified term (‰²)', (el) => (p(el) ? w(p(el).acc) : '')),
-          row('Measured-means term (‰²)', (el) => (p(el) ? w(p(el).mean) : '')),
-          row('Sum (‰²)', (el) => (p(el) ? w(p(el).rep + p(el).acc + p(el).mean) : '')),
-          row('1σ, the square root (‰)', (el) => v(q[el].u, 4)),
-          row(this.kSig(M) + ' (‰)', (el) => v(q[el].U, 4)),
+          row('(s × m)² (‰²)', (el) => (p(el) ? w(p(el).rep) + (mon(el) ? ', replaced' : '') : '')),
         ];
+        if (['n', 'c'].some(mon)) out.rows.push(row('Drift monitors’ SD² in its place (‰²)', (el) => (p(el) && mon(el) ? w(mon(el).sd * mon(el).sd) : '')));
+        out.rows.push(row('Certified term (‰²)', (el) => (p(el) ? w(p(el).acc) : '')),
+          row('Measured-means term (‰²)', (el) => (p(el) ? w(p(el).mean) : '')));
+        if (kr) {
+          const has = (el, k) => !!(q[el].terms && k in q[el].terms);
+          for (const [k, name] of [['blank', 'Blank'], ['linearity', 'Linearity'], ['drift', 'Drift']]) {
+            out.rows.push(row(name + ' term² (‰²)', (el) => (!p(el) ? '' : !has(el, k) ? 'not in force' : term(el, k) == null ? '' : w(sq(el, k)))));
+          }
+        }
+        out.rows.push(row('Sum (‰²)', (el) => (p(el) ? w(rep(el) + p(el).acc + p(el).mean + sq(el, 'blank') + sq(el, 'linearity') + sq(el, 'drift')) : '')),
+          row('1σ, the square root (‰)', (el) => v(q[el].u, 4)),
+          row(this.kSig(M) + ' (‰)', (el) => v(q[el].U, 4)));
       }
     }
     if (q) out.title = named(q);
@@ -1993,9 +2053,11 @@ class Component extends DCLogic {
     const withP = blanks.filter((q) => q[ak] != null && q[dk] != null);
     if (!withP.length) {
       const what = el === 'n' ? 'nitrogen' : 'carbon';
+      // ea_irms 1.4.15: capsules that gave no peak put the blank below detection; it was measured, not left out
       return this.none(title, col, !blanks.length ? 'This run has no blank capsules, so there is no blank to subtract.'
         : (blanks.length === 1 ? 'The blank capsule gave no ' + gas + ' peak' : 'None of the ' + blanks.length + ' blank capsules gave ' + an + ' peak')
-          + ', so there is no ' + what + ' blank to subtract.');
+          + (blk.belowDetection ? ', so the ' + what + ' blank is below detection. It was measured and is too small to see, so there is nothing to subtract.'
+            : ', so there is no ' + what + ' blank to subtract.'));
     }
     const ys = withP.map((q) => q[dk]), areas = withP.map((q) => q[ak]), ax = this.rowAxis(M);
     const yd = this.dom(ys.concat(blk.sd != null ? [blk.d - blk.sd, blk.d + blk.sd] : []), 0.12);
@@ -2018,7 +2080,12 @@ class Component extends DCLogic {
       : blk.sd != null && blk.sd > 2 ? ' (Auto needs 2‰ or less)' : '');
     const verdict = (el) => {
       const blk = b[el], an = el === 'n' ? 'an N2' : 'a CO2';
-      if (!blk.n) return { t: this.iso(el) + ': no blank capsule gave ' + an + ' peak', on: false };
+      if (!blk.n) {
+        // ea_irms 1.4.15: capsules that gave no peak put the blank below detection
+        const none = blk.capsules === 1 ? 'the blank capsule gave no ' + (el === 'n' ? 'N2' : 'CO2') + ' peak'
+          : 'none of the ' + blk.capsules + ' blank capsules gave ' + an + ' peak';
+        return { t: this.iso(el) + ': ' + (blk.belowDetection ? 'below detection, since ' + none : 'no blank capsules in this run'), on: false };
+      }
       return { t: this.iso(el) + ': ' + (blk.inForce ? 'subtracted' : 'not subtracted') + ', ' + this.count(blk.n, 'capsule') + ' with ' + an + ' peak'
         + (blk.sd != null ? ', SD ' + this.fx(blk.sd, 2) + '‰' : '') + why(blk), on: blk.inForce };
     };
@@ -2030,14 +2097,16 @@ class Component extends DCLogic {
       return mult && area > 0 ? S.filter((q) => q[ak] != null && q[ak] < mult * area) : [];
     };
     const uN = under('n'), uC = under('c');
+    // ea_irms 1.4.15: a blank below detection was measured, so the status says so, not only that nothing is subtracted
+    const status = (blk) => (blk.n ? (blk.inForce ? 'Subtracted' : 'Not subtracted') : blk.belowDetection ? 'Below detection' : 'No blank capsules');
     const stats = { rows: [
-      { k: 'Capsules with a peak', a: String(b.n.n), b: String(b.c.n) },
+      { k: 'Capsules with a peak', a: b.n.n + ' of ' + b.n.capsules, b: b.c.n + ' of ' + b.c.capsules },
       { k: 'Mean peak area (Vs)', a: b.n.n ? this.fx(b.n.area, 3) : '', b: b.c.n ? this.fx(b.c.area, 3) : '' },
       { k: 'Mean δ (‰)', a: b.n.n ? this.fx(b.n.d, 2) : '', b: b.c.n ? this.fx(b.c.d, 2) : '' },
       { k: 'SD (‰)', a: this.fx(b.n.sd, 2), b: this.fx(b.c.sd, 2) },
       mult ? { k: 'Samples under ' + this.num(mult) + '× the blank', a: b.n.area > 0 ? String(uN.length) : '', b: b.c.area > 0 ? String(uC.length) : '' }
         : { k: 'Samples close to the blank', a: 'not flagged', b: 'not flagged' },
-      { k: 'Status', a: b.n.n ? (b.n.inForce ? 'Subtracted' : 'Not subtracted') : 'Nothing to subtract', b: b.c.n ? (b.c.inForce ? 'Subtracted' : 'Not subtracted') : 'Nothing to subtract' },
+      { k: 'Status', a: status(b.n), b: status(b.c) },
     ] };
     const lines = [];
     const alt = b.n.inForce || b.c.inForce ? 'Off' : 'On';
@@ -2061,7 +2130,11 @@ class Component extends DCLogic {
       lines.push({ t: 'Under ' + this.times(mult) + ' the blank in ' + gas + ': ' + list.map((q) => q.id + ' (' + q.r + ', ' + this.fx(q[ak] / b[el].area, 1) + '×)').join(', ')
         + '. Their ' + this.iso(el) + ' is affected by the blank whether or not it is subtracted.' });
     }
-    if (!lines.length) lines.push({ t: b.n.n || b.c.n ? 'The switch changes no sample in this run.' : 'No blank capsule gave a peak, so the switch changes nothing in this run.' });
+    if (!lines.length) {
+      lines.push({ t: b.n.n || b.c.n ? 'The switch changes no sample in this run.' : blanks.length
+        ? 'No blank capsule gave a peak, so the blank is below detection and the switch changes nothing in this run.'
+        : 'This run has no blank capsules, so the switch changes nothing in this run.' });
+    }
     return { ctrl, charts, stats, effect: { title: 'Effect of this choice', lines } };
   }
 
@@ -2079,8 +2152,8 @@ class Component extends DCLogic {
     const charts = [], cnt = {};
     for (const el of ['n', 'c']) {
       const ak = el === 'n' ? 'aN' : 'aC', gas = el === 'n' ? 'N2' : 'CO2', l = L[el], f = l.fit, col = this.col(el);
-      const over = l.max == null ? 0 : S.filter((q) => q[ak] != null && q[ak] > l.max).length;
-      const under = l.min == null ? 0 : S.filter((q) => q[ak] != null && q[ak] < l.min).length;
+      // ea_irms 1.4.15: the samples counted as the flags count them, above the series and under the floor it sets
+      const over = S.filter((q) => this.aboveRange(q, el)).length, under = S.filter((q) => this.belowFloor(q, el)).length;
       cnt[el] = [over, under];
       const title = this.iso(el) + ' against ' + gas + ' peak area';
       if (!l.n) { charts.push(this.none(title, col, 'No size standard gave a ' + gas + ' peak, so the dependence on peak size cannot be checked.')); continue; }
@@ -2089,17 +2162,32 @@ class Component extends DCLogic {
       const fitY = (x) => f.intercept + f.slope * x;
       const yd = this.dom(ys.concat(f ? [fitY(l.min), fitY(l.max)] : []), 0.25);
       const xd = { min: 0, max: this.dom([0, xmax], 0.02).max };
+      const lim = M.limits[el], floor = lim && lim.src != null && lim.min ? lim.min : null;
+      // the standards the walk up the series found off the line through the larger ones, which moved the floor up (not
+      // when the configuration sets the floor outright)
+      const off = new Set(lim && lim.src === 'series floor' ? M.floor[el].steps.filter((s) => s.moved).map((s) => s.row) : []);
       charts.push(this.chart({
-        title, sub: this.count(l.n, (mat ? mat + ' ' : '') + 'standard') + ', ' + this.span(l.min, l.max, 1) + ' Vs; ' + over + ' samples above, ' + under + ' below',
+        title, sub: this.count(l.n, (mat ? mat + ' ' : '') + 'standard') + ', ' + this.span(l.min, l.max, 1) + ' Vs'
+          + (floor != null ? '; floor ' + this.fx(floor, 1) + ' Vs; ' + over + ' samples above the series, ' + under + ' below the floor'
+            : '; ' + over + ' samples above, ' + under + ' below'),
         alt: this.count(lin.filter((q) => q[ak] != null && q[el].blank != null).length, 'size standard') + ', with a tick for each of '
           + this.count(S.filter((q) => q[ak] != null).length, 'sample peak') + ' along the axis',
         badge: this.badge(l.inForce), color: col, x: xd, y: yd,
         bandA: { fill: this.tint(el), list: [{ x0: l.min, x1: l.max }] },
+        // a gray shade, as the instrument's figures shade the start before the background settled, apart from the
+        // blue and orange tints of the series range
+        bandB: floor != null ? { fill: '#DDE2E7', list: [{ x0: 0, x1: floor }] } : null,
         lineA: f ? { paths: [[[l.min, fitY(l.min)], [l.max, fitY(l.max)]]], stroke: col, w: 2.2, dash: l.inForce ? '' : '6 4' } : null,
         lineB: f ? { paths: [[[0, fitY(0)], [l.min, fitY(l.min)]], [[l.max, fitY(l.max)], [xd.max, fitY(xd.max)]]], stroke: col, w: 1.2, dash: '2 4' } : null,
         rug: { xs: S.map((q) => q[ak]), stroke: '#6E7D8C' },
-        pts: lin.map((q) => ({ x: q[ak], y: q[el].blank, kind: 'fill', sel: q.r === sel, label: q.id + ': ' + this.fx(q[ak], 1) + ' Vs, ' + this.fx(q[el].blank, 3) + '‰', pick: () => H.pick(q.r) })),
-        legend: [{ kind: 'dot', color: col, label: 'Size standard' }, { kind: l.inForce ? 'line' : 'dash', color: col, label: l.inForce ? 'Fit, applied' : 'Fit, not applied' }, { kind: 'band', color: this.tint(el), label: 'Series range' }, { kind: 'line', color: '#6E7D8C', label: 'Sample peaks (ticks)' }],
+        pts: lin.map((q) => ({ x: q[ak], y: q[el].blank, kind: off.has(q.r) ? 'hollow' : 'fill', sel: q.r === sel,
+          label: q.id + ': ' + this.fx(q[ak], 1) + ' Vs, ' + this.fx(q[el].blank, 3) + '‰' + (off.has(q.r) ? ', off the line through the larger standards' : ''),
+          pick: () => H.pick(q.r) })),
+        notes: lin.filter((q) => off.has(q.r) && q[ak] != null && q[el].blank != null)
+          .map((q) => ({ x: q[ak], y: q[el].blank, t: 'off the line', at: 'right', c: '#56646F' })),
+        legend: [{ kind: 'dot', color: col, label: 'Size standard' }].concat(off.size ? [{ kind: 'hollow', color: col, label: 'Off the line, under the floor' }] : [],
+          [{ kind: l.inForce ? 'line' : 'dash', color: col, label: l.inForce ? 'Fit, applied' : 'Fit, not applied' }, { kind: 'band', color: this.tint(el), label: 'Series range' }],
+          floor != null ? [{ kind: 'band', color: '#DDE2E7', label: 'Below the floor' }] : [], [{ kind: 'line', color: '#6E7D8C', label: 'Sample peaks (ticks)' }]),
         xLabel: gas + ' peak area (Vs)', yLabel: this.iso(el) + ' after blank (‰)',
       }));
     }
@@ -2112,7 +2200,8 @@ class Component extends DCLogic {
       { k: 'r²', a: this.fx(fN && fN.r2, 3), b: this.fx(fC && fC.r2, 3) },
       { k: 'Residual SD (‰)', a: this.fx(fN && fN.sd, 3), b: this.fx(fC && fC.sd, 3) },
       { k: 'Series range (Vs)', a: this.span(L.n.min, L.n.max, 1), b: this.span(L.c.min, L.c.max, 1) },
-      { k: 'Samples above, below', a: cnt.n[0] + ', ' + cnt.n[1], b: cnt.c[0] + ', ' + cnt.c[1] },
+      { k: 'Floor (Vs)', a: this.floorText(M, 'n'), b: this.floorText(M, 'c') },
+      { k: 'Samples above the series, below the floor', a: cnt.n[0] + ', ' + cnt.n[1], b: cnt.c[0] + ', ' + cnt.c[1] },
       { k: 'Status', a: L.n.inForce ? 'Applied' : 'Not applied', b: L.c.inForce ? 'Applied' : 'Not applied' },
     ] };
     const lines = [];
@@ -2125,7 +2214,59 @@ class Component extends DCLogic {
       lines.push({ t: (on ? 'Switching the ' + this.iso(el) + ' correction off' : 'Forcing the ' + this.iso(el) + ' correction on') + ' would move sample ' + this.iso(el) + ' by ' + this.span(sh.lo, sh.hi, 2, true) + '‰, ' + sh.beyond + ' of ' + sh.n + ' by more than ' + this.kSig(M) + '.' });
     }
     if (!lines.length) lines.push({ t: lin.length < 3 ? 'With fewer than three size standards, no slope can be applied, so the switches change nothing.' : 'The switches change no sample in this run.' });
-    return { ctrl, charts, stats, effect: { title: 'Effect of this choice', lines }, checks: this.stepChecks(M, d, 'lin') };
+    return { ctrl, charts, stats, effect: { title: 'Effect of this choice', lines }, checks: this.stepChecks(M, d, 'lin'), floor: this.floorView(M) };
+  }
+
+  // ea_irms 1.4.15: the floor the size series sets, the walk up the series that set it (a row for each standard
+  // tested), and the samples under it. The floor depends on the blank decision, since the walk reads each standard's
+  // δ after the blank step.
+  floorView(M) {
+    const set = M.settings, S = this.samples(M), off = set.floorOffset, mult = set.floorSdMultiple;
+    const who = (r) => this.who(M.P.find((q) => q.r === r));
+    const out = { title: 'Floor of the size series', lines: [], steps: [], hasSteps: false };
+    // the walk is explained where a size series sets the floor of either gas
+    const walks = ['n', 'c'].some((el) => M.limits[el].src === 'series floor' || M.limits[el].src === 'smallest standard');
+    out.lines.push({ t: 'A sample whose peak is smaller than the floor is flagged and marked for a rerun.' + (!walks ? ''
+      : ' The floor starts at the smallest standard of the size series. While three or more larger standards remain, the smallest one '
+        + 'left is compared with the straight line through the larger ones, using its δ after the blank step. If it lies off that line by '
+        + 'more than the limit, the floor moves up to the next standard, which is tested the same way. The first standard within the '
+        + 'limit ends the walk.') });
+    if (walks) {
+      out.lines.push({ t: off == null ? 'The configuration turns this test off, so the floor is the smallest standard.'
+        : 'The limit is ' + this.num(off) + '‰' + (mult != null ? ', or ' + this.num(mult) + ' times the residual SD of that line (the scatter '
+          + 'of the larger standards about it) when that is larger' : '') + '. The walk needs at least four standards.' });
+    }
+    for (const el of ['n', 'c']) {
+      const lim = M.limits[el], fl = M.floor[el], gas = el === 'n' ? 'N2' : 'CO2', iso = this.iso(el), ak = el === 'n' ? 'aN' : 'aC';
+      const below = S.filter((q) => this.belowFloor(q, el));
+      const list = !lim.min ? '' : below.length ? ' ' + this.count(below.length, 'sample has', 'samples have') + ' a smaller ' + gas + ' peak: '
+        + this.rowList(below.map((q) => this.who(q))) + '.' : ' No sample has a smaller ' + gas + ' peak.';
+      let t;
+      if (lim.src === 'configuration') {
+        t = lim.min ? iso + ': the configuration sets the floor at ' + this.fx(lim.min, 2) + ' Vs, so the size series does not set it.'
+          : iso + ': the configuration sets the floor at 0 Vs, so no ' + gas + ' peak is too small.';
+      } else if (lim.src === 'lab minimum') {
+        t = iso + ': this run has no size series, so the floor is the lab’s minimum peak, ' + this.fx(lim.min, 2) + ' Vs.';
+      } else if (lim.src == null) {
+        t = iso + ': this run has no size series, and the configuration sets no minimum peak, so no ' + gas + ' peak is too small.';
+      } else if (lim.src === 'series floor') {
+        const moved = fl.steps.filter((s) => s.moved), last = moved[moved.length - 1];
+        t = iso + ': the floor is ' + this.fx(lim.min, 2) + ' Vs, the peak of ' + who(last.next) + ', since '
+          + (moved.length === 1 ? 'the smallest standard lies' : 'the ' + this.words(moved.length) + ' smallest standards lie') + ' off the line through the larger ones.';
+      } else {
+        const first = M.P.find((q) => q.role === 'L' && q[ak] === fl.smallest);
+        t = iso + ': the floor is the smallest standard' + (first ? ', ' + this.who(first) : '') + ', at ' + this.fx(lim.min, 2) + ' Vs'
+          + (fl.steps.length ? ', which lies within the limit of the line through the larger ones.' : off != null && fl.n < 4 ? '; with fewer than four standards, the walk does not start.' : '.');
+      }
+      out.lines.push({ t: t + list });
+      if (lim.src !== 'series floor' && lim.src !== 'smallest standard') continue;
+      for (const s of fl.steps) {
+        out.steps.push({ iso, std: who(s.row), area: this.fx(s.area, 2), off: this.fs(s.resid, 3), lim: this.fx(s.limit, 3),
+          result: s.moved ? 'Beyond the limit, so the floor moves up to ' + who(s.next) : 'Within the limit, so this standard is the floor' });
+      }
+    }
+    out.hasSteps = out.steps.length > 0;
+    return out;
   }
 
   vDrift(M, d, sel, H) {
@@ -2356,10 +2497,23 @@ class Component extends DCLogic {
     };
     const opts = (el) => [{ t: 'Pooled anchors', v: 'pooled' }, { t: 'Drift monitors', v: 'monitors' }]
       .concat(run.uLab[el] != null ? [{ t: 'Configuration', v: 'config' }] : []);
+    // ea_irms 1.4.15: the drift monitors' final values against the repeatability on the calibrated scale (s × m), and
+    // whether their SD takes its place
+    const monLine = (el) => {
+      const m = U[el].monitors;
+      if (!m || m.sd == null || m.repeatability == null || m.n < 3) return [];
+      const how = m.used ? 'their SD is used in its place' : !m.larger ? 'not larger, so the repeatability stays'
+        : m.switch === 'Off' ? 'larger, but the configuration does not use it' : 'larger, but not at p < ' + this.num(M.settings.alpha) + ', so the repeatability stays';
+      return [{ t: 'Drift monitors: SD of their final values ' + this.fx(m.sd, 3) + '‰ against the repeatability on the calibrated scale, '
+        + this.fx(m.repeatability, 3) + '‰' + (m.p != null ? ' (F test, ' + this.peq(m.p) + ')' : '') + '; ' + how, on: m.used }];
+    };
     const ctrl = [
-      this.seg(this.iso('n') + ' repeatability', 'uSrcN', d.uSrcN, opts('n'), H, [src('n')]),
-      this.seg(this.iso('c') + ' repeatability', 'uSrcC', d.uSrcC, opts('c'), H, [src('c')]),
+      this.seg(this.iso('n') + ' repeatability', 'uSrcN', d.uSrcN, opts('n'), H, [src('n')].concat(monLine('n'))),
+      this.seg(this.iso('c') + ' repeatability', 'uSrcC', d.uSrcC, opts('c'), H, [src('c')].concat(monLine('c'))),
     ];
+    // the terms of the corrections in force (ea_irms 1.4.15), and their sum of squares at a position
+    const KR = [['blank', 'blank'], ['linearity', 'linearity'], ['drift', 'drift']];
+    const tsq = (q, el) => { const t = q[el].terms || {}; let s = 0; for (const [k] of KR) if (t[k] != null) s += t[k] * t[k]; return s; };
     const charts = [];
     for (const el of ['n', 'c']) {
       const b = U[el], f = M.cal[el], col = this.col(el), title = '1σ of ' + this.iso(el) + ' across the scale';
@@ -2371,17 +2525,21 @@ class Component extends DCLogic {
             : 'No sample has a ' + this.iso(el) + ' value.'));
         continue;
       }
+      // the line is 1σ without the corrections' terms, with the drift monitors' SD where it takes the place of s × m
+      const m = b.monitors, extra = m && m.used ? m.sd * m.sd - m.repeatability * m.repeatability : 0;
       const lo = Math.min(...xm), hi = Math.max(...xm), curve = [];
       for (let i = 0; i <= 60; i++) {
         const x = lo + (hi - lo) * i / 60;
-        curve.push([f.slope * x + f.intercept, b.at(x).u]);
+        curve.push([f.slope * x + f.intercept, Math.sqrt(Math.max(0, b.at(x).u * b.at(x).u + extra))]);
       }
+      const lifted = S.some((q) => q[el].u != null && tsq(q, el) > 0);
       const fin = S.map((q) => q[el].fin);
       const xd = this.dom(fin.concat([f.accMin, f.accMax]), 0.05);
       const yd = { min: 0, max: this.dom(Us.concat(curve.map((p) => p[1])), 0.15).max };
       const name = (acc) => { const q = A.find((p) => (el === 'n' ? p.acc15 : p.acc13) === acc); return q ? q.id : ''; };
       charts.push(this.chart({
-        title, sub: 'Samples ' + this.span(Math.min(...Us), Math.max(...Us), 3) + '‰; least near the anchors’ mean',
+        title, sub: 'Samples ' + this.span(Math.min(...Us), Math.max(...Us), 3) + '‰; least near the anchors’ mean'
+          + (lifted ? '; the corrections’ terms lift a sample above the line' : '') + (m && m.used ? '; the drift monitors’ SD in place of s × m' : ''),
         badge: this.badge(true, '1σ'), color: col, x: xd, y: yd,
         lineA: { paths: [curve], stroke: col, w: 1.8 },
         lineB: { paths: [[[f.accMin, 0], [f.accMin, yd.max]], [[f.accMax, 0], [f.accMax, yd.max]]], stroke: '#56646F', w: 1, dash: '3 4' },
@@ -2389,38 +2547,58 @@ class Component extends DCLogic {
         // the anchors' names, one lower than the other when the anchors sit close on the axis
         notes: [{ x: f.accMin, y: yd.max * 0.94, t: name(f.accMin), at: 'right', c: '#3B4A55' },
           { x: f.accMax, y: yd.max * ((f.accMax - f.accMin) / (xd.max - xd.min) < 0.3 ? 0.82 : 0.94), t: name(f.accMax), at: 'left', c: '#3B4A55' }],
-        legend: [{ kind: 'dot', color: col, label: 'Sample' }, { kind: 'line', color: col, label: '1σ along the line' }, { kind: 'dash', color: '#56646F', label: 'Anchor values' }],
+        legend: [{ kind: 'dot', color: col, label: lifted ? 'Sample, with the corrections’ terms' : 'Sample' },
+          { kind: 'line', color: col, label: lifted ? '1σ along the line, without them' : '1σ along the line' }, { kind: 'dash', color: '#56646F', label: 'Anchor values' }],
         xLabel: this.iso(el) + ' calibrated (‰)', yLabel: '1σ (‰)',
       }));
     }
+    // the share of each source in the variance of the selected position's 1σ: the repeatability (or the drift monitors'
+    // SD in its place), the anchors' certificates and measured means, and the term of each correction in force
     const q = M.P.find((p) => p.r === sel) || S[0] || A[0] || M.P[0];
     const part = (el) => {
-      const p = q[el].parts;
-      if (!p) return null;
-      const t = p.rep + p.acc + p.mean;
-      return t > 0 ? [p.rep / t, p.acc / t, p.mean / t] : null;
+      const p = q[el].parts, u = q[el].u;
+      if (!p || u == null || !(u > 0)) return null;
+      // a correction not in force for this element has no share (null), not one of 0
+      const m = U[el].monitors, t = q[el].terms || {}, tot = u * u, sq = (k) => (!(k in t) ? null : t[k] != null ? t[k] * t[k] / tot : 0);
+      return [(m && m.used ? m.sd * m.sd : p.rep) / tot, p.acc / tot, p.mean / tot, sq('blank'), sq('linearity'), sq('drift')];
     };
     const pn = part('n'), pc = part('c');
     const pct = (v) => (v == null ? '' : Math.round(v * 100) + '%');
     const w = (v) => (v == null ? '0%' : Math.max(1, Math.round(v * 100)) + '%');
+    const share = (k, i) => ({ k, n: pct(pn && pn[i]), c: pct(pc && pc[i]), wn: w(pn && pn[i]), wc: w(pc && pc[i]) });
+    const used = (el) => !!(U[el].monitors && U[el].monitors.used);
+    const inForce = (k) => ['n', 'c'].some((el) => U[el].corrections && k in U[el].corrections);
     const budget = {
       title: this.who(q), rows: [
-        { k: 'Single-analysis repeatability', n: pct(pn && pn[0]), c: pct(pc && pc[0]), wn: w(pn && pn[0]), wc: w(pc && pc[0]) },
-        { k: 'Anchors’ certified values', n: pct(pn && pn[1]), c: pct(pc && pc[1]), wn: w(pn && pn[1]), wc: w(pc && pc[1]) },
-        { k: 'Anchors’ measured means', n: pct(pn && pn[2]), c: pct(pc && pc[2]), wn: w(pn && pn[2]), wc: w(pc && pc[2]) },
-      ],
+        share(used('n') && used('c') ? 'Repeatability, the drift monitors’ SD' : used('n') || used('c')
+          ? 'Repeatability (the drift monitors’ SD for ' + this.iso(used('n') ? 'n' : 'c') + ')' : 'Single-analysis repeatability', 0),
+        share('Anchors’ certified values', 1), share('Anchors’ measured means', 2),
+      ].concat(KR.map(([k], i) => (inForce(k) ? share(this.cap(k) + ' correction', 3 + i) : null)).filter(Boolean)),
     };
     const certs = (el) => {
       const vs = [...new Set(this.anchorGroups(M).map((g) => (el === 'n' ? g.uacc15 : g.uacc13)).filter((v) => v != null))];
       return vs.length ? vs.map((v) => this.fx(v, 2)).join(', ') : 'none';
     };
+    const monUse = (el) => {
+      const m = U[el].monitors;
+      if (!m || m.sd == null || m.repeatability == null || m.n < 3) return '';
+      return (m.used ? 'yes' : 'no') + (m.p != null ? ', ' + this.peq(m.p) : m.larger ? '' : ', not larger');
+    };
+    const term = (el, k) => {
+      const c = U[el].corrections || {};
+      return k in c ? this.fx(c[k], 3) : M.settings.kragten === 'On' ? 'not in force' : 'off';
+    };
     const rows = [
       { k: 'Repeatability, 1σ (‰)', a: this.fx(U.n.uS, 3), b: this.fx(U.c.uS, 3) },
       { k: 'Pooled anchor SD (‰)', a: this.fx(U.n.pooled, 3), b: this.fx(U.c.pooled, 3) },
-      { k: 'Drift monitor SD (‰)', a: this.fx(M.monSD.n, 3), b: this.fx(M.monSD.c, 3) },
+      { k: 'Drift monitor SD, after drift (‰)', a: this.fx(M.monSD.n, 3), b: this.fx(M.monSD.c, 3) },
+      { k: 'Drift monitor SD, final values (‰)', a: this.fx(U.n.monitors && U.n.monitors.sd, 3), b: this.fx(U.c.monitors && U.c.monitors.sd, 3) },
+      { k: 'Monitors’ SD in place of the repeatability', a: monUse('n'), b: monUse('c') },
     ];
     if (run.uLab.n != null || run.uLab.c != null) rows.push({ k: 'Configuration value (‰)', a: this.fx(run.uLab.n, 3), b: this.fx(run.uLab.c, 3) });
-    rows.push({ k: 'Anchor certificates, 1σ (‰)', a: certs('n'), b: certs('c') }, { k: '1σ of the samples (‰)', a: this.uSpan(S, 'n', 3), b: this.uSpan(S, 'c', 3) });
+    rows.push({ k: 'Anchor certificates, 1σ (‰)', a: certs('n'), b: certs('c') });
+    for (const [k] of KR) rows.push({ k: 'Largest ' + k + ' term (‰)', a: term('n', k), b: term('c', k) });
+    rows.push({ k: '1σ of the samples (‰)', a: this.uSpan(S, 'n', 3), b: this.uSpan(S, 'c', 3) });
     const lines = [];
     for (const el of ['n', 'c']) {
       const key = el === 'n' ? 'uSrcN' : 'uSrcC', now = this.uSrc(M, d, el), alt = now === 'monitors' ? 'pooled' : 'monitors';
@@ -2431,8 +2609,21 @@ class Component extends DCLogic {
       lines.push({ t: 'With the ' + (alt === 'monitors' ? 'drift monitors’ SD (' + this.fx(M.monSD[el], 3) + '‰)' : 'pooled anchor SD (' + this.fx(U[el].pooled, 3) + '‰)')
         + ', 1σ(' + this.iso(el) + ') would be ' + this.span(Math.min(...a), Math.max(...a), 3) + '‰ instead of ' + this.span(Math.min(...b), Math.max(...b), 3) + '‰.' });
     }
+    // ea_irms 1.4.15: what the corrections' terms add to the samples' 1σ
+    for (const el of ['n', 'c']) {
+      const c = U[el].corrections || {}, ks = KR.map(([k]) => k).filter((k) => c[k] != null);
+      const withT = S.filter((p) => p[el].u != null);
+      if (!ks.length || !withT.length) continue;
+      const now = withT.map((p) => p[el].u), without = withT.map((p) => Math.sqrt(Math.max(0, p[el].u * p[el].u - tsq(p, el))));
+      const many = ks.length > 1;
+      lines.push({ t: 'In ' + this.iso(el) + ', the ' + this.andList(ks) + ' correction' + (many ? 's' : '') + ' in force add' + (many ? '' : 's') + ' '
+        + (many ? 'terms of up to ' + this.andList(ks.map((k) => this.fx(c[k], 3) + '‰ (' + k + ')')) : 'a term of up to ' + this.fx(c[ks[0]], 3) + '‰')
+        + ' to 1σ. Without ' + (many ? 'them' : 'it') + ', the samples’ 1σ would be ' + this.span(Math.min(...without), Math.max(...without), 3)
+        + '‰ instead of ' + this.span(Math.min(...now), Math.max(...now), 3) + '‰.' });
+    }
     if (!lines.length) lines.push({ t: 'No other repeatability source is available in this run, so the choice changes no 1σ.' });
-    return { ctrl, charts, stats: { rows }, effect: { title: 'Effect of this choice', lines }, budget: pn || pc ? budget : null };
+    return { ctrl, charts, stats: { rows }, effect: { title: 'Effect of this choice', lines }, budget: pn || pc ? budget : null,
+      checks: this.stepChecks(M, d, 'unc') };
   }
 
   // Every check of the run, each tagged with the step it belongs to, in the order of the steps.
@@ -2457,10 +2648,19 @@ class Component extends DCLogic {
     };
     effect('lin', 'Effect of the linearity choice', 'linearity');
     if (S.length) {
-      const cnt = (f) => S.filter((q) => q.flags.includes(f)).length;
-      const nu = cnt('N below linearity range'), no = cnt('N above linearity range'), cu = cnt('C below linearity range'), co = cnt('C above linearity range');
-      add('lin', { s: nu + no + cu + co ? 'note' : 'ok', title: 'Sample size against the size series',
-        t: 'N2 peaks of ' + nu + ' samples fall below the series and ' + no + ' above it; CO2 peaks of ' + cu + ' below and ' + co + ' above.' });
+      // ea_irms 1.4.15: below the floor the size series sets (or the configuration's, or the lab's minimum peak)
+      const under = (el) => S.filter((q) => this.belowFloor(q, el)).length, over = (el) => S.filter((q) => this.aboveRange(q, el)).length;
+      const one = (el, gas) => {
+        const lim = M.limits[el], parts = [];
+        if (lim.src != null && lim.min) {
+          parts.push(this.count(under(el), 'sample') + ' below ' + ({ configuration: 'the floor the configuration sets', 'lab minimum': 'the lab’s minimum peak' }[lim.src]
+            || 'the floor') + ' (' + this.fx(lim.min, 2) + ' Vs)');
+        }
+        if (lim.max) parts.push((parts.length ? over(el) : this.count(over(el), 'sample')) + ' above the series');
+        return gas + ': ' + (parts.length ? this.andList(parts) + '.' : 'no size series and no minimum peak, so no peak is too small or too large.');
+      };
+      add('lin', { s: under('n') + over('n') + under('c') + over('c') ? 'note' : 'ok', title: 'Sample size against the size series',
+        t: one('n', 'N2') + ' ' + one('c', 'CO2') + ' A sample whose peak is below the floor is marked for a rerun.' });
     }
     effect('drift', 'Effect of the drift choice', 'drift');
     const mons = M.P.filter((q) => q.role === 'D');
@@ -2474,6 +2674,24 @@ class Component extends DCLogic {
           : 'Fewer than five monitors are in the fit, so none is tested as an outlier.') + (lo.length ? ' Left out: ' + lo.join(', ') + '.' : '') });
     } else {
       add('drift', { s: 'note', title: 'Drift monitors agree', t: 'This run has no drift monitors, so drift was not checked.' });
+    }
+    // ea_irms 1.4.15: the drift monitors against an accepted value their row of the standards table gives, as a check
+    // standard is held to its own; shown only when the table gives one
+    {
+      const els = ['n', 'c'].filter((el) => mons.some((q) => (el === 'n' ? q.acc15 : q.acc13) != null && q[el].fin != null));
+      if (els.length) {
+        const held = mons.filter((q) => els.some((el) => (el === 'n' ? q.acc15 : q.acc13) != null && q[el].fin != null));
+        const accs = els.map((el) => {
+          const v = [...new Set(held.map((q) => (el === 'n' ? q.acc15 : q.acc13)).filter((x) => x != null))];
+          return this.iso(el) + ' ' + v.map((x) => this.fx(x, 2) + '‰').join(', ');
+        });
+        const off = held.filter((q) => q.flags.some((f) => /^monitor /.test(f)));
+        add('drift', { s: off.length ? 'note' : 'ok', title: 'Drift monitors against their accepted value',
+          t: this.count(held.length, 'drift monitor') + ' in this run against the accepted value the standards table gives them (' + this.andList(accs) + ')'
+            + (off.length ? '; ' + (off.length === 1 ? 'one differs' : off.length + ' differ') + ' from it by more than ' + this.num(set.checkOffset) + '‰: '
+              + off.map((q) => this.who(q) + ', ' + q.flags.filter((f) => /^monitor /.test(f)).map((f) => this.ftext(f).replace(/^monitor /, '')).join(', ')).join('; ') + '.'
+              : '; each is within ' + this.num(set.checkOffset) + '‰ of it.') });
+      }
     }
     // ea_irms 1.4.10: anchors of one material set no scale
     for (const el of ['n', 'c']) {
@@ -2558,7 +2776,38 @@ class Component extends DCLogic {
       const ec = this.elemAnchorCheck(M);
       if (ec) add('elem', ec);
     }
+    add('unc', this.aceCheck(M));
     return out.map((c) => Object.assign({}, c, this.status(c.s)));
+  }
+
+  // ea_irms 1.4.15: every acetanilide analysis of the run, the size series and the drift monitors used, against the
+  // repeatability the samples' 1σ carries (M.ace from the port). They are one material, so their scatter shows how well
+  // that 1σ holds; where they scatter more, by a one-sided F test, every sample of that element is marked for a check.
+  aceCheck(M) {
+    const A = M.ace || {}, alpha = this.num(M.settings.alpha), title = 'Acetanilide scatter against 1σ';
+    const els = ['n', 'c'].filter((el) => A[el]);
+    if (!els.length || els.every((el) => A[el].switch !== 'On')) return { s: 'note', title, t: 'The configuration turns this check off.' };
+    let over = false, tested = 0;
+    const lines = els.map((el) => {
+      const a = A[el], iso = this.iso(el);
+      if (a.switch !== 'On') return iso + ': the configuration turns this check off.';
+      if (a.p == null) {
+        return iso + ': not tested, since ' + (a.n < 3 ? 'fewer than three acetanilide analyses have a final value'
+          : !a.basis ? 'the samples carry no repeatability to compare with' : 'the repeatability has no degrees of freedom') + '.';
+      }
+      tested++;
+      over = over || a.over;
+      const what = [a.nSeries ? this.count(a.nSeries, 'standard') + ' of the size series' : '', a.nMonitors ? this.count(a.nMonitors, 'drift monitor') : '']
+        .filter(Boolean);
+      return iso + ': the ' + this.andList(what) + ' have an SD of ' + this.fx(a.sd, 3) + '‰ against the samples’ repeatability of ' + this.fx(a.basis, 3)
+        + '‰' + (a.fromMonitors ? ' (the drift monitors’ SD)' : '') + ' (F test, ' + this.peq(a.p) + ')'
+        + (a.over ? ', more than the repeatability allows, so every sample’s ' + iso + ' is marked for a check.'
+          : a.sd > a.basis ? ', larger, but not at p < ' + alpha + '.' : ', no more than the repeatability allows.');
+    });
+    return { s: over ? 'caution' : tested === els.length ? 'ok' : 'note', title,
+      t: lines.join(' ') + ' The size series and the drift monitors are one material, so their scatter after every correction shows whether '
+        + 'the samples’ 1σ holds; the test is one-sided, at p < ' + alpha + '.'
+        + (over ? ' More scatter means the samples’ 1σ is too small; look for a cause in the earlier steps before using it.' : '') };
   }
 
   // Whether the anchors read as one material each (D.anchorMaterial from the engine): the analyses of one
@@ -2657,8 +2906,9 @@ class Component extends DCLogic {
     s.push(cal);
     const blankText = (el) => {
       const blk = B[el], what = el === 'n' ? 'nitrogen' : 'carbon', gas = el === 'n' ? 'N2' : 'CO2';
-      // a blank peak of one gas only: the other gas has no blank to subtract, which the text says
-      if (!blk.n) return B[other(el)].n ? 'No blank capsule gave a ' + gas + ' peak, so no ' + what + ' blank was subtracted.' : null;
+      // a blank peak of one gas only: the other gas has no blank to subtract, which the text says (ea_irms 1.4.15: below
+      // detection, since the capsules were measured)
+      if (!blk.n) return B[other(el)].n ? 'The ' + what + ' blank was below detection (no blank capsule gave a ' + gas + ' peak), so none was subtracted.' : null;
       const caps = blk.n === 1 ? 'the blank capsule gave a ' + gas + ' peak of ' + this.fx(blk.area, 2) + ' Vs' : 'the ' + blk.n + ' blank capsules gave ' + gas + ' peaks of ' + this.fx(blk.area, 2) + ' Vs on average'
         + (blk.sd != null ? ' with a ' + this.iso(el) + ' SD of ' + this.fx(blk.sd, 2) + '‰' : '');
       return blk.inForce ? 'A ' + what + ' blank of ' + this.fx(blk.area, 2) + ' Vs (' + this.count(blk.n, 'capsule') + ', ' + this.iso(el) + ' ' + this.fx(blk.d, 2) + '‰) was subtracted by mass balance.'
@@ -2666,7 +2916,7 @@ class Component extends DCLogic {
     };
     const bt = ['n', 'c'].map(blankText).filter(Boolean);
     if (bt.length) s.push(...bt);
-    else s.push(M.P.some((q) => q.role === 'B') ? 'No blank was subtracted, since no blank capsule gave a peak.' : 'No blank was subtracted; the run has no blank capsules.');
+    else s.push(M.P.some((q) => q.role === 'B') ? 'The blank was below detection (no blank capsule gave a peak), so none was subtracted.' : 'No blank was subtracted; the run has no blank capsules.');
     const mat = this.material(M, 'L'), matD = this.material(M, 'D');
     const why = (l) => (l.mode === 'On' && !(l.fit && l.fit.p != null && l.fit.p < set.alpha) ? ', applied by choice'
       : l.mode === 'Off' && l.fit && l.fit.p != null && l.fit.p < set.alpha ? ', switched off by choice' : '');
@@ -2732,15 +2982,25 @@ class Component extends DCLogic {
     const srcName = (k) => (k === 'monitors' ? 'the SD of the drift monitors' : k === 'config' ? 'a value set in the configuration' : 'the pooled SD of the anchor replicates');
     const sN = this.uSrc(M, d, 'n'), sC = this.uSrc(M, d, 'c');
     const parts = 'combine the anchors’ certified uncertainties, the standard errors of their measured means, and single-analysis repeatability (';
-    const after = '), propagated through the calibration; they do not include the blank, peak-size, or drift corrections.';
+    // ea_irms 1.4.15: a Kragten term for each correction in force, and the drift monitors' SD where it took the place of
+    // the repeatability
+    const corrName = { blank: 'blank', linearity: 'peak-size', drift: 'drift' };
+    const after = (els) => {
+      if (set.kragten !== 'On') return '), propagated through the calibration; they do not include the blank, peak-size, or drift corrections.';
+      const ks = ['blank', 'linearity', 'drift'].filter((k) => els.some((el) => U[el].corrections && U[el].corrections[k] != null));
+      return '), propagated through the calibration' + (ks.length ? ', with a Kragten term for the ' + this.andList(ks.map((k) => corrName[k]))
+        + ' correction' + (ks.length > 1 ? 's' : '') + ' in force' : '') + '.';
+    };
+    const monSdText = (els) => els.filter((el) => U[el].monitors && U[el].monitors.used).map((el) => ' For ' + iso(el) + ', the drift monitors’ SD ('
+      + this.fx(U[el].monitors.sd, 3) + '‰) took the place of the repeatability, being larger' + (U[el].monitors.p != null ? ' (F test, ' + this.peq(U[el].monitors.p) + ')' : '') + '.').join('');
     if (has('n') && has('c')) {
       const rep = sN === sC ? srcName(sN) + ', ' + this.fx(U.n.uS, 3) + '‰ for δ¹⁵N and ' + this.fx(U.c.uS, 3) + '‰ for δ¹³C'
         : srcName(sN) + ' for δ¹⁵N, ' + this.fx(U.n.uS, 3) + '‰, and ' + srcName(sC) + ' for δ¹³C, ' + this.fx(U.c.uS, 3) + '‰';
-      s.push('Uncertainties are one standard deviation (1σ) and ' + parts + rep + after);
+      s.push('Uncertainties are one standard deviation (1σ) and ' + parts + rep + after(['n', 'c']) + monSdText(['n', 'c']));
     } else if (has('n') || has('c')) {
       const el = has('n') ? 'n' : 'c';
-      s.push('Uncertainties of ' + iso(el) + ' are one standard deviation (1σ) and ' + parts + srcName(el === 'n' ? sN : sC) + ', ' + this.fx(U[el].uS, 3) + '‰' + after
-        + ' No uncertainty is reported for ' + iso(other(el)) + ', since ' + noU(other(el), false) + '.');
+      s.push('Uncertainties of ' + iso(el) + ' are one standard deviation (1σ) and ' + parts + srcName(el === 'n' ? sN : sC) + ', ' + this.fx(U[el].uS, 3) + '‰' + after([el])
+        + monSdText([el]) + ' No uncertainty is reported for ' + iso(other(el)) + ', since ' + noU(other(el), false) + '.');
     } else {
       s.push('No uncertainty is reported, since ' + (noU('n', false) === noU('c', false) ? noU('n', false) : noU('n', true) + ' and ' + noU('c', true).replace(/^no anchor/, 'for ' + iso('c') + ' no anchor')) + '.');
     }
@@ -2749,7 +3009,8 @@ class Component extends DCLogic {
 
   vResults(M, d, sel, H, filt) {
     const S = this.samples(M), st = this.state, run = st.run, nm = this.names(run);
-    const size = (q) => q.flags.some((f) => /linearity range/.test(f));
+    // ea_irms 1.4.15: a peak under the floor the size series sets, or under the lab's minimum peak, is flagged for its size too
+    const size = (q) => q.flags.some((f) => /linearity range|series floor|minimum peak/.test(f));
     const sets = { all: S, inside: S.filter((q) => !size(q)), size: S.filter(size), carry: S.filter((q) => q.carry) };
     const list = sets[filt] || S;
     const rows = list.map((q) => ({
@@ -2760,7 +3021,7 @@ class Component extends DCLogic {
       pick: () => H.pick(q.r), sbg: q.r === sel ? '#E9EFF5' : '#FFFFFF',
       cur: q.r === sel ? 'true' : 'false', label: q.id + ', position ' + q.r + '; show its correction steps',
     }));
-    const filters = [['all', 'All'], ['inside', 'Inside the size series'], ['size', 'Outside the size series'], ['carry', 'Carryover']].map(([k, t]) => ({
+    const filters = [['all', 'All'], ['inside', 'Peak size accepted'], ['size', 'Peak size flagged'], ['carry', 'Carryover']].map(([k, t]) => ({
       t: t + ' ' + sets[k].length, pick: () => H.filter(k), bg: filt === k ? '#13212B' : '#FFFFFF', fg: filt === k ? '#FFFFFF' : '#3B4A55', bd: filt === k ? '#13212B' : '#C9D2DB',
       pressed: filt === k ? 'true' : 'false',
     }));
@@ -2771,10 +3032,10 @@ class Component extends DCLogic {
       if (q.n.u != null) errs.push([q.c.fin, q.n.fin - q.n.u, q.c.fin, q.n.fin + q.n.u]);
     }
     const chart = both.length ? this.chart({
-      title: this.iso('n') + ' against ' + this.iso('c'), sub: both.length + ' samples, error bars 1σ; hollow where a peak is outside the size series', color: '#13212B', r: 4.4,
+      title: this.iso('n') + ' against ' + this.iso('c'), sub: both.length + ' samples, error bars 1σ; hollow where a peak’s size is flagged', color: '#13212B', r: 4.4,
       x: this.dom(both.map((q) => q.c.fin), 0.06), y: this.dom(both.map((q) => q.n.fin), 0.06), errs: { segs: errs, stroke: MARK },
       pts: both.map((q) => ({ x: q.c.fin, y: q.n.fin, kind: size(q) ? 'hollow' : 'fill', ring: q.carry, sel: q.r === sel, label: q.id + ', position ' + q.r + ': ' + this.fx(q.n.fin, 2) + ', ' + this.fx(q.c.fin, 2) + '‰', pick: () => H.pick(q.r) })),
-      legend: [{ kind: 'dot', color: '#13212B', label: 'Inside the size series' }, { kind: 'hollow', color: '#13212B', label: 'Outside it' }, { kind: 'ring', color: '#13212B', label: 'Carryover flag' }],
+      legend: [{ kind: 'dot', color: '#13212B', label: 'Peak size accepted' }, { kind: 'hollow', color: '#13212B', label: 'Peak size flagged' }, { kind: 'ring', color: '#13212B', label: 'Carryover flag' }],
       xLabel: this.iso('c') + ' (‰ VPDB)', yLabel: this.iso('n') + ' (‰ AIR)', H: 380,
     }) : this.none(this.iso('n') + ' against ' + this.iso('c'), '#13212B', 'No sample has both a δ¹⁵N and a δ¹³C value.');
     const busy = st.busy, lo = st.boot && st.boot.libreoffice === false;
@@ -3089,12 +3350,18 @@ class Component extends DCLogic {
       alpha: this.num(set.alpha), k: this.num(set.k), elemGate: this.num(set.elemGate),
       blankFlag: set.blankMultiple ? 'Samples smaller than ' + this.times(set.blankMultiple) + ' the blank are flagged either way.' : 'The configuration turns off the flag for samples close to the blank.',
       linSeries: 'The size series', monitors: 'Drift monitors', anchors: 'The anchors',
+      // ea_irms 1.4.15: what 1σ holds besides the calibration, as the configuration's switches set it
+      uncTerms: (set.kragten === 'On' ? 'It also holds a term for each correction in force: the blank, linearity, or drift correction is moved by its own '
+        + 'uncertainty, and the change in the result is the term.' : 'The configuration leaves out the terms of the blank, linearity, and drift corrections.')
+        + (set.monitorRep === 'Off' ? '' : ' Where the drift monitors scatter more than the repeatability allows'
+          + (set.monitorRep === 'Auto' ? ' (a one-sided F test, which compares the two variances, at p < ' + this.num(set.alpha) + ')' : '')
+          + ', their SD takes its place.'),
     };
     let flow = { kicker: '', file: '', runLabel: 'Run', multi: false, runs: [], rail: [], ctrl: [], hasCtrl: false, ribbon: [], legend: [], ribbonStart: '', ribbonEnd: '', ribbonMin: '0px', charts: [], hasCharts: false,
       stats: { rows: [] }, hasStats: false, statA: '', statB: '', effect: { title: '', lines: [] }, hasEffect: false, checks: [], hasChecks: false,
       budget: { title: '', rows: [] }, hasBudget: false, insp: { title: '', sub: '', facts: [], chain: [], tail: [], flags: [], hasFlags: false, noFlags: false },
       setupRows: [], prev: { t: '', pick: null }, next: { t: '', pick: null, busy: false }, stdSource: '', warn: false, warnText: '',
-      explain: this.explainShell(null, st), hasExplain: false };
+      explain: this.explainShell(null, st), hasExplain: false, floor: { title: '', lines: [], steps: [], hasSteps: false }, hasFloor: false };
     let res = { rows: [], filters: [], charts: [], downloads: [], chips: [], methods: '', multi: false,
       batch: { title: '', note: '', runs: [], reps: [], hasReps: false, noReps: '', repNote: '' } };
     if (M && isFlow) {
@@ -3102,7 +3369,7 @@ class Component extends DCLogic {
       if (matL) text.linSeries = 'The ' + matL + ' size series';
       if (matD) text.monitors = this.cap(matD) + ' monitors';
       if (groups.length) text.anchors = this.andList(groups.map((g) => g.name));
-      let view = { ctrl: [], charts: [], stats: null, effect: null, checks: [], budget: null };
+      let view = { ctrl: [], charts: [], stats: null, effect: null, checks: [], budget: null, floor: null };
       let setupRows = [];
       if (scr === 'inst') view = Object.assign(view, this.vInst(M, d, sel, H));
       else if (scr === 'setup') { const v = this.vSetup(M); setupRows = v.rows; view.effect = v.effect; }
@@ -3136,6 +3403,7 @@ class Component extends DCLogic {
         effect: view.effect || { title: '', lines: [] }, hasEffect: !!view.effect,
         checks: view.checks.map((c) => Object.assign({ hasGo: false, goText: '', goLabel: '', go: null }, c)), hasChecks: view.checks.length > 0,
         budget: view.budget || { title: '', rows: [] }, hasBudget: !!view.budget,
+        floor: view.floor || { title: '', lines: [], steps: [], hasSteps: false }, hasFloor: !!view.floor,
         insp: this.inspect(M, sel, scr), setupRows,
         prev: fi > 0 ? { t: 'Back to ' + NAMES[FLOW[fi - 1]], pick: go(FLOW[fi - 1]) } : { t: 'Back to upload', pick: go('upload') },
         next: scr === 'results'

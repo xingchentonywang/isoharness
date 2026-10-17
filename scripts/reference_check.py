@@ -17,7 +17,12 @@ read from the delivered workbook's Setup sheet, and checks three things:
 
 1. Values. Every position value, flag list and fit result /api/process returns
    equals the workbook /api/workbook returns, after LibreOffice has computed it
-   (1e-9 relative), with no formula error and no stray row.
+   (1e-9 relative), with no formula error and no stray row. From ea_irms 1.4.15
+   that includes the floor the size series sets and each step of its walk, the
+   blank below detection, the drift monitors' SD against the repeatability in
+   use, each correction's Kragten term at every position and its largest, the
+   acetanilide's whole-run check, the corrections fitted but not applied, and
+   the Rerun sheet's problems of the whole run, unapplied list and samples.
 2. Engine. /api/process returns what ea_irms returns when called directly here,
    value for value (only when ea_irms imports).
 3. Delivered. The workbook equals the delivered one in every cell: formulas and
@@ -25,8 +30,9 @@ read from the delivered workbook's Setup sheet, and checks three things:
    earlier ea_irms version differs by design where that version changed the
    layout (1.4.3 moved the Results columns and added the uncertainty of %N, %C
    and C:N; 1.4.4 added the rerun mark, its reason and a suggested mass after
-   Flags; 1.4.5 put each value's 1 sigma beside it and dropped the u columns),
-   so compare against workbooks built by the same version.
+   Flags; 1.4.5 put each value's 1 sigma beside it and dropped the u columns;
+   1.4.15 put the corrections fitted but not applied on the Rerun sheet and its
+   samples from row 16), so compare against workbooks built by the same version.
 
 Exits 1 on any mismatch.
 """
@@ -102,6 +108,30 @@ ANCHOR_TOP, ANCHOR_ROWS = 373, 16
 ANCHOR_COLS = {"B": "n", "C": "n_ratio", "D": "ratio_min", "E": "ratio_max", "F": "ratio_x", "G": "d15n_min",
                "H": "d15n_max", "I": "d15n_spread", "J": "d13c_min", "K": "d13c_max", "L": "d13c_spread",
                "M": "level"}
+# ea_irms 1.4.15: the size limits the flags use, the floor the size series sets and where it comes from (None in
+# the engine is an empty cell), the blank below detection, the drift monitors after every correction against the
+# repeatability in use, and the acetanilide's whole-run check
+FITS.update({"B81": ("size_limits", "min_n"), "B82": ("size_limits", "min_c"),
+             "B104": ("size_limits", "max_c"),
+             "B407": ("blank_n", "capsules"), "B408": ("blank_n", "below_detection"),
+             "B409": ("blank_c", "below_detection"),
+             "B413": ("floor_n", "smallest"), "B415": ("floor_n", "floor"), "B416": ("size_limits", "min_n_source"),
+             "B419": ("floor_c", "smallest"), "B421": ("floor_c", "floor"), "B422": ("size_limits", "min_c_source"),
+             "B484": ("rerun", "unapplied_text")})
+SIGMA_TOP = {"n": 425, "c": 439}         # + 0 to 6: the monitors' n, SD, repeatability, df, p, larger, used
+ACE_TOP = {"n": 454, "c": 463}           # + 0 to 6: n, n_series, SD, basis, df, p, over
+for _el in ("n", "c"):
+    FITS.update({f"B{SIGMA_TOP[_el] + k}": (f"unc_{_el}", "monitors", key)
+                 for k, key in enumerate(("n", "sd", "repeatability", "df", "p", "larger", "used"))})
+    FITS.update({f"B{ACE_TOP[_el] + k}": (f"ace_{_el}", key)
+                 for k, key in enumerate(("n", "n_series", "sd", "basis", "df", "p", "over"))})
+# the row of each correction in the 1σ table (Fits, from SIGMA_TOP + 10): term in 1σ (C), fitted but not applied
+# (D), the largest term (I), and the samples moved, the smallest and the largest move (J to L); the Work column
+# of each correction's shift, headed "kb shift N" and so on
+CORRECTIONS = (("blank", "kb"), ("linearity", "kl"), ("drift", "kd"))
+FLOOR_N_TOP = 488                        # the walk up the nitrogen series; the carbon one follows it
+FLOOR_COLS = {"B": "row", "C": "area", "G": "n_line", "N": "line_sd", "O": "limit", "P": "resid"}
+UNAPPLIED_TOP, UNAPPLIED_COUNT = 477, 483
 
 
 def num(v):
@@ -208,7 +238,93 @@ def check_values(body, wb):
              and r - 5 not in {p["row"] for p in positions}]
     if extra:
         bad.append(("extra Work rows", extra[:5]))
-    return n, bad, errors
+    m, more = check_1415(positions, fits, wb, head)          # ea_irms 1.4.15
+    return n + m, bad + more, errors
+
+
+def _same(mine, theirs):
+    """The engine's value against a computed cell: numbers to TOL, booleans as Yes or No, None as empty."""
+    if isinstance(mine, bool):
+        mine = "Yes" if mine else "No"
+    if mine is None or mine == "":
+        return theirs in (None, "")
+    if isinstance(mine, (int, float)):
+        return num(theirs) is not None and near(mine, theirs)
+    return mine == theirs
+
+
+def check_1415(positions, fits, wb, head):
+    """ea_irms 1.4.15: what check_values does not reach through FITS, against the engine's fits (the whole of F,
+    as /api/process returns it) and its positions."""
+    from ea_irms.workbook import RERUN_FIRST_ROW, RERUN_UNAPPLIED_ROW
+    wk, ft, rr = wb["Work"], wb["Fits"], wb["Rerun"]
+    n, bad = 0, []
+
+    def cmp(what, mine, theirs):
+        nonlocal n
+        n += 1
+        if not _same(mine, theirs):
+            bad.append(what + (mine, theirs))
+    # each correction's Kragten term at every position: the size of its shift (Work, "kb shift N" and so on)
+    for p in positions:
+        for el in ("n", "c"):
+            for key, ch in CORRECTIONS:
+                if key in (p.get(f"u_terms_{el}") or {}):
+                    v = num(wk[f"{head[f'{ch} shift {el.upper()}']}{5 + p['row']}"].value)
+                    cmp(("Work", f"{ch} shift {el.upper()}", p["row"]), p[f"u_terms_{el}"][key],
+                        None if v is None else abs(v))
+    # the 1σ table: a term in force, its largest; a correction fitted but not applied, how far it moves the samples
+    unapplied = {(u["el"], u["correction"]): u for u in fits.get("unapplied", [])}
+    for el in ("n", "c"):
+        corr = fits[f"unc_{el}"]["corrections"]
+        for k, (key, _) in enumerate(CORRECTIONS):
+            r = SIGMA_TOP[el] + 10 + k
+            u = unapplied.get((el, key))
+            cmp(("Fits", f"C{r}", el, key, "term in 1σ"), key in corr, ft[f"C{r}"].value)
+            cmp(("Fits", f"I{r}", el, key, "largest term"), corr.get(key), ft[f"I{r}"].value)
+            cmp(("Fits", f"D{r}", el, key, "fitted, not applied"), u is not None, ft[f"D{r}"].value)
+            for col, attr in (("J", "n"), ("K", "lo"), ("L", "hi")):
+                cmp(("Fits", f"{col}{r}", el, key, attr), None if u is None else u[attr], ft[f"{col}{r}"].value)
+    # the walk up the size series, step by step, and no step after the last
+    tops = {"n": FLOOR_N_TOP}
+    for r in range(FLOOR_N_TOP, ft.max_row + 1):
+        if str(ft.cell(r, 1).value or "").startswith("Size series floor, carbon"):
+            tops["c"] = r + 2
+            break
+    for el in ("n", "c"):
+        fl = fits[f"floor_{el}"]
+        top = tops.get(el)
+        if top is None:
+            bad.append(("Fits", "no table of the carbon series floor"))
+            continue
+        for k, step in enumerate(fl["steps"]):
+            for col, key in FLOOR_COLS.items():
+                cmp(("Fits", f"{col}{top + k}", el, "step", key), step[key], ft[f"{col}{top + k}"].value)
+            cmp(("Fits", f"Q{top + k}", el, "tested"), 1, ft[f"Q{top + k}"].value)
+            cmp(("Fits", f"R{top + k}", el, "moved"), 1 if step["moved"] else 0, ft[f"R{top + k}"].value)
+        cmp(("Fits", f"Q{top + len(fl['steps'])}", el, "not tested"), 0, ft[f"Q{top + len(fl['steps'])}"].value)
+    # the corrections fitted but not applied, on Fits in the engine's order and on the Rerun sheet, one a line
+    items = fits["rerun"]["unapplied"]
+    cmp(("Fits", f"B{UNAPPLIED_COUNT}", "unapplied"), len(items), ft[f"B{UNAPPLIED_COUNT}"].value)
+    order = [(el, key) for el in ("n", "c") for key, _ in CORRECTIONS]
+    texts = iter(items)
+    for k, pair in enumerate(order):
+        cmp(("Fits", f"B{UNAPPLIED_TOP + k}", "unapplied", pair),
+            next(texts) if pair in unapplied else None, ft[f"B{UNAPPLIED_TOP + k}"].value)
+    lines = [rr.cell(RERUN_UNAPPLIED_ROW + k, 1).value for k in range(6)]
+    want = (list(items) + [None] * 6)[:6] if items else ["none"] + [None] * 5
+    for k, (mine, theirs) in enumerate(zip(want, lines)):
+        cmp(("Rerun", f"A{RERUN_UNAPPLIED_ROW + k}", "unapplied"), mine, theirs)
+    # the Rerun sheet: the problems of the whole run, and every sample marked, in the order they ran
+    cmp(("Rerun", "A5", "problems of the whole run"), fits["rerun"]["run_level_text"], rr["A5"].value)
+    marked = [p for p in positions if p.get("rerun")]
+    for k, p in enumerate(marked):
+        row = RERUN_FIRST_ROW + k
+        for col, attr in ((1, "row"), (5, "rerun"), (6, "rerun_why"), (7, "rerun_mass")):
+            cmp(("Rerun", f"row {row}", attr), p.get(attr), rr.cell(row, col).value)
+    cmp(("Rerun", f"row {RERUN_FIRST_ROW + len(marked)}", "after the last mark"), None,
+        rr.cell(RERUN_FIRST_ROW + len(marked), 1).value)
+    return n, bad
 
 
 def check_engine(body, export: Path, config_text):

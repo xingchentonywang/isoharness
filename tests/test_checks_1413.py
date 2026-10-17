@@ -169,7 +169,9 @@ def test_the_test_run_passes_both_checks():
         ratios = [by[r].area_c / by[r].area_n for r in m["positions"]]
         assert (m["ratio_min"], m["ratio_max"]) == (min(ratios), max(ratios)) and m["ratio_x"] < 1.02
         assert m["d15n_spread"] < 0.4 and m["d13c_spread"] < 0.04 and m["over"] == []
-    assert F["rerun"]["run_level_text"] == "none found"
+    # neither check is a problem of the whole run. 1.4.15: the one problem the test run has is the acetanilide's
+    # d15N scatter, the check 1.4.15 adds (test_engine_1415.py)
+    assert [t.split(",")[0] for t in F["rerun"]["run_level"]] == ["acetanilide d15N"]
 
 
 def test_anchors_of_two_materials_under_one_label(tmp_path):
@@ -219,7 +221,10 @@ def test_one_analysis_or_one_value_is_not_judged(tmp_path):
 
 
 def test_a_light_drift_monitor_beside_the_anchors(tmp_path):
-    positions, F = process(parse_export(light_variant(tmp_path / "light.csv")), Config(elemental_correction="On"))
+    # 1.4.15: the acetanilide's whole-run check, which fires on the test run, is off, so the problems of the whole
+    # run are this check's alone
+    positions, F = process(parse_export(light_variant(tmp_path / "light.csv")),
+                           Config(elemental_correction="On", ace_scatter_check="Off"))
     texts = []
     for el, name in (("n", "%N"), ("c", "%C")):
         c = F["elem_check"][el]

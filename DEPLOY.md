@@ -186,7 +186,7 @@ The service computes one workbook at a time with LibreOffice, because conversion
 
 ## The database (phase three)
 
-isoharness 0.5.1 does not connect to a database. When phase three does, it will use the schema in `db/`, which these steps put in place on Neon beforehand. Run them from a shell where `DATABASE_URL` holds the connection string of the role that owns the tables, Neon's direct connection rather than the pooled one, typed or pasted into that shell only, never into a chat or a file in the repository. First check the role, and which migrations the database already has:
+isoharness 0.5.2 does not connect to a database. When phase three does, it will use the schema in `db/`, which these steps put in place on Neon beforehand. Run them from a shell where `DATABASE_URL` holds the connection string of the role that owns the tables, Neon's direct connection rather than the pooled one, typed or pasted into that shell only, never into a chat or a file in the repository. First check the role, and which migrations the database already has:
 
 ```
 psql "$DATABASE_URL" -c "SELECT rolname, rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user;"

@@ -243,7 +243,12 @@ def _rederived_u(positions, fits, el, single_mean):
 
 def test_w10_a_material_analyzed_once_takes_the_repeatability_in_use(tmp_path):
     export = single_anchor_variant(tmp_path / "single.csv")
-    positions, fits = process(parse_export(export), SINGLE)
+    # 1.4.15: without the terms of the corrections in force and the drift monitors' scatter, 1σ is the
+    # calibration's alone, as in 1.4.14, which _rederived_u writes out
+    positions, fits = process(parse_export(export), replace(SINGLE, kragten_corrections="Off",
+                                                            monitor_repeatability="Off"))
+    full, full_fits = process(parse_export(export), SINGLE)
+    by_full = {p.row: p for p in full}
     for el, attr in (("n", "u_d15n"), ("c", "u_d13c")):
         b = fits[f"unc_{el}"]
         once = [m for m in b["materials"] if m["n"] == 1]
@@ -254,9 +259,14 @@ def test_w10_a_material_analyzed_once_takes_the_repeatability_in_use(tmp_path):
         old = _rederived_u(positions, fits, el, 0.0)
         samples = [p for p in positions if p.role == "Sample" and getattr(p, attr) is not None]
         assert len(samples) >= 20
+        assert not full_fits[f"unc_{el}"]["monitors"]["used"]        # Auto: the monitors' SD is not in use here
         for p in samples:
             assert abs(getattr(p, attr) - new[p.row]) <= 1e-12 * new[p.row], (el, p.row)
             assert new[p.row] > old[p.row]
+            # with the defaults the terms of the corrections in force add to it in quadrature
+            terms = [t for t in getattr(by_full[p.row], f"u_terms_{el}").values() if t is not None]
+            assert terms and getattr(by_full[p.row], attr) == pytest.approx(
+                math.sqrt(new[p.row] ** 2 + sum(t * t for t in terms)), rel=1e-12), (el, p.row)
     # with a repeatability given, the material's mean takes it too
     _, f2 = process(parse_export(export), replace(SINGLE, u_sample_n=0.181))
     assert [m["u_mean"] for m in f2["unc_n"]["materials"] if m["n"] == 1] == [0.181]
@@ -295,10 +305,12 @@ def test_w03_and_w02_settings_in_the_lab_configuration(tmp_path):
 
 # ------------------------------------------------------------------------------------------ W-02
 def test_w02_the_calibration_line_at_two_levels():
-    _, f = process(parse_export(RUN), Config())
+    # 1.4.15: the acetanilide's whole-run check, which fires on the test run and is a problem of its whole run, is
+    # off, so the problems listed are the calibration line's alone
+    _, f = process(parse_export(RUN), Config(ace_scatter_check="Off"))
     assert {el: f["cal_check"][el]["level"] for el in "nc"} == {"n": "OK", "c": "OK"}
     assert f["rerun"]["run_level_text"] == "none found"
-    _, f = process(parse_export(RUN), TIGHT)
+    _, f = process(parse_export(RUN), replace(TIGHT, ace_scatter_check="Off"))
     n, c = f["cal_check"]["n"], f["cal_check"]["c"]
     assert (n["level"], n["slope_level"], n["sd_level"]) == ("Caution", "Caution", "Note")
     assert (c["level"], c["slope_level"], c["sd_level"]) == ("Note", "Note", None)
@@ -307,7 +319,7 @@ def test_w02_the_calibration_line_at_two_levels():
         "d15N anchor residual SD 0.173 permil, above 0.1",
         "d13C calibration slope 1.0142, more than 0.01 from 1"]
     _, off = process(parse_export(RUN), Config(cal_slope_note=None, cal_slope_caution=None, cal_sd_note=None,
-                                               cal_sd_caution=None))
+                                               cal_sd_caution=None, ace_scatter_check="Off"))
     assert off["cal_check"]["n"]["level"] == "OK" and off["rerun"]["run_level_text"] == "none found"
 
 
@@ -432,7 +444,8 @@ def test_w02_limits_read_as_the_spreadsheet_writes_them():
     for x, text in ((0.05, "0.05"), (0.025, "0.025"), (1.0, "1"), (0, "0"), (0.1 + 0.2, "0.3"), (0.00005, "0.00005"),
                     (2.5e-5, "0.000025"), (1e-9, "0.000000001"), (1e15, "1000000000000000"), (2 / 3, "0.666666666666667")):
         assert _num_text(x) == text, x
-    _, f = process(parse_export(RUN), SMALL)
+    # 1.4.15: the acetanilide's whole-run check, a problem of the test run's whole run, off (see the test above)
+    _, f = process(parse_export(RUN), replace(SMALL, ace_scatter_check="Off"))
     assert f["rerun"]["run_level"] == [
         "d15N calibration slope 1.0266, more than 0.00005 from 1",
         "d15N anchor residual SD 0.173 permil, above 0.0001",

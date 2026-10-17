@@ -28,7 +28,10 @@ already running there (the container image, say), opens the page in Chromium
    figure's drawing is an image named for its number, what it plots against what, its points, and the selected
    one, that the figures' lines and gray marks reach 3:1 against the page, that the sequence's bars are at least
    24 px wide, that the current step, the selected position and the chosen filter say so, and that each button
-   back from the quality checks names its check;
+   back from the quality checks names its check; and (ea_irms 1.4.15) the carbon blank below detection, the floor
+   the size series sets with the table of the walk up the series, the corrections' terms in the uncertainty step's
+   explanation and its sources of uncertainty, and the acetanilide's check in the uncertainty step and the quality
+   checks;
 5. checks that every value the results screen shows (mass, d15N, 1σ, d13C, 1σ, %N,
    %C, C:N, and the flags) equals, to the shown precision, the results table the
    service returns for the same decisions, built here from the processed
@@ -49,7 +52,8 @@ already running there (the container image, say), opens the page in Chromium
    again, and checks the sheet's columns and the run information in the combined
    results and in a run's workbook; then removes a run;
 9. saves a screenshot of every screen at 1440 by 1000 (full page) and of the upload
-   and results screens at 400 px wide;
+   and results screens at 400 px wide, and of the linearity, uncertainty, and quality-check
+   steps at 400 px wide, none of them wider than the window;
 10. loads the page afresh, checks the landing page at 400 px and 1440 px wide, follows
    the brand back to the home page and checks it at 400 px, and reads the example run
    through its button;
@@ -112,7 +116,10 @@ EXPLAINED = ("blank", "lin", "drift", "cal", "elem", "unc")
 MOVED = {"lin": ["Effect of the linearity choice", "Sample size against the size series"],
          "drift": ["Effect of the drift choice", "Drift monitors agree"],
          "cal": ["Calibration line", "Anchors bracket the samples", "Check standard"],    # the first from 1.4.12
-         "elem": ["Elemental content"]}
+         "elem": ["Elemental content"],
+         "unc": ["Acetanilide scatter against 1σ"]}                                      # from ea_irms 1.4.15
+# (ea_irms 1.4.15: "Drift monitors against their accepted value" joins the drift step's checks only where the standards
+# table gives the drift monitors an accepted value, which the package defaults do not.)
 # Two checks the page shows when the engine sends their data (the anchors' material, and the elemental
 # correction judged at the anchors); without it the page shows neither, so the steps' lists above hold either way.
 ENGINE_CHECKS = {"cal": ("Anchors read as one material each", "C/N peak-area ratio"),
@@ -587,7 +594,17 @@ def main(argv=None):
                     mb, after = cells("Mass balance"), cells("After this step")
                     check(mb[0] != "" and mb[0] == after[0], f"blank: the mass balance reads {mb}, the step {after}")
                     stats["mass balance"] = mb[0]
+                    # ea_irms 1.4.15: no blank capsule gave a CO2 peak, so the carbon blank is below detection
+                    expect(page.get_by_text("δ¹³C: below detection, since none of the 3 blank capsules gave a CO2 peak")).to_be_visible()
+                    expect(page.locator("figure", has_text="δ¹³C of the blank capsules")).to_contain_text("the carbon blank is below detection")
                 if scr == "lin":
+                    # ea_irms 1.4.15: the floor the size series sets, with the walk up the series that set it, from the
+                    # series after the blank step (subtracted on the blank step above)
+                    floor = page.locator('section[aria-label="Floor of the size series"]')
+                    expect(floor).to_contain_text("δ¹⁵N: the floor is ")
+                    walk = floor.locator('[aria-label="Walk up the size series"] > [role=row]')
+                    check(walk.count() >= 3, f"lin: the walk up the size series has {walk.count() - 1} rows")
+                    expect(page.locator("figure", has_text="δ¹⁵N against N2 peak area")).to_contain_text("Below the floor")
                     # an expert's choice to hide the explanations holds for every step and is kept in the browser
                     how.get_by_role("button", name="Hide explanations").click()
                     expect(how.get_by_role("button", name="Show explanations")).to_be_visible()
@@ -658,6 +675,12 @@ def main(argv=None):
                     group.get_by_role("button", name="Drift monitors").click()
                     expect(group.get_by_role("button", name="Drift monitors")).to_have_attribute("aria-pressed", "true")
                     expect(page.get_by_text("SD of the drift monitors in the fit")).to_be_visible()
+                    # ea_irms 1.4.15: what 1σ holds, the corrections' terms, in the explanation and the sources of
+                    # uncertainty, and the drift monitors' final values against the repeatability under each switch
+                    expect(how).to_contain_text("+ blank term² + linearity term² + drift term²")
+                    expect(how.locator('[aria-label="Worked example"] [role=row]', has_text="Drift term²")).to_have_count(1)
+                    expect(page.locator('section[aria-label="Sources of uncertainty"]')).to_contain_text("Drift correction")
+                    expect(page.locator('section[aria-label="Decisions"]')).to_contain_text("Drift monitors: SD of their final values")
                 shot(f"1440-{SCREENS.index(scr) + 4:02d}-{scr}.png")
                 if scr != "results":
                     page.get_by_role("button", name="Continue to " + BUTTONS[SCREENS[SCREENS.index(scr) + 1]]).first.click()
@@ -1007,6 +1030,13 @@ def main(argv=None):
             # ---- 400 px wide
             page.set_viewport_size({"width": 400, "height": 1000})
             shot("400-results.png")
+            # ea_irms 1.4.15: the steps that changed, the floor's table and the 1σ's sources, fit the window
+            for step, scr in (("Linearity", "lin"), ("Uncertainty", "unc"), ("Quality checks", "qc")):
+                page.locator("nav[aria-label='Correction steps'] button", has_text=step).click()
+                heading(scr)
+                wide = page.evaluate("document.documentElement.scrollWidth")
+                check(wide <= 400, f"the {scr} screen is {wide} px wide at a 400 px viewport")
+                shot(f"400-{scr}.png")
             page.get_by_role("navigation", name="Main").get_by_role("button", name="EA-IRMS").click()
             expect(page.get_by_text("Read without errors").first).to_be_visible()
             shot("400-upload.png")

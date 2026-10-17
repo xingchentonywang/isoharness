@@ -92,7 +92,10 @@ def port_input(positions, fits, config: Config, file_name: str, size: int,
         "pos": rows,
         "k": {"n": _fit(F["k_n"], ("slope", "intercept", "r2", "sd", "n")),
               "c": _fit(F["k_c"], ("slope", "intercept", "r2", "sd", "n"))},
-        "limits": {k: _r(v, 4) for k, v in F["size_limits"].items()},
+        # The port reads max_n and max_c; from ea_irms 1.4.15 the minimum depends on the blank decision (the floor
+        # the size series sets after the blank step), so the port finds it itself from the settings below, and
+        # min_n and min_c here are the engine's for the configuration's own decisions.
+        "limits": {k: _r(v, 4) for k, v in F["size_limits"].items() if k in ("min_n", "min_c", "max_n", "max_c")},
         "carry": {"threshold": F["carryover"]["threshold"], "oversized": F["carryover"]["oversized"],
                   "flagged": F["carryover"]["flagged"], "maxRise": _r(F["carryover"]["max_rise"], 2)},
         "settle": {k: _r(F["settling"][k], 4)
@@ -122,7 +125,14 @@ def port_input(positions, fits, config: Config, file_name: str, size: int,
                      "calSlopeNote": config.cal_slope_note, "calSlopeCaution": config.cal_slope_caution,
                      "calSdNote": config.cal_sd_note, "calSdCaution": config.cal_sd_caution,
                      # 1.4.13 (finding R-22): the reference-gas SD at or above which the run has a problem
-                     "refSdLimit": config.ref_gas_sd_limit},
+                     "refSdLimit": config.ref_gas_sd_limit,
+                     # 1.4.15: the floor the size series sets, a floor set outright, the lab minimum of a run
+                     # without a size series, and the three switches of the 1 sigma of the final delta values
+                     "floorOffset": config.floor_offset_permil, "floorSdMultiple": config.floor_sd_multiple,
+                     "minAreaN": config.min_area_n, "minAreaC": config.min_area_c,
+                     "noSeriesMinN": config.no_series_min_area_n, "noSeriesMinC": config.no_series_min_area_c,
+                     "kragten": config.kragten_corrections, "monitorRep": config.monitor_repeatability,
+                     "aceCheck": config.ace_scatter_check},
     }
     return clean(data)
 

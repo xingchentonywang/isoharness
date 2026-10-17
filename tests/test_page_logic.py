@@ -4,7 +4,11 @@ Findings of the page that scripts/e2e_web.py cannot reach on its own: the Method
 input (W-14), the reference-gas SD limit from the configuration (R-22), the two checks whose data the engine
 sends (the elemental correction at the anchors and the anchors' material), which the page shows when the data
 is there and leaves out when it is not, and the configuration each run of a batch names (W-11); with the
-labels of R-29 and R-30 and the sample sheet's summary of R-34. Each test runs node and skips without it.
+labels of R-29 and R-30 and the sample sheet's summary of R-34. From ea_irms 1.4.15: the blank below detection,
+the floor the size series sets with the walk that set it (or the configuration's floor, or the lab's minimum peak
+of a run without a series), what the 1σ holds (the corrections' terms, the drift monitors' SD in place of the
+repeatability), and the two new checks, the acetanilide against the samples' 1σ and the drift monitors against an
+accepted value, each with its button back to its step. Each test runs node and skips without it.
 """
 import json
 import sys
@@ -13,6 +17,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from ea_irms.parse import parse_export
+from ea_irms.pipeline import DEFAULT_STANDARDS, Config, process
 from isoharness.app import app
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -64,7 +70,8 @@ def test_w14_one_gas_without_a_blank_and_every_monitor_left_out(body):
     out = run_page([body], STATE + """
         const all = Object.assign({}, d, { exclE: L.state.run.port.pos.filter((q) => q.role === 'D').map((q) => q.r) });
         return [L.methods(M, d), L.methods(L.model(all), all)];""")
-    assert "No blank capsule gave a CO2 peak, so no carbon blank was subtracted." in out[0]
+    # ea_irms 1.4.15: blank capsules that gave no peak put the blank below detection
+    assert "The carbon blank was below detection (no blank capsule gave a CO2 peak), so none was subtracted." in out[0]
     assert "largest bias" in out[0] and "0.0%" not in out[0]
     assert "; every drift monitor was left out of the elemental correction, so the elemental drift was not checked." in out[1]
 
@@ -244,3 +251,194 @@ def test_r34_the_summary_says_when_no_group_of_replicates_formed(tmp_path, body)
                                                                    "ending in Dup, such as 366 - H+S Dup, are compared only "
                                                                    "when the sheet has a row for that name whose Replicate "
                                                                    "of names the analysis it repeats.")
+
+
+# ---------------------------------------------------------------- ea_irms 1.4.15
+def by_row(positions):
+    return {p.row: p for p in positions}
+
+
+def test_1415_a_blank_without_a_peak_is_below_detection(body):
+    out = run_page([body], H + STATE + """
+        const b = L.vBlank(M, d, null, H);
+        return { lines: b.ctrl[0].lines.map((l) => l.t), empty: b.charts[1].emptyText, rows: b.stats.rows,
+          after: L.explainView(M, d, 'blank', null).after.map((l) => l.t), port: [M.blank.c.belowDetection, M.blank.n.belowDetection] };""")
+    assert out["port"] == [True, False]
+    assert out["lines"][1] == "δ¹³C: below detection, since none of the 3 blank capsules gave a CO2 peak"
+    assert out["empty"] == ("None of the 3 blank capsules gave a CO2 peak, so the carbon blank is below detection. It was "
+                            "measured and is too small to see, so there is nothing to subtract.")
+    rows = {r["k"]: (r["a"], r["b"]) for r in out["rows"]}
+    assert rows["Capsules with a peak"] == ("2 of 3", "0 of 3") and rows["Status"] == ("Not subtracted", "Below detection")
+    assert any(t.startswith("No blank capsule gave a CO2 peak, so the carbon blank is below detection.") for t in out["after"])
+
+
+def test_1415_the_floor_the_size_series_sets(body):
+    out = run_page([body], H + STATE + """
+        const l = L.vLin(M, d, null, H), fig = l.charts[0];
+        const on = Object.assign({}, d, { blank: 'On' }), Mo = L.model(on);
+        const flagged = (m) => m.P.filter((q) => q.role === 'S' && q.flags.some((f) => /^N below/.test(f))).map((q) => [q.r, q.flags.filter((f) => /^N below/.test(f))]);
+        return { floor: l.floor, limits: M.limits, sub: fig.sub, legend: fig.legend.map((x) => x.label), band: fig.s1.d !== '', hollow: fig.s9.d !== '',
+          stats: l.stats.rows.filter((r) => /Floor|below the floor/.test(r.k)),
+          size: L.qcChecks(M, d).find((c) => c.title === 'Sample size against the size series').t,
+          flagged: flagged(M), blankOn: [Mo.limits.n.min, Mo.limits.n.src, flagged(Mo)],
+          results: L.vResults(M, d, null, H, 'all').filters.map((f) => f.t),
+          chips: input.flags.map((f) => [L.chip(f), L.ftext(f)]) };""",
+                   flags=["N below series floor", "C below the minimum peak", "acetanilide d15N scatter above 1σ",
+                          "monitor d15N off by -0.73"])
+    f = out["floor"]
+    assert f["title"] == "Floor of the size series" and f["hasSteps"]
+    assert f["lines"][2]["t"].startswith("δ¹⁵N: the floor is 12.06 Vs, the peak of Ace Lin2 (7), since the smallest standard "
+                                         "lies off the line through the larger ones. 8 samples have a smaller N2 peak: Random (21), ")
+    assert f["lines"][3]["t"].startswith("δ¹³C: the floor is the smallest standard, Ace Lin1 (6), at 37.90 Vs, which lies within "
+                                         "the limit of the line through the larger ones. 7 samples have a smaller CO2 peak: ")
+    assert [(s["iso"], s["std"], s["area"], s["result"]) for s in f["steps"]] == [
+        ("δ¹⁵N", "Ace Lin1 (6)", "8.89", "Beyond the limit, so the floor moves up to Ace Lin2 (7)"),
+        ("δ¹³C", "Ace Lin1 (6)", "37.90", "Within the limit, so this standard is the floor")]
+    assert (out["limits"]["n"]["src"], out["limits"]["c"]["src"]) == ("series floor", "smallest standard")
+    assert "; floor 12.1 Vs; " in out["sub"] and out["band"] and out["hollow"]
+    assert {"Off the line, under the floor", "Below the floor"} <= set(out["legend"])
+    assert out["stats"] == [{"k": "Floor (Vs)", "a": "12.06, set by the series", "b": "37.90, the smallest standard"},
+                            {"k": "Samples above the series, below the floor", "a": "2, 8", "b": "2, 7"}]
+    assert out["size"].startswith("N2: 8 samples below the floor (12.06 Vs) and 2 above the series. CO2: 7 samples below the "
+                                  "floor (37.90 Vs) and 2 above the series.")
+    # the floor and its flags as the engine gives them, for the decisions shown and with the blank subtracted
+    for decisions, (lim, src, flagged) in ((Config(), (out["limits"]["n"]["min"], out["limits"]["n"]["src"], out["flagged"])),
+                                           (Config(blank_correction="On"), out["blankOn"])):
+        ps, F = process(parse_export(RUN), decisions)
+        assert (F["size_limits"]["min_n"], F["size_limits"]["min_n_source"]) == (lim, src)
+        assert [[p.row, [f for f in p.flags if f.startswith("N below")]] for p in ps if p.role == "Sample"
+                and any(f.startswith("N below") for f in p.flags)] == flagged
+    assert any(fl == ["N below series floor"] for _, fl in out["flagged"])
+    assert out["results"] == ["All 26", "Peak size accepted 15", "Peak size flagged 11", "Carryover 0"]
+    assert out["chips"] == [["N2 under the floor", "N below series floor"], ["CO2 under the minimum", "C below the minimum peak"],
+                            ["δ¹⁵N scatter high", "acetanilide δ¹⁵N scatter above 1σ"], ["monitor δ¹⁵N off by −0.73", "monitor δ¹⁵N off by −0.73"]]
+
+
+def test_1415_a_floor_from_the_configuration_or_the_lab_minimum(tmp_path, body):
+    code = H + """
+        const s = L.state.run.port.settings;
+        Object.assign(s, input.settings);
+        L._mcs.clear();
+        const d = L.state.dec, M = L.model(d), f = L.floorView(M);
+        return { lines: f.lines.map((l) => l.t), steps: f.steps.length, src: [M.limits.n.src, M.limits.c.src],
+          size: L.qcChecks(M, d).find((c) => c.title === 'Sample size against the size series').t,
+          flags: M.P.filter((q) => q.role === 'S').map((q) => [q.r, q.flags]) };"""
+    own = run_page([body], code, settings={"minAreaN": 15.0})
+    assert own["src"] == ["configuration", "smallest standard"] and own["steps"] == 1
+    assert own["lines"][2].startswith("δ¹⁵N: the configuration sets the floor at 15.00 Vs, so the size series does not set it. ")
+    ps, _ = process(parse_export(RUN), Config(min_area_n=15.0))
+    assert own["flags"] == [[p.row, p.flags] for p in ps if p.role == "Sample"]
+    # a run without a size series: the four Ace Lin capsules read as Ace Bypass, an Exclude row
+    series = body_of(renamed(tmp_path, {r: "Ace Bypass" for r in LINEARITY}, "no_series.csv"))
+    none = run_page([series], code, settings={})
+    assert none["src"] == [None, None] and none["steps"] == 0 and len(none["lines"]) == 3
+    assert none["lines"][0] == "A sample whose peak is smaller than the floor is flagged and marked for a rerun."
+    assert none["lines"][1] == ("δ¹⁵N: this run has no size series, and the configuration sets no minimum peak, so no N2 peak "
+                                "is too small.")
+    assert none["size"].startswith("N2: no size series and no minimum peak, so no peak is too small or too large. ")
+    lab = run_page([series], code, settings={"noSeriesMinN": 20.0, "noSeriesMinC": 60.0})
+    assert lab["src"] == ["lab minimum", "lab minimum"]
+    assert lab["lines"][1].startswith("δ¹⁵N: this run has no size series, so the floor is the lab’s minimum peak, 20.00 Vs. ")
+    assert lab["size"].startswith("N2: ") and "below the lab’s minimum peak (20.00 Vs)" in lab["size"]
+    ps, _ = process(parse_export(tmp_path / "no_series.csv"), Config(no_series_min_area_n=20.0, no_series_min_area_c=60.0))
+    assert lab["flags"] == [[p.row, p.flags] for p in ps if p.role == "Sample"]
+    assert any("N below the minimum peak" in fl for _, fl in lab["flags"])
+
+
+def test_1415_what_the_1sigma_holds(body):
+    code = H + """
+        Object.assign(L.state.run.port.settings, input.settings);
+        L._mcs.clear();
+        const d = L.state.dec, M = L.model(d), u = L.vUnc(M, d, 20, H), ex = L.explainView(M, d, 'unc', 20), q = M.P.find((p) => p.r === 20);
+        return { u: [q.n.u, q.c.u], terms: [q.n.terms, q.c.terms], rows: ex.rows, lines: ex.lines.map((l) => l.t), formulas: ex.formulas.map((f) => f.t),
+          budget: u.budget.rows.map((r) => [r.k, r.n, r.c]), stats: u.stats.rows.map((r) => [r.k, r.a, r.b]), ctrl: u.ctrl.map((c) => c.lines.map((l) => l.t)),
+          effect: u.effect.lines.map((l) => l.t), checks: u.checks.map((c) => c.title), header: L.renderVals().text.uncTerms,
+          figure: u.charts.map((c) => [c.sub, c.legend.map((x) => x.label)]), methods: L.methods(M, d),
+          mon: [M.unc.n.monitors.used, M.unc.c.monitors.used] };"""
+    out = run_page([body], code, settings={})
+    ps, F = process(parse_export(RUN), Config())
+    p20 = by_row(ps)[20]
+    assert out["u"] == pytest.approx([p20.u_d15n, p20.u_d13c], rel=1e-12)
+    assert set(out["terms"][0]) == {"drift"} and set(out["terms"][1]) == {"linearity", "drift"}
+    rows = {r["k"]: (r["a"], r["b"]) for r in out["rows"]}
+    # the worked example adds up: the sum of its variances is the square of the 1σ shown
+    for i, u in enumerate(out["u"]):
+        assert abs(float(rows["Sum (‰²)"][i]) - u * u) < 2e-6
+    assert rows["Linearity term² (‰²)"][0] == "not in force" and rows["Blank term² (‰²)"] == ("not in force", "not in force")
+    assert float(rows["Drift term² (‰²)"][0]) == pytest.approx(p20.u_terms_n["drift"] ** 2, abs=1e-6)
+    assert out["formulas"][0] == "1σ = √[(s × m)² + certified term + measured-means term + blank term² + linearity term² + drift term²]"
+    assert out["lines"][1].startswith("Each correction in force adds a term of its own, as a Kragten spreadsheet does.")
+    assert [k for k, _, _ in out["budget"]] == ["Single-analysis repeatability", "Anchors’ certified values", "Anchors’ measured means",
+                                                "Linearity correction", "Drift correction"]
+    assert out["budget"][3][1] == "" and out["budget"][3][2] != ""          # no linearity term for δ¹⁵N, one for δ¹³C
+    stats = {k: (a, b) for k, a, b in out["stats"]}
+    assert stats["Largest drift term (‰)"][0] == f"{F['unc_n']['corrections']['drift']:.3f}"
+    assert stats["Monitors’ SD in place of the repeatability"] == ("no, p = 0.744", "no, p = 0.083")
+    assert out["ctrl"][1][1].endswith("(F test, p = 0.083); larger, but not at p < 0.05, so the repeatability stays")
+    assert any(t.startswith("In δ¹⁵N, the drift correction in force adds a term of up to ") for t in out["effect"])
+    assert out["checks"] == ["Acetanilide scatter against 1σ"]
+    assert out["header"].startswith("It also holds a term for each correction in force")
+    assert "(a one-sided F test, which compares the two variances, at p < 0.05)" in out["header"]
+    assert "the corrections’ terms lift a sample above the line" in out["figure"][0][0]
+    assert out["figure"][0][1][:2] == ["Sample, with the corrections’ terms", "1σ along the line, without them"]
+    assert out["methods"].endswith("propagated through the calibration, with a Kragten term for the peak-size and drift corrections in force.")
+    # the configuration's switches the other way: no terms, the monitors' SD wherever larger
+    off = run_page([body], code, settings={"kragten": "Off", "monitorRep": "On"})
+    ps, F = process(parse_export(RUN), Config(kragten_corrections="Off", monitor_repeatability="On"))
+    p20 = by_row(ps)[20]
+    assert off["u"] == pytest.approx([p20.u_d15n, p20.u_d13c], rel=1e-12) and off["terms"] == [{}, {}]
+    assert off["mon"] == [F["unc_n"]["monitors"]["used"], F["unc_c"]["monitors"]["used"]] == [False, True]
+    assert off["header"] == ("The configuration leaves out the terms of the blank, linearity, and drift corrections. Where the drift "
+                             "monitors scatter more than the repeatability allows, their SD takes its place.")
+    assert "Drift monitors’ SD² in its place (‰²)" in [r["k"] for r in off["rows"]]
+    assert [k for k, _, _ in off["budget"]][0] == "Repeatability (the drift monitors’ SD for δ¹³C)"
+    assert off["ctrl"][1][1].endswith("; their SD is used in its place")
+    assert "the drift monitors’ SD in place of s × m" in off["figure"][1][0] and "s × m" not in off["figure"][0][0]
+    assert off["figure"][0][1][0] == "Sample"            # without the corrections' terms nothing lifts a sample
+    assert off["methods"].endswith("they do not include the blank, peak-size, or drift corrections. For δ¹³C, the drift monitors’ SD "
+                                   f"({F['unc_c']['monitors']['sd']:.3f}‰) took the place of the repeatability, being larger "
+                                   f"(F test, p = {F['unc_c']['monitors']['p']:.3f}).")
+
+
+ACCEPTED = [tuple(s[:2]) + (-26.6, -5.2) + tuple(s[4:]) if s[1] == "Drift" else s for s in DEFAULT_STANDARDS]
+
+
+def test_1415_the_acetanilide_and_the_monitors_against_an_accepted_value(body):
+    out = run_page([body], H + """
+        const pick = () => { L._mcs.clear(); const d = L.state.dec, M = L.model(d);
+          return L.vQC(M, d, null, H).checks.filter((c) => /^Acetanilide|accepted value$/.test(c.title)).map((c) => [c.step, c.title, c.s, c.goLabel, c.t]); };
+        const out = { plain: pick() };
+        L.state.run.port.std = input.std;
+        out.accepted = pick();
+        L.state.run.port.settings.checkOffset = 0.15;
+        out.tight = pick();
+        const d = L.state.dec, M = L.model(d);
+        out.steps = [L.vDrift(M, d, null, H).checks.map((c) => c.title), L.vUnc(M, d, null, H).checks.map((c) => c.title)];
+        out.flags = M.P.filter((q) => q.role === 'D').map((q) => [q.r, q.flags]);
+        L.state.run.port.settings.aceCheck = 'Off';
+        out.off = pick();
+        return out;""", std=[list(s) for s in ACCEPTED])
+    ace = ["unc", "Acetanilide scatter against 1σ", "caution", "Go to Step 8, Uncertainty, for Acetanilide scatter against 1σ"]
+    assert len(out["plain"]) == 1 and out["plain"][0][:4] == ace
+    assert out["plain"][0][4].startswith("δ¹⁵N: the 4 standards of the size series and 13 drift monitors have an SD of 0.759‰ against "
+                                         "the samples’ repeatability of 0.173‰ (F test, p = 0.006), more than the repeatability "
+                                         "allows, so every sample’s δ¹⁵N is marked for a check. δ¹³C: the 4 standards of the size "
+                                         "series and 13 drift monitors have an SD of 0.043‰ against the samples’ repeatability of "
+                                         "0.021‰ (F test, p = 0.086), larger, but not at p < 0.05. ")
+    ps, F = process(parse_export(RUN), Config())
+    assert (F["ace_n"]["over"], F["ace_c"]["over"]) == (True, False) and round(F["ace_n"]["sd"], 3) == 0.759
+    mon = ["drift", "Drift monitors against their accepted value"]
+    assert [c[:4] for c in out["accepted"]] == [mon + ["ok", "Go to Step 5, Drift, for Drift monitors against their accepted value"], ace]
+    assert out["accepted"][0][4] == ("13 drift monitors in this run against the accepted value the standards table gives them "
+                                     "(δ¹⁵N −5.20‰ and δ¹³C −26.60‰); each is within 0.5‰ of it.")
+    # with a check offset of 0.15 permil, three monitors lie off it in d15N, as the engine and its workbook find
+    ps, _ = process(parse_export(RUN), Config(standards=ACCEPTED, check_offset_permil=0.15))
+    assert out["flags"] == [[p.row, p.flags] for p in ps if p.role == "Drift"]
+    off = [p for p in ps if p.role == "Drift" and any(f.startswith("monitor d15N off by ") for f in p.flags)]
+    assert [p.row for p in off] == [10, 30, 38]
+    assert out["tight"][0][2] == "note" and out["tight"][0][4].startswith(
+        "13 drift monitors in this run against the accepted value the standards table gives them (δ¹⁵N −5.20‰ and δ¹³C −26.60‰); 3 "
+        "differ from it by more than 0.15‰: Ace Drift1 (10), δ¹⁵N off by ")
+    assert out["steps"] == [["Effect of the drift choice", "Drift monitors agree", "Drift monitors against their accepted value"],
+                            ["Acetanilide scatter against 1σ"]]
+    assert out["off"][-1][:3] == ["unc", "Acetanilide scatter against 1σ", "note"] and out["off"][-1][4] == "The configuration turns this check off."

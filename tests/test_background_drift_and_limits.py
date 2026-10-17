@@ -118,7 +118,10 @@ def test_r23_the_variant_blanks_one_sample_and_one_drift_monitor(no_bgd):
 
 def test_r23_a_position_without_a_reference_background_is_not_drift_corrected(no_bgd):
     export, rows = no_bgd
-    positions, F = process(parse_export(export), BACKGROUND)
+    # 1.4.15: the acetanilide's whole-run check, which fires on the test run and marks every sample for a check by
+    # itself, is off, so the sample's check is the missing background's alone
+    cfg = replace(BACKGROUND, ace_scatter_check="Off")
+    positions, F = process(parse_export(export), cfg)
     for el, lin, drift in (("n", "d15n_lin", "d15n_drift"), ("c", "d13c_lin", "d13c_drift")):
         f = F[f"drift_{el}"]
         assert f["model"] == "Background" and f["in_force"] and f["applied"] != 0
@@ -140,7 +143,7 @@ def test_r23_a_position_without_a_reference_background_is_not_drift_corrected(no
     monitor = next(r for r in rows if by[r].role == "Drift")
     assert [f for f in by[monitor].flags if f in NO_BGD.values()] == list(NO_BGD.values())
     assert not any("outlier" in f for f in by[monitor].flags)
-    assert F["rerun"]["counts"]["Check"] == process(parse_export(RUN), BACKGROUND)[1]["rerun"]["counts"]["Check"] + 1
+    assert F["rerun"]["counts"]["Check"] == process(parse_export(RUN), cfg)[1]["rerun"]["counts"]["Check"] + 1
 
 
 def test_r23_a_monitor_without_a_reference_background_is_left_out_of_the_fit(no_bgd):

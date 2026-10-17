@@ -124,6 +124,17 @@ class Config:
     min_area_c: float | None = None
     max_area_n: float | None = None
     max_area_c: float | None = None
+    # 1.4.15 (Tony Wang, 2026-10-16): the size series sets the floor. Walking up from the smallest linearity
+    # standard while three or more larger ones remain, a standard whose delta after the blank step lies further
+    # from the line through the larger ones than floor_offset_permil, or than floor_sd_multiple times that line's
+    # residual SD where that is larger, moves the floor to the next standard. floor_offset_permil None: the
+    # smallest standard is the floor, as before 1.4.15. min_area_n and min_area_c, when given, still set the
+    # floor outright. no_series_min_area_n and _c: the smallest peak accepted in a run without a size series
+    # (Vs), the lab minimum; None = no limit there.
+    floor_offset_permil: float | None = 0.3
+    floor_sd_multiple: float | None = 3.0
+    no_series_min_area_n: float | None = None
+    no_series_min_area_c: float | None = None
     min_blank_multiple: float | None = 3.0
     settled_threshold: float | None = 0.10
     carryover_mv: float | None = 2.0    # background rise that flags possible carryover; None = off
@@ -173,6 +184,18 @@ class Config:
     # critical range of ISO 5725-6 (f(n) x the repeatability of one analysis) are marked for a rerun of
     # that element. On or Off; without a sample sheet nothing is compared.
     rerun_replicates: str = "On"
+    # 1.4.15 (Tony Wang, 2026-10-16): the 1 sigma of the final delta values. kragten_corrections On adds the
+    # terms of the blank, linearity, and drift corrections in force: each fitted slope moved by its standard
+    # error, the blank's delta by the SD of its capsules, and every step after it refitted, the change in the
+    # final value being the term. monitor_repeatability puts the SD of the drift monitors' final values (outliers
+    # and positions left out of the fit not counted) in place of the repeatability in use, Auto when it is larger
+    # at the significance level (one-sided F test against the anchors' pooled degrees of freedom), On whenever it
+    # is larger, Off never. ace_scatter_check On compares every acetanilide analysis, the size series and the
+    # drift monitors, with the repeatability the samples' 1 sigma carries, and where they scatter more at the
+    # significance level marks the samples of that element for a check, a problem of the whole run.
+    kragten_corrections: str = "On"
+    monitor_repeatability: str = "Auto"
+    ace_scatter_check: str = "On"
     # 1.4.10: the export the first drift position, the positions left out, and a repeatability taken from
     # the drift monitors were chosen for. They are applied only to a run of that name; with no name they
     # are applied to any run, with a note (scope_to_run; finding R-08 of the 2026-10-14 review).
@@ -190,7 +213,10 @@ MONITORS = "Drift monitors"       # the one source of a repeatability that belon
 CHOICES = {"blank_correction": ("On", "Off", "Auto"), "linearity_correction": ("On", "Off", "Auto"),
            "linearity_correction_c": ("On", "Off", "Auto"), "drift_correction": ("On", "Off", "Auto"),
            "drift_model": ("Row", "Background", "Auto"), "elemental_correction": ("On", "Off", "Auto"),
-           "rerun_replicates": ("On", "Off"), "u_sample_n_source": (MONITORS,), "u_sample_c_source": (MONITORS,)}
+           "rerun_replicates": ("On", "Off"), "u_sample_n_source": (MONITORS,), "u_sample_c_source": (MONITORS,),
+           # 1.4.15
+           "kragten_corrections": ("On", "Off"), "monitor_repeatability": ("On", "Off", "Auto"),
+           "ace_scatter_check": ("On", "Off")}
 OPTIONAL_CHOICES = ("linearity_correction_c", "u_sample_n_source", "u_sample_c_source")   # empty means none
 MAX_RUN_FILE = 255
 
@@ -354,6 +380,13 @@ def _betainc(a, b, x):
     if x < (a + 1.0) / (a + b + 2.0):
         return front * _betacf(a, b, x) / a
     return 1.0 - front * _betacf(b, a, 1.0 - x) / b
+
+
+def f_p_right(f, df1, df2):
+    """Right-tail p-value of the F distribution, the number Excel's FDIST(f, df1, df2) gives (1.4.15)."""
+    if f is None or df1 is None or df2 is None or df1 < 1 or df2 < 1 or f < 0:
+        return None
+    return _betainc(df2 / 2.0, df1 / 2.0, df2 / (df2 + df1 * f))
 
 
 def t_p_two_sided(t, df):
@@ -698,9 +731,15 @@ _PREFIX = {"n": ("N peak only ", "N2 reference pulse off by "),
 # a position with no reference background is left as it was after linearity, and marked for a check.
 _NO_BGD = {"n": "N not drift-corrected: no reference background",
            "c": "C not drift-corrected: no reference background"}
+# 1.4.15: a peak below the floor the size series sets (above its smallest standard), or, in a run without a
+# size series, below the lab's minimum peak; both mark a rerun of that element, as a peak below the range does.
+_FLOOR = {"n": ("N below series floor", "N below the minimum peak"),
+          "c": ("C below series floor", "C below the minimum peak")}
+# 1.4.15: every acetanilide analysis of the run scatters more than the samples' 1 sigma allows; a check.
+_ACE = {"n": "acetanilide d15N scatter above 1σ", "c": "acetanilide d13C scatter above 1σ"}
 _PLAIN = ("no N peak", "no C peak", "CO2 peak rejected as a reference pulse",
           "ran before the background settled", "possible carryover from an oversized sample",
-          _NO_BGD["n"], _NO_BGD["c"])
+          _NO_BGD["n"], _NO_BGD["c"], _ACE["n"], _ACE["c"])
 
 
 def _xl(x, places: int, sign: bool = False) -> str:
@@ -766,7 +805,7 @@ def _reason(flag, config=None):
     not, when the configuration gives the instrument's largest amplitude (max_amplitude_mv)."""
     if config is not None and config.max_amplitude_mv is not None and flag in (_SIZE["n"][1], _SIZE["c"][1]):
         return False
-    return (flag in _PLAIN or flag in _SIZE["n"] or flag in _SIZE["c"]
+    return (flag in _PLAIN or flag in _SIZE["n"] or flag in _SIZE["c"] or flag in _FLOOR["n"] or flag in _FLOOR["c"]
             or flag.startswith(_PREFIX["n"]) or flag.startswith(_PREFIX["c"]))
 
 
@@ -839,6 +878,243 @@ def _mass_window(p, el, lo_area, hi_area, blank_area=0.0):
     return (lo_area - ab) / per_mg, (hi_area - ab) / per_mg
 
 
+def _series_floor(positions, el, config):
+    """The floor the size series sets (1.4.15, Tony Wang, 2026-10-16).
+
+    The linearity standards with a peak and a delta after the blank step, smallest first: while three or more
+    larger ones remain, the smallest standard still standing is compared with the line through the larger ones
+    at its own peak area. Further from it than floor_offset_permil, or floor_sd_multiple times that line's
+    residual SD where that is larger, it moves the floor to the next standard, which is tested the same way;
+    the first standard on its line ends the walk. Returns the floor (the smallest standard's area when nothing
+    moves it), the smallest standard's area, and each step tested."""
+    area, d = ("area_n", "d15n_blank") if el == "n" else ("area_c", "d13c_blank")
+    pts = sorted(((getattr(p, area), getattr(p, d), p.row) for p in positions
+                  if p.role == "Linearity" and getattr(p, area) is not None and getattr(p, d) is not None),
+                 key=lambda t: (t[0], t[2]))
+    out = {"smallest": pts[0][0] if pts else None, "floor": pts[0][0] if pts else None, "steps": [],
+           "moved": False}
+    off, mult = config.floor_offset_permil, config.floor_sd_multiple
+    if off is None or len(pts) < 4:
+        return out
+    for i in range(len(pts) - 3):
+        rest = pts[i + 1:]
+        f = _fit([a for a, _, _ in rest], [v for _, v, _ in rest])
+        if f is None:
+            break
+        lim = off if (mult is None or f["sd"] is None) else max(off, mult * f["sd"])
+        a, v, row = pts[i]
+        resid = v - (f["slope"] * a + f["intercept"])
+        moved = _above(abs(resid), lim)
+        out["steps"].append({"row": row, "area": a, "resid": resid, "limit": lim, "line_sd": f["sd"],
+                             "n_line": f["n"], "moved": moved})
+        if not moved:
+            break
+        out["floor"], out["moved"] = rest[0][0], True
+    return out
+
+
+_EL = {"n": {"raw": "d15n", "area": "area_n", "blank": "d15n_blank", "acc": "acc15", "final": "d15n_final",
+             "u": "u_d15n", "name": "d15N"},
+       "c": {"raw": "d13c", "area": "area_c", "blank": "d13c_blank", "acc": "acc13", "final": "d13c_final",
+             "u": "u_d13c", "name": "d13C"}}
+
+
+def _chain(positions, F, config, el, blank=None, lin_slope=None, drift_delta=0.0, refit_lin=False):
+    """The final values {row: value} of element el with one correction moved (1.4.15).
+
+    The run's own choices hold (which corrections are in force, the drift model, the monitors used, the
+    pivots), so with nothing moved this gives the engine's final values. blank: (area, delta) applied to every
+    position with a larger peak but the blanks, as the engine applies it; lin_slope: the linearity slope used
+    (else the one applied); refit_lin: with a blank given, the linearity slope in force refitted on the series
+    so moved; drift_delta: added to the drift slope refitted on the monitors so moved (0 when not in force)."""
+    e = _EL[el]
+    dblank = {}
+    for p in positions:
+        d = getattr(p, e["raw"])
+        if d is None:
+            dblank[p.row] = None
+        elif blank is None:
+            dblank[p.row] = getattr(p, e["blank"])
+        else:
+            ab, db = blank
+            a = getattr(p, e["area"])
+            dblank[p.row] = (a * d - ab * db) / (a - ab) if (p.role != "Blank" and a > ab) else d
+    L = F[f"lin_{el}"]
+    lin = [p for p in positions if p.role == "Linearity"]
+    if lin_slope is not None:
+        b = lin_slope
+    elif refit_lin and L["in_force"]:
+        f = _fit([getattr(p, e["area"]) for p in lin], [dblank[p.row] for p in lin])
+        b = f["slope"] if f else L["applied"]
+    else:
+        b = L["applied"]
+    dlin = {p.row: (None if dblank[p.row] is None else dblank[p.row] - b * (getattr(p, e["area"]) - L["pivot"]))
+            for p in positions}
+    D = F[f"drift_{el}"]
+    first = config.first_drift_position or 0
+    excl = set(D["excluded"])
+    used = [p for p in positions if p.role == "Drift" and p.row >= first and p.row not in excl]
+    row_model = D["model"] == "Row"
+    xs = [float(p.row) if row_model else p.ref_bgd_n for p in used]
+    ys = [dlin[p.row] for p in used]
+    pairs = [x for x, y in zip(xs, ys) if x is not None and y is not None]
+    pivot = sum(pairs) / len(pairs) if pairs else 0.0
+    slope = drift_delta
+    if D["in_force"]:
+        f = _fit(xs, ys)
+        slope += f["slope"] if f else 0.0
+    ddrift = {}
+    for p in positions:
+        v = dlin[p.row]
+        if v is None:
+            ddrift[p.row] = None
+        elif row_model:
+            ddrift[p.row] = v - slope * (float(p.row) - pivot)
+        elif p.ref_bgd_n is None:
+            ddrift[p.row] = v
+        else:
+            ddrift[p.row] = v - slope * (p.ref_bgd_n - pivot)
+    anchors = [p for p in positions if p.role == "Anchor"]
+    ax = [ddrift[p.row] for p in anchors]
+    ay = [getattr(p, e["acc"]) for p in anchors]
+    acc = [a for x, a in zip(ax, ay) if x is not None and a is not None]
+    cf = _fit(ax, ay) if (acc and max(acc) > min(acc)) else None
+    if not cf or cf["n"] < 2:
+        return {p.row: None for p in positions}
+    return {p.row: (None if ddrift[p.row] is None else cf["slope"] * ddrift[p.row] + cf["intercept"])
+            for p in positions}
+
+
+def _shift(positions, el, moved):
+    """{row: moved final minus the engine's final}, None where either is missing."""
+    fin = _EL[el]["final"]
+    return {p.row: (None if moved[p.row] is None or getattr(p, fin) is None else moved[p.row] - getattr(p, fin))
+            for p in positions}
+
+
+def _correction_terms(positions, F, config, el):
+    """The Kragten terms of the corrections in force (1.4.15): {"blank"|"linearity"|"drift": {row: |shift|}}."""
+    terms = {}
+    B = F[f"blank_{el}"]
+    if B["in_force"] and B["n"] >= 1 and B["area"] > 0 and B["sd"] is not None:
+        sh = _shift(positions, el, _chain(positions, F, config, el, blank=(B["area"], B["d"] + B["sd"]),
+                                          refit_lin=True))
+        terms["blank"] = {r: (None if v is None else abs(v)) for r, v in sh.items()}
+    L = F[f"lin_{el}"]
+    if L["in_force"] and L["fit"] and L["fit"].get("se") is not None:
+        sh = _shift(positions, el, _chain(positions, F, config, el, lin_slope=L["fit"]["slope"] + L["fit"]["se"]))
+        terms["linearity"] = {r: (None if v is None else abs(v)) for r, v in sh.items()}
+    D = F[f"drift_{el}"]
+    if D["in_force"] and D["fit"] and D["fit"].get("se") is not None:
+        sh = _shift(positions, el, _chain(positions, F, config, el, drift_delta=D["fit"]["se"]))
+        terms["drift"] = {r: (None if v is None else abs(v)) for r, v in sh.items()}
+    return terms
+
+
+def _unapplied(positions, F, config, el):
+    """Corrections the run fitted but did not apply (1.4.15), each with how far applying it would move the
+    samples' final values: the linearity or drift slope as fitted, or the blank of the capsules that gave a peak
+    (the linearity slope in force refitted on the series so corrected)."""
+    out = []
+    name = _EL[el]["name"]
+
+    def span(moved):
+        sh = _shift(positions, el, moved)
+        vals = [sh[p.row] for p in positions if p.role == "Sample" and sh[p.row] is not None]
+        return (min(vals), max(vals), len(vals)) if vals else (None, None, 0)
+    B = F[f"blank_{el}"]
+    if not B["in_force"] and B["n"] >= 1 and B["area"] > 0:
+        lo, hi, n = span(_chain(positions, F, config, el, blank=(B["area"], B["d"]), refit_lin=True))
+        out.append({"el": el, "name": name, "correction": "blank", "mode": config.blank_correction,
+                    "capsules": B["n"], "area": B["area"], "d": B["d"], "sd": B["sd"], "lo": lo, "hi": hi, "n": n})
+    L = F[f"lin_{el}"]
+    if not L["in_force"] and L["fit"] and L["fit"].get("slope") is not None:
+        lo, hi, n = span(_chain(positions, F, config, el, lin_slope=L["fit"]["slope"]))
+        out.append({"el": el, "name": name, "correction": "linearity", "mode": L["mode"],
+                    "slope": L["fit"]["slope"], "se": L["fit"].get("se"), "p": L["fit"].get("p"),
+                    "unit": "per Vs", "lo": lo, "hi": hi, "n": n})
+    D = F[f"drift_{el}"]
+    if not D["in_force"] and D["fit"] and D["fit"].get("slope") is not None:
+        lo, hi, n = span(_chain(positions, F, config, el, drift_delta=D["fit"]["slope"]))
+        out.append({"el": el, "name": name, "correction": "drift", "mode": config.drift_correction,
+                    "model": D["model"], "slope": D["fit"]["slope"], "se": D["fit"].get("se"),
+                    "p": D["fit"].get("p"), "unit": "per position" if D["model"] == "Row" else "per mV",
+                    "lo": lo, "hi": hi, "n": n})
+    return out
+
+
+def _unapplied_text(u):
+    """One line of the Rerun sheet for a correction fitted but not applied (1.4.15)."""
+    move = (f"applied, it would move the samples' {u['name']} by {_xl(u['lo'], 2, sign=True)} to "
+            f"{_xl(u['hi'], 2, sign=True)} permil" if u["n"] else f"no sample has a {u['name']} to move")
+    if u["correction"] == "blank":
+        sd = "" if u["sd"] is None else f", SD {_xl(u['sd'], 2)}"
+        return (f"{u['name']} blank of {u['capsules']} {'capsule' if u['capsules'] == 1 else 'capsules'} "
+                f"({_xl(u['area'], 2)} Vs, {_xl(u['d'], 2, sign=True)} permil{sd}) not applied ({u['mode']}); {move}")
+    se = "" if u["se"] is None else f", SE {_xl(u['se'], 4)}"
+    pv = "" if u["p"] is None else f", p {_xl(u['p'], 3)}"
+    what = (f"{u['name']} linearity" if u["correction"] == "linearity"
+            else f"{u['name']} drift ({u['model']} model)")
+    return (f"{what} fitted, not applied ({u['mode']}): slope {_xl(u['slope'], 4)} {u['unit']}{se}{pv}; {move}")
+
+
+def _sigma_1415(positions, F, config, alpha):
+    """What 1.4.15 adds to the 1 sigma of the final delta values, and the acetanilide's whole-run check.
+
+    For each element: the drift monitors' SD against the repeatability in use (on the calibrated scale), put in
+    its place when monitor_repeatability says so; the Kragten terms of the corrections in force; then every
+    acetanilide analysis (size series and drift monitors) against the repeatability the samples now carry."""
+    for el in ("n", "c"):
+        e = _EL[el]
+        unc, cal = F[f"unc_{el}"], F[f"cal_{el}"]
+        m, u_s = cal.get("slope"), unc.get("u_sample")
+        rep = abs(u_s * m) if (u_s is not None and m is not None) else None
+        df = sum(g["n"] - 1 for g in unc.get("materials", []) if g.get("sd") is not None)
+        D = F[f"drift_{el}"]
+        first = config.first_drift_position or 0
+        left_out = set(D["excluded"]) | set(D["outliers"])
+        mons = [getattr(p, e["final"]) for p in positions if p.role == "Drift" and p.row >= first
+                and p.row not in left_out and getattr(p, e["final"]) is not None]
+        sd_mon = _sd(mons)
+        mon = {"switch": config.monitor_repeatability, "n": len(mons), "sd": sd_mon, "repeatability": rep,
+               "df": df, "p": None, "larger": False, "used": False}
+        if sd_mon is not None and rep is not None and len(mons) >= 3:
+            mon["larger"] = _above(sd_mon, rep)
+            if rep > 0 and df > 0:
+                mon["p"] = f_p_right((sd_mon / rep) ** 2, len(mons) - 1, df)
+            sw = config.monitor_repeatability
+            mon["used"] = bool(mon["larger"] and (sw == "On" or (sw == "Auto" and mon["p"] is not None
+                                                                  and _below(mon["p"], alpha))))
+        unc["monitors"] = mon
+        terms = _correction_terms(positions, F, config, el) if config.kragten_corrections == "On" else {}
+        unc["corrections"] = {k: max([v for v in t.values() if v is not None], default=None) for k, t in terms.items()}
+        for p in positions:
+            p_terms = {k: t.get(p.row) for k, t in terms.items()}
+            setattr(p, f"u_terms_{el}", p_terms)
+            u = getattr(p, e["u"])
+            if u is None:
+                continue
+            total = u * u
+            if mon["used"]:
+                total += sd_mon * sd_mon - rep * rep
+            total += sum(v * v for v in p_terms.values() if v is not None)
+            setattr(p, e["u"], math.sqrt(max(total, 0.0)))
+        # every acetanilide analysis against the repeatability the samples' 1 sigma now carries
+        series = [getattr(p, e["final"]) for p in positions if p.role == "Linearity"
+                  and getattr(p, e["final"]) is not None]
+        both = series + mons
+        sd_all = _sd(both)
+        basis, dfb = (sd_mon, len(mons) - 1) if mon["used"] else (rep, df)
+        ace = {"switch": config.ace_scatter_check, "n": len(both), "n_series": len(series),
+               "n_monitors": len(mons), "sd": sd_all, "basis": basis, "df": dfb, "p": None, "over": False}
+        if (config.ace_scatter_check == "On" and sd_all is not None and basis and len(both) >= 3
+                and dfb is not None and dfb > 0):
+            ace["p"] = f_p_right((sd_all / basis) ** 2, len(both) - 1, dfb)
+            ace["over"] = bool(_above(sd_all, basis) and ace["p"] is not None and _below(ace["p"], alpha))
+        F[f"ace_{el}"] = ace
+        F.setdefault("unapplied", []).extend(_unapplied(positions, F, config, el))
+
+
 def _rerun_marks(positions, F, config):
     """Mark each sample for a rerun of N, C, or both, or for a check, from its flags.
 
@@ -849,7 +1125,9 @@ def _rerun_marks(positions, F, config):
     missing the peak of one element, is marked for a check, and so, under the Background
     drift model with the drift correction in force, is one with no reference
     background, which was left without a drift correction (finding R-23 of the
-    2026-10-14 review). A rerun's suggested mass puts
+    2026-10-14 review), or one whose run's acetanilide scatters more than its 1 sigma
+    allows (1.4.15). From 1.4.15 the floor is the one the size series sets, and a run
+    without a series takes the lab's minimum peak. A rerun's suggested mass puts
     each peak inside the linearity range (and above the blank multiple), read from
     this analysis's area per mg. Problems of the whole run are listed once, not on
     every sample.
@@ -874,12 +1152,14 @@ def _rerun_marks(positions, F, config):
         fl = p.flags
         no_n, no_c = "no N peak" in fl, "no C peak" in fl
         extra = _extra_reasons(p, config, reps)
-        need = {el: any(_reason(f, config) and (f in _SIZE[el] or f.startswith(_PREFIX[el])) for f in fl)
+        need = {el: any(_reason(f, config) and (f in _SIZE[el] or f in _FLOOR[el] or f.startswith(_PREFIX[el]))
+                        for f in fl)
                 or any(e == el for e, _ in extra) for el in ("n", "c")}
         both = no_n and no_c
         # 1.4.14 (Tony Wang, 2026-10-16): possible carryover marks a check, not a rerun of N and C
         check = ("ran before the background settled" in fl or "possible carryover from an oversized sample" in fl
-                 or no_n != no_c or any(f in fl for f in _NO_BGD.values()))
+                 or no_n != no_c or any(f in fl for f in _NO_BGD.values())
+                 or any(f in fl for f in _ACE.values()))
         if both or (need["n"] and need["c"]):
             mark = "N and C"
         elif need["n"]:
@@ -942,6 +1222,19 @@ def _rerun_marks(positions, F, config):
     if off:
         items.append(f"check standard off by more than {_xl(config.check_offset_permil, 2)} permil at "
                      f"{'position' if len(off) == 1 else 'positions'} {', '.join(str(r) for r in off)}")
+    # 1.4.15: a drift monitor against the acetanilide's accepted value, where the standards table gives one
+    off = [p.row for p in positions if p.role == "Drift"
+           and any(f.startswith(("monitor d15N off by", "monitor d13C off by")) for f in p.flags)]
+    if off:
+        items.append(f"drift monitor off its accepted value by more than {_xl(config.check_offset_permil, 2)} "
+                     f"permil at {'position' if len(off) == 1 else 'positions'} {', '.join(str(r) for r in off)}")
+    # 1.4.15: every acetanilide analysis against the repeatability the samples' 1 sigma carries
+    for el, name in (("n", "d15N"), ("c", "d13C")):
+        a = F.get(f"ace_{el}") or {}
+        if a.get("over"):
+            items.append(f"acetanilide {name}, size series and drift monitors, SD {_xl(a['sd'], 3)} permil "
+                         f"against the samples' repeatability {_xl(a['basis'], 3)} (p {_xl(a['p'], 3)}): the "
+                         f"samples' {name} marked for a check")
     for name, val, cert, big_u in (("%N", "pct_n_reported", lambda p: p.pct_n, "U_pct_n"),
                                    ("%C", "pct_c_reported", lambda p: p.pct_c, "U_pct_c"),
                                    ("C:N", "cn_molar_reported",
@@ -967,8 +1260,11 @@ def _rerun_marks(positions, F, config):
             if g["n"] >= 3 and g["sd"] is not None and not _below(g["sd"], config.ref_gas_sd_limit):
                 items.append(f"{name} reference pulses SD {_xl(g['sd'], 2)} permil, at or above "
                              f"{_xl(config.ref_gas_sd_limit, 2)}")
+    # 1.4.15: corrections the run fitted but did not apply, with how far applying them would move the samples
+    unapplied = [_unapplied_text(u) for u in F.get("unapplied", [])]
     F["rerun"] = {"counts": counts, "run_level": items,
                   "run_level_text": "; ".join(items) if items else "none found",
+                  "unapplied": unapplied, "unapplied_text": "; ".join(unapplied) if unapplied else "none",
                   "lo_area": lo_area, "hi_area": hi_area}
 
 
@@ -1063,6 +1359,10 @@ def process(positions, config=None, samples=None):
 
     F["blank_n"]["in_force"] = in_force(F["blank_n"])
     F["blank_c"]["in_force"] = in_force(F["blank_c"])
+    # 1.4.15: blank capsules that gave no peak put the blank below detection; it was measured, not left out
+    for el in ("n", "c"):
+        F[f"blank_{el}"]["capsules"] = len(role("Blank"))
+        F[f"blank_{el}"]["below_detection"] = bool(role("Blank")) and F[f"blank_{el}"]["n"] == 0
     # Blank capsules a lab set to Exclude (1.4.2), so QC can say so instead of
     # "no blank capsules found"; a "Blank Hole" is an empty position, not a capsule.
     F["blank_n"]["excluded"] = F["blank_c"]["excluded"] = sum(
@@ -1103,6 +1403,9 @@ def process(positions, config=None, samples=None):
                       p.d15n_blank - F["lin_n"]["applied"] * (p.area_n - F["lin_n"]["pivot"]))
         p.d13c_lin = (None if p.d13c_blank is None else
                       p.d13c_blank - F["lin_c"]["applied"] * (p.area_c - F["lin_c"]["pivot"]))
+    # 1.4.15 (Tony Wang, 2026-10-16): the floor the size series sets, from the series after the blank step
+    F["floor_n"] = _series_floor(positions, "n", config)
+    F["floor_c"] = _series_floor(positions, "c", config)
 
     # ---- drift -----------------------------------------------------------
     first = config.first_drift_position or 0
@@ -1274,6 +1577,8 @@ def process(positions, config=None, samples=None):
             for p in positions:
                 setattr(p, dst, None)
         F[f"unc_{el}"] = budget
+    # ---- what the 1 sigma above left out (1.4.15) --------------------------------
+    _sigma_1415(positions, F, config, alpha)
     F["coverage_k"] = config.coverage_k
     for p in positions:
         p.U_d15n = None if p.u_d15n is None else config.coverage_k * p.u_d15n
@@ -1377,11 +1682,34 @@ def process(positions, config=None, samples=None):
     F["elem_check"] = _elemental_check(positions, F, config)
 
     # ---- size limits -----------------------------------------------------
-    min_n = config.min_area_n if config.min_area_n is not None else (F["lin_n"]["min"] or 0)
-    min_c = config.min_area_c if config.min_area_c is not None else (F["lin_c"]["min"] or 0)
+    # 1.4.15: the floor the size series sets; min_area_n and min_area_c, when given, still set it outright, and
+    # a run without a size series takes the lab's minimum peak, no_series_min_area_n and _c
+    def floor_of(el):
+        given = getattr(config, f"min_area_{el}")
+        if given is not None:
+            return given, "configuration"
+        if F[f"lin_{el}"]["min"] is not None:
+            fl = F[f"floor_{el}"]
+            if fl["floor"] is None:
+                return F[f"lin_{el}"]["min"], "smallest standard"
+            return fl["floor"], ("series floor" if fl["moved"] else "smallest standard")
+        lab = getattr(config, f"no_series_min_area_{el}")
+        return (lab, "lab minimum") if lab is not None else (0, None)
+    (min_n, src_n), (min_c, src_c) = floor_of("n"), floor_of("c")
     max_n = config.max_area_n if config.max_area_n is not None else (F["lin_n"]["max"] or 0)
     max_c = config.max_area_c if config.max_area_c is not None else (F["lin_c"]["max"] or 0)
-    F["size_limits"] = {"min_n": min_n, "min_c": min_c, "max_n": max_n, "max_c": max_c}
+    F["size_limits"] = {"min_n": min_n, "min_c": min_c, "max_n": max_n, "max_c": max_c,
+                        "min_n_source": src_n, "min_c_source": src_c,
+                        "smallest_n": F["floor_n"]["smallest"], "smallest_c": F["floor_c"]["smallest"]}
+
+    def below_text(el, area):
+        """Which flag a peak below the floor gets (1.4.15)."""
+        src, smallest = F["size_limits"][f"min_{el}_source"], F[f"floor_{el}"]["smallest"]
+        if src == "lab minimum":
+            return _FLOOR[el][1]
+        if src == "series floor" and smallest is not None and not _below(area, smallest):
+            return _FLOOR[el][0]
+        return _SIZE[el][0]
 
     # ---- carryover after oversized samples ---------------------------------
     # A large sample leaves something in the EA that raises the background of
@@ -1517,7 +1845,7 @@ def process(positions, config=None, samples=None):
         if p.area_n is None:
             flags.append("no N peak")
         elif min_n and _below(p.area_n, min_n):
-            flags.append("N below linearity range")
+            flags.append(below_text("n", p.area_n))
         elif max_n and _above(p.area_n, max_n):
             flags.append("N above linearity range")
         if p.area_c is None:
@@ -1525,7 +1853,7 @@ def process(positions, config=None, samples=None):
             if getattr(p, "c_rejected", False):
                 flags.append("CO2 peak rejected as a reference pulse")
         elif min_c and _below(p.area_c, min_c):
-            flags.append("C below linearity range")
+            flags.append(below_text("c", p.area_c))
         elif max_c and _above(p.area_c, max_c):
             flags.append("C above linearity range")
         if p.area_c is not None and getattr(p, "c_before", 0) >= 2:
@@ -1542,6 +1870,11 @@ def process(positions, config=None, samples=None):
                                    (p.d13c_final, p.acc13, "d13C")):
                 if got is not None and acc is not None and _above(abs(got - acc), config.check_offset_permil):
                     flags.append(f"check {name} off by {_xl(got - acc, 2, sign=True)}")
+        if p.role == "Drift":                    # 1.4.15: against the acetanilide's accepted value
+            for got, acc, name in ((p.d15n_final, p.acc15, "d15N"),
+                                   (p.d13c_final, p.acc13, "d13C")):
+                if got is not None and acc is not None and _above(abs(got - acc), config.check_offset_permil):
+                    flags.append(f"monitor {name} off by {_xl(got - acc, 2, sign=True)}")
         if p.role == "Drift":
             for el, name in (("n", "N"), ("c", "C")):
                 if p.row in excluded[el]:
@@ -1571,6 +1904,10 @@ def process(positions, config=None, samples=None):
             flags.append("%N below detection")
         if p.below_detection_c:
             flags.append("%C below detection")
+        if p.role == "Sample":                   # 1.4.15: the acetanilide's whole-run check
+            for el, value in (("n", p.d15n_final), ("c", p.d13c_final)):
+                if value is not None and F[f"ace_{el}"]["over"]:
+                    flags.append(_ACE[el])
         p.flags = flags
     _replicates(positions, F, config, rep_groups)
     _rerun_marks(positions, F, config)
@@ -1677,6 +2014,13 @@ def config_to_dict(config: Config) -> dict:
         "max_amplitude_mv": config.max_amplitude_mv,
         "rerun_max_1sigma": config.rerun_max_1sigma,
         "rerun_replicates": config.rerun_replicates,
+        "floor_offset_permil": config.floor_offset_permil,
+        "floor_sd_multiple": config.floor_sd_multiple,
+        "no_series_min_area_n": config.no_series_min_area_n,
+        "no_series_min_area_c": config.no_series_min_area_c,
+        "kragten_corrections": config.kragten_corrections,
+        "monitor_repeatability": config.monitor_repeatability,
+        "ace_scatter_check": config.ace_scatter_check,
         "run_file": config.run_file,
     }
 

@@ -89,7 +89,10 @@ def test_one_bad_monitor_is_flagged_not_fitted(tmp_path):
 
 def test_uncertainty_matches_numerical_perturbation(tmp_path):
     extra = [("S1", 5.0, -18.0, 3000, 50.0, 6000, 140.0), ("S2", 12.0, -12.0, 3000, 50.0, 6000, 140.0)]
-    positions, fits = process(parse_export(_sequence(tmp_path, extra=extra)), Config())
+    # 1.4.15: without the terms of the corrections in force and the drift monitors' scatter, 1σ is the
+    # calibration's alone, which this test perturbs (tests/test_engine_1415.py perturbs the corrections)
+    positions, fits = process(parse_export(_sequence(tmp_path, extra=extra)),
+                              Config(kragten_corrections="Off", monitor_repeatability="Off"))
     anchors = [p for p in positions if p.role == "Anchor"]
     for xattr, accattr, uattr, dst, key in (("d15n_drift", "acc15", "u_acc15", "u_d15n", "unc_n"),
                                             ("d13c_drift", "acc13", "u_acc13", "u_d13c", "unc_c")):

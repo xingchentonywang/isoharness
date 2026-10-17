@@ -443,7 +443,8 @@ def test_r09_a_peak_under_the_intercept_is_below_detection():
     assert p.pct_n_measured is None and p.pct_n_reported is None and p.u_pct_n is None
     assert p.cn_molar_reported is None and p.u_cn_molar is None
     assert p.pct_c_reported is not None and p.pct_c_reported > 0
-    assert p.flags[-1] == "%N below detection"
+    # 1.4.15: the acetanilide's whole-run check, which fires on the test run, puts its flag after it, last
+    assert p.flags[-2:] == ["%N below detection", "acetanilide d15N scatter above 1σ"]
     assert all(v is None or v >= 0 for x in positions for v in (x.u_pct_n, x.u_pct_c, x.u_cn_molar))
 
 
@@ -658,4 +659,5 @@ def test_workbook_agrees_with_the_engine(computed, name):
         assert fits["blank_c"]["in_force"]
     if name == "below_detection":
         flags = rs.cell(4 + 21, head["Flags"]).value
-        assert flags.rstrip("; ").endswith("%N below detection")
+        # 1.4.15: the acetanilide's whole-run check, which fires on the test run, writes its flag after it, last
+        assert flags.rstrip("; ").endswith("%N below detection; acetanilide d15N scatter above 1σ")

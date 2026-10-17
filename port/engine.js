@@ -1,24 +1,37 @@
 // isoharness preview port: the ea_irms steps that depend on a user's choices
 // (blank, linearity, drift, calibration, elemental content, uncertainty), as of
-// ea_irms 1.4.13, in JavaScript so the page can redraw at once; from 1.4.13 it also
+// ea_irms 1.4.15, in JavaScript so the page can redraw at once; from 1.4.13 it also
 // tests the elemental drift correction against the anchors (M.elem.n.check and
-// M.elem.c.check). The engine on the server stays the only source of saved or
-// downloaded numbers; continuous integration holds this port to it
-// (scripts/port_cases.py, port/test_port.js).
+// M.elem.c.check). From 1.4.15 it also finds the floor the size series sets, from
+// its own blank step (M.floor, M.limits; the flags "N below series floor" and "N
+// below the minimum peak", and C), says when blank capsules gave no peak
+// (M.blank.n.belowDetection), puts into the 1 sigma of the final d15N and d13C the
+// Kragten terms of the corrections in force (q.n.terms, M.unc.n.corrections) and
+// the drift monitors' SD where a one-sided F test says it is larger than the
+// repeatability in use (M.unc.n.monitors), holds every acetanilide analysis
+// against that 1 sigma (M.ace; "acetanilide d15N scatter above 1σ" on every
+// sample), and holds each drift monitor against an accepted value the standards
+// table gives it ("monitor d15N off by +0.73"). The engine on the server stays the
+// only source of saved or downloaded numbers; continuous integration holds this
+// port to it (scripts/port_cases.py, port/test_port.js).
 //
 // runModel(D, dec) takes the "port" block of POST /api/process and the user's
 // decisions. The configuration's settings that act inside these steps (the
 // significance level, the monitor outlier limit, the check-standard offset, the
-// blank multiple, k, the elemental gate and the first drift position) come with
-// the block as D.settings, and each position says whether the server set its CO2
-// peak aside as a reference pulse (rej) and, from ea_irms 1.4.4, how far its
-// undesignated N2 and CO2 reference pulses lie from the run's median when that
-// flags them (poN, poC; null otherwise), and from 1.4.12 how many CO2 peaks came
-// before the designated pulse where two or more did (cpre; null otherwise);
-// a block without them gets the package defaults. Settings that act before the
-// block is built (the standards, the reference-pulse windows and limit, the size
-// limits, settling and carryover) are applied by the server, so a change to them
-// goes back to the server.
+// blank multiple, k, the elemental gate and the first drift position, and from
+// 1.4.15 the floor's offset and SD multiple, a floor set outright, the lab minimum
+// of a run without a size series, and the switches kragten_corrections,
+// monitor_repeatability and ace_scatter_check) come with the block as D.settings,
+// and each position says whether the server set its CO2 peak aside as a reference
+// pulse (rej) and, from ea_irms 1.4.4, how far its undesignated N2 and CO2
+// reference pulses lie from the run's median when that flags them (poN, poC; null
+// otherwise), and from 1.4.12 how many CO2 peaks came before the designated pulse
+// where two or more did (cpre; null otherwise); a block without them gets the
+// package defaults. Settings that act before the block is built (the standards,
+// the reference-pulse windows and limit, the largest peak of the size range,
+// settling and carryover) are applied by the server, so a change to them goes back
+// to the server; the floor depends on the blank decision, so the port computes it
+// and takes only the maximum limits from the block (D.limits.max_n, max_c).
 //
 // The methods below are the prototype's (logic.js lines 43 to 378), changed only
 // to read D.settings in place of the fixed defaults (settings()).
@@ -70,6 +83,12 @@ class PortEngine {
   tp(t, df) {
     if (df == null || df < 1 || t == null) return null;
     return this.betainc(df / 2, 0.5, df / (df + t * t));
+  }
+
+  // ea_irms 1.4.15 f_p_right: the right-tail p of the F distribution, Excel's FDIST(f, df1, df2)
+  fp(f, df1, df2) {
+    if (f == null || df1 == null || df2 == null || df1 < 1 || df2 < 1 || f < 0) return null;
+    return this.betainc(df2 / 2, df1 / 2, df2 / (df2 + df1 * f));
   }
 
   fit(x, y) {
@@ -156,10 +175,130 @@ class PortEngine {
       // ea_irms 1.4.12 (finding W-02): the calibration line's limits, for the page's checks
       calSlopeNote: 0.05, calSlopeCaution: 0.10, calSdNote: 0.3, calSdCaution: 1.0,
       // ea_irms 1.4.13 (finding R-22): the reference-gas SD at or above which the run has a problem
-      refSdLimit: 0.1 };
+      refSdLimit: 0.1,
+      // ea_irms 1.4.15: the floor the size series sets (floor_offset_permil, floor_sd_multiple; null turns either
+      // off), a floor the configuration sets outright (min_area_n, min_area_c), and the lab minimum of a run
+      // without a size series (no_series_min_area_n, no_series_min_area_c), in Vs
+      floorOffset: 0.3, floorSdMultiple: 3.0, minAreaN: null, minAreaC: null, noSeriesMinN: null, noSeriesMinC: null,
+      // ea_irms 1.4.15: kragten_corrections (On, Off), monitor_repeatability (On, Off, Auto), ace_scatter_check (On, Off)
+      kragten: 'On', monitorRep: 'Auto', aceCheck: 'On' };
     const given = D && D.settings ? D.settings : {};
     for (const key of Object.keys(S)) if (key in given) S[key] = given[key];
     return S;
+  }
+
+  // ea_irms 1.4.15 _series_floor: the floor the size series sets. The linearity standards with a peak and a delta
+  // after the blank step, smallest first: while three or more larger ones remain, the smallest standard still
+  // standing is compared with the line through the larger ones at its own peak area. Further from it than
+  // floorOffset, or floorSdMultiple times that line's residual SD where that is larger, it moves the floor to the
+  // next standard, which is tested the same way; the first standard on its line ends the walk. Each step names the
+  // standard tested (row, area), its distance from the line (resid), the limit, the line's SD and how many
+  // standards made it, and the standard the floor moves to when it moved (next, nextArea).
+  seriesFloor(P, el, S) {
+    const ak = el === 'n' ? 'aN' : 'aC';
+    const pts = P.filter((q) => q.role === 'L' && q[ak] != null && q[el].blank != null)
+      .map((q) => [q[ak], q[el].blank, q.r]).sort((a, b) => a[0] - b[0] || a[2] - b[2]);
+    const out = { smallest: pts.length ? pts[0][0] : null, floor: pts.length ? pts[0][0] : null, steps: [],
+      moved: false, n: pts.length, offset: S.floorOffset, multiple: S.floorSdMultiple };
+    const off = S.floorOffset, mult = S.floorSdMultiple;
+    if (off == null || pts.length < 4) return out;
+    for (let i = 0; i < pts.length - 3; i++) {
+      const rest = pts.slice(i + 1);
+      const f = this.fit(rest.map((t) => t[0]), rest.map((t) => t[1]));
+      if (f == null) break;
+      const limit = mult == null || f.sd == null ? off : Math.max(off, mult * f.sd);
+      const [area, v, row] = pts[i];
+      const resid = v - (f.slope * area + f.intercept);
+      const moved = this.above(Math.abs(resid), limit);
+      out.steps.push({ row, area, resid, limit, lineSd: f.sd, nLine: f.n, moved,
+        next: moved ? rest[0][2] : null, nextArea: moved ? rest[0][0] : null });
+      if (!moved) break;
+      out.floor = rest[0][0];
+      out.moved = true;
+    }
+    return out;
+  }
+
+  // ea_irms 1.4.15 floor_of: the smallest peak the flags accept. min_area_n or _c, when the configuration gives it,
+  // sets it outright; else the floor the size series sets (its smallest standard when nothing moved it); a run
+  // without a size series takes the lab minimum, or no limit.
+  floorOf(M, el, S) {
+    const given = el === 'n' ? S.minAreaN : S.minAreaC;
+    if (given != null) return { min: given, src: 'configuration' };
+    if (M.lin[el].min != null) {
+      const fl = M.floor[el];
+      if (fl.floor == null) return { min: M.lin[el].min, src: 'smallest standard' };
+      return { min: fl.floor, src: fl.moved ? 'series floor' : 'smallest standard' };
+    }
+    const lab = el === 'n' ? S.noSeriesMinN : S.noSeriesMinC;
+    return lab != null ? { min: lab, src: 'lab minimum' } : { min: 0, src: null };
+  }
+
+  // ea_irms 1.4.15 _chain: the final values of element el, one per position of M.P, with one correction moved, the
+  // run's own choices held (which corrections are in force, the drift model, the monitors used, the pivots), so
+  // that with nothing moved it gives the final values. o.blank: [area, delta] of a blank applied to every position
+  // with a larger peak but the blanks; o.linSlope: the linearity slope used (else the one applied); o.refitLin: with
+  // a blank given, the linearity slope in force refitted on the series so moved; o.driftDelta: added to the drift
+  // slope refitted on the monitors so moved (0 when that correction is not in force).
+  chain(M, el, S, o) {
+    const P = M.P, ak = el === 'n' ? 'aN' : 'aC', acck = el === 'n' ? 'acc15' : 'acc13';
+    const dblank = P.map((q) => {
+      const d = q[el].raw;
+      if (d == null) return null;
+      if (!o.blank) return q[el].blank;
+      const [ab, db] = o.blank, a = q[ak];
+      return q.role !== 'B' && a > ab ? (a * d - ab * db) / (a - ab) : d;
+    });
+    const L = M.lin[el], lin = [];
+    P.forEach((q, i) => { if (q.role === 'L') lin.push(i); });
+    let b;
+    if (o.linSlope != null) b = o.linSlope;
+    else if (o.refitLin && L.inForce) {
+      const f = this.fit(lin.map((i) => P[i][ak]), lin.map((i) => dblank[i]));
+      b = f ? f.slope : L.applied;
+    } else b = L.applied;
+    const dlin = P.map((q, i) => (dblank[i] == null ? null : dblank[i] - b * (q[ak] - L.pivot)));
+    const Dr = M.drift[el], first = S.firstDrift || 0, excl = new Set(Dr.excluded), rowModel = Dr.model === 'Row';
+    const used = [];
+    P.forEach((q, i) => { if (q.role === 'D' && q.r >= first && !excl.has(q.r)) used.push(i); });
+    const xs = used.map((i) => (rowModel ? P[i].r : P[i].rbgd)), ys = used.map((i) => dlin[i]);
+    const pr = xs.filter((x, k) => x != null && ys[k] != null);
+    const pivot = pr.length ? pr.reduce((s, v) => s + v, 0) / pr.length : 0;
+    let slope = o.driftDelta || 0;
+    if (Dr.inForce) {
+      const f = this.fit(xs, ys);
+      slope += f ? f.slope : 0;
+    }
+    const ddrift = P.map((q, i) => {
+      const v = dlin[i];
+      if (v == null) return null;
+      if (rowModel) return v - slope * (q.r - pivot);
+      return q.rbgd == null ? v : v - slope * (q.rbgd - pivot);
+    });
+    const anc = [];
+    P.forEach((q, i) => { if (q.role === 'A') anc.push(i); });
+    const ax = anc.map((i) => ddrift[i]), ay = anc.map((i) => P[i][acck]);
+    const acc = ay.filter((a, k) => ax[k] != null && a != null);
+    const cf = acc.length && Math.max(...acc) > Math.min(...acc) ? this.fit(ax, ay) : null;
+    if (!cf || cf.n < 2) return P.map(() => null);
+    return ddrift.map((v) => (v == null ? null : cf.slope * v + cf.intercept));
+  }
+
+  // ea_irms 1.4.15 _correction_terms: the Kragten terms of the corrections in force, { blank, linearity, drift }, each
+  // the size of the change in every position's final value (null where it has none) when the blank's delta moves by
+  // the SD of its capsules (the linearity slope in force refitted), or a slope by its standard error.
+  correctionTerms(M, el, S) {
+    const P = M.P, terms = {};
+    const shift = (moved) => P.map((q, i) => (moved[i] == null || q[el].fin == null ? null : Math.abs(moved[i] - q[el].fin)));
+    const B = M.blank[el];
+    if (B.inForce && B.n >= 1 && B.area > 0 && B.sd != null) {
+      terms.blank = shift(this.chain(M, el, S, { blank: [B.area, B.d + B.sd], refitLin: true }));
+    }
+    const L = M.lin[el];
+    if (L.inForce && L.fit && L.fit.se != null) terms.linearity = shift(this.chain(M, el, S, { linSlope: L.fit.slope + L.fit.se }));
+    const Dr = M.drift[el];
+    if (Dr.inForce && Dr.fit && Dr.fit.se != null) terms.drift = shift(this.chain(M, el, S, { driftDelta: Dr.fit.se }));
+    return terms;
   }
 
   runModel(D, dec) {
@@ -173,7 +312,7 @@ class PortEngine {
       });
     });
     const role = (r) => P.filter((q) => q.role === r);
-    const M = { dec, settings: S, blank: {}, lin: {}, drift: {}, cal: {}, unc: {}, elem: {}, P };
+    const M = { dec, settings: S, blank: {}, lin: {}, floor: {}, limits: {}, drift: {}, cal: {}, unc: {}, ace: {}, elem: {}, P };
     const E = [['n', 'aN', 'dN'], ['c', 'aC', 'dC']];
     for (const [el, ak, dk] of E) {
       const b = role('B').filter((q) => q[ak] != null);
@@ -185,6 +324,9 @@ class PortEngine {
       };
       blk.inForce = dec.blank === 'Off' || blk.n < 1 ? false
         : dec.blank === 'On' ? true : blk.n >= 3 && blk.sd != null && !this.above(blk.sd, 2.0);
+      // ea_irms 1.4.15: blank capsules that gave no peak put the blank below detection; it was measured, not left out
+      blk.capsules = role('B').length;
+      blk.belowDetection = blk.capsules > 0 && blk.n === 0;
       M.blank[el] = blk;
       for (const q of P) {
         let v = q[dk];
@@ -213,6 +355,8 @@ class PortEngine {
         q[el].lin = q[el].blank == null ? null : q[el].blank - L.applied * (q[ak] - L.pivot);
       }
     }
+    // ea_irms 1.4.15: the floor the size series sets, from the series after the blank step
+    for (const [el] of E) M.floor[el] = this.seriesFloor(P, el, S);
     // Monitors before the configuration's first drift position stay out of the
     // drift fits altogether; the elemental correction still reads every monitor.
     const allMons = role('D'), first = S.firstDrift || 0;
@@ -327,13 +471,66 @@ class PortEngine {
           const x = q[el].drift;
           if (x == null || uS == null) { q[el].u = null; q[el].U = null; continue; }
           const r = B.at(x);
-          q[el].u = r.u; q[el].U = S.k * r.u; q[el].parts = r.parts;
+          q[el].u = r.u; q[el].parts = r.parts;
         }
       } else {
         for (const q of P) { q[el].u = null; q[el].U = null; }
       }
       M.unc[el] = B;
     }
+    // ea_irms 1.4.15 (_sigma_1415): what the 1 sigma above left out. For each element: the drift monitors' SD of their
+    // final values (outliers and positions left out of the fit not counted) against the repeatability in use on the
+    // calibrated scale, put in its place when monitor_repeatability says so (Auto: larger at the significance level,
+    // by a one-sided F test against the anchors' pooled degrees of freedom; On: whenever larger; Off: never); the
+    // Kragten terms of the corrections in force (kragten_corrections On); then every acetanilide analysis, the size
+    // series and the monitors used, against the repeatability the samples' 1 sigma now carries (ace_scatter_check).
+    for (const [el] of E) {
+      const unc = M.unc[el], cal = M.cal[el], Dr = M.drift[el];
+      const m = cal.slope, uS = unc.uS;
+      const rep = uS != null && m != null ? Math.abs(uS * m) : null;
+      const df = unc.df || 0;
+      const left = new Set(Dr.excluded.concat(Dr.outliers));
+      const used = mons.filter((q) => !left.has(q.r) && q[el].fin != null);
+      const vals = used.map((q) => q[el].fin), sdMon = this.sdev(vals);
+      const mon = { switch: S.monitorRep, n: vals.length, rows: used.map((q) => q.r), sd: sdMon, repeatability: rep, df,
+        p: null, larger: false, used: false };
+      if (sdMon != null && rep != null && vals.length >= 3) {
+        mon.larger = this.above(sdMon, rep);
+        if (rep > 0 && df > 0) mon.p = this.fp((sdMon / rep) ** 2, vals.length - 1, df);
+        mon.used = !!(mon.larger && (S.monitorRep === 'On' || (S.monitorRep === 'Auto' && mon.p != null && this.below(mon.p, alpha))));
+      }
+      unc.monitors = mon;
+      const terms = S.kragten === 'On' ? this.correctionTerms(M, el, S) : {};
+      unc.corrections = {};
+      for (const k of Object.keys(terms)) {
+        const v = terms[k].filter((x) => x != null);
+        unc.corrections[k] = v.length ? Math.max(...v) : null;
+      }
+      P.forEach((q, i) => {
+        const t = {};
+        for (const k of Object.keys(terms)) t[k] = terms[k][i];
+        q[el].terms = t;
+        const u = q[el].u;
+        if (u == null) return;
+        let total = u * u;
+        if (mon.used) total += sdMon * sdMon - rep * rep;
+        let s = 0;
+        for (const k of Object.keys(t)) if (t[k] != null) s += t[k] * t[k];
+        total += s;
+        q[el].u = Math.sqrt(Math.max(total, 0));
+      });
+      const series = P.filter((q) => q.role === 'L' && q[el].fin != null).map((q) => q[el].fin);
+      const both = series.concat(vals), sdAll = this.sdev(both);
+      const basis = mon.used ? sdMon : rep, dfb = mon.used ? vals.length - 1 : df;
+      const ace = { switch: S.aceCheck, n: both.length, nSeries: series.length, nMonitors: vals.length, sd: sdAll,
+        basis, df: dfb, p: null, over: false, fromMonitors: mon.used };
+      if (S.aceCheck === 'On' && sdAll != null && basis && both.length >= 3 && dfb != null && dfb > 0) {
+        ace.p = this.fp((sdAll / basis) ** 2, both.length - 1, dfb);
+        ace.over = !!(this.above(sdAll, basis) && ace.p != null && this.below(ace.p, alpha));
+      }
+      M.ace[el] = ace;
+    }
+    for (const q of P) for (const [el] of E) q[el].U = q[el].u == null ? null : S.k * q[el].u;
     // ea_irms 1.4.10: a peak at or below the k-factor line's intercept holds no detectable N or C
     for (const q of P) {
       const mass = q.amt != null && q.amt > 0;
@@ -397,17 +594,32 @@ class PortEngine {
       }
       M.elem[el].check = C;
     }
-    const L = D.limits, settled = D.settle.settled_from;
+    // ea_irms 1.4.15: the smallest peak the flags accept is the floor this port finds from its own blank step (or the
+    // configuration's minimum, or the lab minimum of a run without a size series); the largest is the server's
+    const given = D.limits || {};
+    for (const [el] of E) {
+      const fo = this.floorOf(M, el, S), mx = given['max_' + el];
+      M.limits[el] = { min: fo.min, src: fo.src, max: mx == null ? 0 : mx, smallest: M.floor[el].smallest };
+    }
+    // which flag a peak below the floor gets: under the lab minimum, under a floor the series moved up but at or above
+    // its smallest standard, or under the series (its smallest standard, or a floor the configuration set)
+    const belowText = (el, area) => {
+      const lim = M.limits[el], nm = el === 'n' ? 'N' : 'C';
+      if (lim.src === 'lab minimum') return nm + ' below the minimum peak';
+      if (lim.src === 'series floor' && lim.smallest != null && !this.below(area, lim.smallest)) return nm + ' below series floor';
+      return nm + ' below linearity range';
+    };
+    const Ln = M.limits.n, Lc = M.limits.c, settled = D.settle.settled_from;
     for (const q of P) {
       const fl = [];
       if (q.aN == null) fl.push('no N peak');
-      else if (L.min_n && this.below(q.aN, L.min_n)) fl.push('N below linearity range');
-      else if (L.max_n && this.above(q.aN, L.max_n)) fl.push('N above linearity range');
+      else if (Ln.min && this.below(q.aN, Ln.min)) fl.push(belowText('n', q.aN));
+      else if (Ln.max && this.above(q.aN, Ln.max)) fl.push('N above linearity range');
       if (q.aC == null) {
         fl.push('no C peak');
         if (q.rej) fl.push('CO2 peak rejected as a reference pulse');
-      } else if (L.min_c && this.below(q.aC, L.min_c)) fl.push('C below linearity range');
-      else if (L.max_c && this.above(q.aC, L.max_c)) fl.push('C above linearity range');
+      } else if (Lc.min && this.below(q.aC, Lc.min)) fl.push(belowText('c', q.aC));
+      else if (Lc.max && this.above(q.aC, Lc.max)) fl.push('C above linearity range');
       // ea_irms 1.4.12 (finding W-09): the CO2 peak next to the designated pulse was taken
       if (q.aC != null && q.cpre) fl.push(q.cpre + ' CO2 peaks before the reference pulse, the last one used');
       for (const [v, f, name] of [[q.n.fin, M.cal.n, 'd15N'], [q.c.fin, M.cal.c, 'd13C']]) {
@@ -420,6 +632,14 @@ class PortEngine {
         for (const [got, acc, name] of [[q.n.fin, q.acc15, 'd15N'], [q.c.fin, q.acc13, 'd13C']]) {
           if (got != null && acc != null && this.above(Math.abs(got - acc), S.checkOffset)) {
             fl.push('check ' + name + ' off by ' + this.xl(got - acc, 2, true));
+          }
+        }
+      }
+      // ea_irms 1.4.15: a drift monitor against the accepted value its row of the standards table gives
+      if (q.role === 'D') {
+        for (const [got, acc, name] of [[q.n.fin, q.acc15, 'd15N'], [q.c.fin, q.acc13, 'd13C']]) {
+          if (got != null && acc != null && this.above(Math.abs(got - acc), S.checkOffset)) {
+            fl.push('monitor ' + name + ' off by ' + this.xl(got - acc, 2, true));
           }
         }
       }
@@ -446,6 +666,12 @@ class PortEngine {
       }
       if (q.belowN) fl.push('%N below detection');
       if (q.belowC) fl.push('%C below detection');
+      // ea_irms 1.4.15: the acetanilide's whole-run check, on every sample with a final value of that element
+      if (q.role === 'S') {
+        for (const [el, v, name] of [['n', q.n.fin, 'd15N'], ['c', q.c.fin, 'd13C']]) {
+          if (v != null && M.ace[el].over) fl.push('acetanilide ' + name + ' scatter above 1σ');
+        }
+      }
       q.flags = fl;
     }
     return M;

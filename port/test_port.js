@@ -1,7 +1,11 @@
 // Hold the preview port to the engine: every value, flag list and fit result on
 // every decision set in the cases file must agree within 1e-9 relative. A case
-// with "settings" overrides the block's settings, as port_cases.py did for the
-// engine.
+// with "settings" overrides the block's settings, and one with "std" its standards
+// table, as port_cases.py did for the engine. From ea_irms 1.4.15 the values include
+// each position's Kragten terms of the corrections in force, and the fits the floor
+// with each step of the walk up the size series, the drift monitors' SD against the
+// repeatability in use, the largest term of each correction, the acetanilide's
+// whole-run check, and blank capsules that gave no peak.
 //
 //   node port/test_port.js PORT_INPUT.json CASES.json [ENGINE.js]
 //
@@ -35,17 +39,27 @@ for (const [ci, C] of cases.entries()) {
   const c = C.case;
   const dec = { blank: c.blank, linN: c.linN, linC: c.linC, drift: c.drift, model: c.model,
     exclN: c.exclN, exclC: c.exclC, elem: c.elem, exclE: c.exclE, uN: c.uN, uC: c.uC };
-  const DC = c.settings ? Object.assign({}, D, { settings: Object.assign({}, D.settings, c.settings) }) : D;
+  const DC = Object.assign({}, D, c.settings ? { settings: Object.assign({}, D.settings, c.settings) } : {},
+    c.std ? { std: c.std } : {});
   const M = E.runModel.call(E, DC, dec);
   const byRow = new Map(M.P.map((q) => [q.r, q]));
+  const TERMS = ['blank', 'linearity', 'drift'];
   for (const row of C.rows) {
     const q = byRow.get(row[0]);
     if (!q) { mism++; console.log('missing row', ci, row[0]); continue; }
     const vals = [q.n.blank, q.n.lin, q.n.drift, q.n.fin, q.n.u, q.n.U, q.c.blank, q.c.lin, q.c.drift, q.c.fin, q.c.u, q.c.U,
       q.pctN, q.pctC, q.cn, q.fn, q.fc, q.role === 'D' ? M.drift.n.t[q.r] : null, q.role === 'D' ? M.drift.c.t[q.r] : null];
     for (let i = 0; i < vals.length; i++) close(vals[i] === undefined ? null : vals[i], row[i + 1], `case ${ci} row ${row[0]} col ${i}`);
+    // the flags are last in a row
+    const flags = row[row.length - 1];
     comps++;
-    if (JSON.stringify(row[20]) !== JSON.stringify(q.flags)) { flagMism++; if (flagMism < 10) console.log('flags', ci, row[0], row[20], q.flags); }
+    if (JSON.stringify(flags) !== JSON.stringify(q.flags)) { flagMism++; if (flagMism < 10) console.log('flags', ci, row[0], flags, q.flags); }
+    // ea_irms 1.4.15: the Kragten terms of the corrections in force, blank, linearity, drift for N then C, before the flags
+    if (row.length > 21) {
+      const terms = [];
+      for (const el of ['n', 'c']) for (const k of TERMS) terms.push(q[el].terms ? q[el].terms[k] : undefined);
+      for (let i = 0; i < terms.length; i++) close(terms[i] === undefined ? null : terms[i], row[20 + i], `case ${ci} row ${row[0]} term ${i}`);
+    }
   }
   const F = C.fits;
   const chk = (a, b, tag) => { const before = mism; close(a, b, tag); if (mism > before) fitMism++; };
@@ -72,9 +86,46 @@ for (const [ci, C] of cases.entries()) {
     chk(got.level, want[0], k + 'level'); chk(got.rmsMeas, want[1], k + 'rmsMeas'); chk(got.rmsRep, want[2], k + 'rmsRep');
     chk(got.added, want[3], k + 'added'); chk(got.n, want[4], k + 'n');
   }
+  // ea_irms 1.4.15
+  const same = (a, b, tag) => { comps++; if (JSON.stringify(a) !== JSON.stringify(b)) { fitMism++; if (fitMism < 15) console.log('fit', ci, tag, a, b); } };
+  for (const [el, key] of [['n', 'N'], ['c', 'C']]) {
+    const want = F['floor' + key];
+    if (want) {
+      const lim = M.limits[el], fl = M.floor[el];
+      chk(lim.min, want[0], 'floor' + key + 'min'); chk(lim.src, want[1], 'floor' + key + 'src');
+      chk(fl.floor, want[2], 'floor' + key + 'floor'); chk(fl.moved, want[3], 'floor' + key + 'moved');
+      chk(fl.smallest, want[4], 'floor' + key + 'smallest');
+      same(fl.steps.length, want[5].length, 'floor' + key + 'steps');
+      fl.steps.forEach((s, i) => {
+        if (!want[5][i]) return;
+        chk(s.row, want[5][i][0], 'floor' + key + 'row'); chk(s.resid, want[5][i][1], 'floor' + key + 'resid');
+        chk(s.limit, want[5][i][2], 'floor' + key + 'limit'); chk(s.moved, want[5][i][3], 'floor' + key + 'stepMoved');
+      });
+    }
+    const mon = F['mon' + key];
+    if (mon) {
+      const m = M.unc[el].monitors || {};
+      [m.n, m.sd, m.repeatability, m.df, m.p, m.larger, m.used].forEach((v, i) => chk(v === undefined ? null : v, mon[i], 'mon' + key + i));
+    }
+    const corr = F['corr' + key];
+    if (corr) {
+      const c2 = M.unc[el].corrections || {};
+      ['blank', 'linearity', 'drift'].forEach((k, i) => chk(c2[k] === undefined ? null : c2[k], corr[i], 'corr' + key + k));
+      same(Object.keys(c2).sort(), corr[3], 'corr' + key + 'keys');
+    }
+    const ace = F['ace' + key];
+    if (ace) {
+      const a = M.ace[el] || {};
+      [a.n, a.sd, a.basis, a.df, a.p, a.over].forEach((v, i) => chk(v === undefined ? null : v, ace[i], 'ace' + key + i));
+    }
+  }
+  if (F.blankBelow) {
+    chk(M.blank.n.belowDetection, F.blankBelow[0], 'blankBelowN'); chk(M.blank.c.belowDetection, F.blankBelow[1], 'blankBelowC');
+    chk(M.blank.n.capsules, F.blankBelow[2], 'blankCapsules');
+  }
 }
 
-const nSet = cases.filter((C) => C.case.settings).length;
+const nSet = cases.filter((C) => C.case.settings || C.case.std).length;
 console.log(`${D.file}: cases ${cases.length} (${nSet} with non-default settings), comparisons ${comps}, value mismatches ${mism}, ` +
   `flag-list mismatches ${flagMism}, fit mismatches ${fitMism}, worst relative difference ${worst.toExponential(2)}`);
 process.exit(mism || flagMism || fitMism ? 1 : 0);

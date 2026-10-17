@@ -24,12 +24,17 @@ from .parse import _read_rows, parse_export
 from .pipeline import (ANCHOR_RATIO_LIMIT, ANCHOR_SPREAD_PERMIL, MAX_STANDARDS,
                        MIN_OUTLIER_MONITORS, Config, assign_roles)
 
-VERSION = "1.4.14"
+VERSION = "1.4.15"
 NSTD = MAX_STANDARDS      # rows in the Setup standards table (16 from 1.4.2, 13 before)
 # 1.4.10: the largest export the workbook is built for. Before 1.4.10 it held positions 1 to 120 and
 # 1,000 peak records and left out the rest without a word; it now grows to fit, up to these.
 MAX_POSITION = 400
 MAX_RECORDS = 4000
+# 1.4.15: the Rerun sheet lists the corrections fitted but not applied from row RERUN_UNAPPLIED_ROW (six lines,
+# under their heading), below the problems of the whole run in row 5, and the samples from RERUN_FIRST_ROW (row 8
+# before 1.4.15), under the header in the row above it
+RERUN_UNAPPLIED_ROW = 8
+RERUN_FIRST_ROW = 16
 
 
 # 1.4.10: how long LibreOffice may take over one workbook, in seconds (600 before). The workbooks of
@@ -196,7 +201,8 @@ def build_workbook(export_path, out_path, config: Config | None = None,
               'holds every fitted coefficient with its r-squared, its residual scatter, and, for the corrections, '
               'the test that decided whether it was applied.')
     r = rd(r, '6.  Open Rerun. It lists the samples to measure again, with the reason and a mass to weigh, and '
-              'the samples to check first. Its top line says whether the run as a whole has a problem.')
+              'the samples to check first. Its top line says whether the run as a whole has a problem, and the '
+              'lines under it list the corrections the run fitted but did not apply (1.4.15).')
     r = rd(r, '7.  Metadata holds the run information and, when a sample sheet was given, each sample\'s row of it, '
               'which Results also carries after its own columns. Replicates compares the analyses of one sample '
               'in this run (1.4.8).')
@@ -218,7 +224,8 @@ def build_workbook(export_path, out_path, config: Config | None = None,
                     'drift, and calibration corrections, then elemental content.'),
         ('Fits',    'Every coefficient fitted from this run, each with n, r-squared, and residual scatter.'),
         ('Results', 'The clean table to copy out or plot from.'),
-        ('Rerun',   'The samples to measure again or to check, with the reason and a suggested mass.'),
+        ('Rerun',   'The samples to measure again or to check, with the reason and a suggested mass, under the '
+                    'problems of the whole run and the corrections fitted but not applied (1.4.15).'),
         ('Replicates', 'Analyses of one sample in this run, their range, and the critical range of ISO 5725-6 (1.4.8).'),
         ('QC',      'Checks and flags, to read before Results.'),
         ('Metadata', 'The run information and the sample sheet\'s rows for this run\'s samples (1.4.8).'),
@@ -280,9 +287,20 @@ def build_workbook(export_path, out_path, config: Config | None = None,
               'empty), each propagated through the calibration line to first order, by its linear effect on the '
               'result, which a Kragten spreadsheet estimates by changing each input by its 1σ. A material '
               'analyzed once has no scatter of its own, so the error of its mean takes that repeatability (from '
-              '1.4.12; before, it counted as 0 and the 1σ was too small). It leaves out '
-              'the blank, linearity, and drift corrections and day-to-day reproducibility, which a control chart of '
-              'an in-house standard measures.')
+              '1.4.12; before, it counted as 0 and the 1σ was too small).')
+    r = rd(r, 'From 1.4.15 the 1σ also holds the corrections in force (Setup B83, On by default). For each blank, '
+              'linearity, and drift correction applied, the fitted slope is moved by its standard error, or the '
+              'blank\'s delta by the SD of its capsules, every later step is refitted as the run did it, and the '
+              'change in each final value is a term added in quadrature. That is the Kragten calculation itself, the '
+              'input moved and the result computed again, rather than a derivative, because the refitted '
+              'calibration is not linear in the move (Fits rows 424 to 451, and the Work columns headed kb, kl, and '
+              'kd). Where the drift monitors\' final values scatter more than the '
+              'repeatability in use, their SD can take its place (Setup B84: Auto puts it in when a one-sided F test '
+              'against the anchors\' pooled degrees of freedom finds it larger at the significance level, On whenever '
+              'it is larger, Off never). Then every acetanilide analysis, the size series and those monitors, is '
+              'held against the repeatability the samples carry (Setup B85); where they scatter more at the '
+              'significance level, every sample of that element is marked for a check (Fits rows 453 to 470). The '
+              '1σ leaves out day-to-day reproducibility, which a control chart of an in-house standard measures.')
     r = rd(r, 'Elemental content comes from a regression of peak area on micrograms of C or N across every standard '
               'with both a known mass and a known composition. The intercept of that line is the area blank and is '
               'subtracted, so the k-factor is not forced through the origin. A peak at or below the intercept holds '
@@ -331,10 +349,26 @@ def build_workbook(export_path, out_path, config: Config | None = None,
               'cannot follow the pulses\' drift, so from 1.4.12 those positions use the tolerance of Setup B41, or '
               'B39 where that is wider.')
     r += 1
-    r = rd(r, 'Rerun marks (1.4.4, 1.4.7, 1.4.8, 1.4.14)', F_H1)
+    r = rd(r, 'Size series floor (1.4.15)', F_H1)
+    r = rd(r, 'The smallest standards of a size series can read off the line the larger ones make, so from 1.4.15 '
+              'the series sets its own floor. Walking up from the smallest linearity standard while three or more '
+              'larger ones remain, each is held against the line through the larger ones at its own peak area, '
+              'after the blank step; one further from that line than Setup B78, or B79 times the line\'s residual SD '
+              'where that is larger, moves the floor to the next standard, and the walk ends at the first one on its '
+              'line (Fits rows 411 to 422, and the walk from row 486). A peak between the smallest standard and that '
+              'floor is flagged below the series floor and marked for a rerun, as a peak below the smallest '
+              'standard is. Setup B21 and B22 still set the floor outright, and a run with no linearity standards '
+              'takes the lab minimum of Setup B80 and B81, below which a peak is flagged below the minimum peak. On '
+              'the 2026-09-15 run the smallest nitrogen standard reads 1.02 permil off the line through the three '
+              'larger ones, so the nitrogen floor is the next standard.')
+    r = rd(r, 'Blank capsules that gave no peak put the blank below detection (1.4.15, Fits rows 406 to 409): it was '
+              'measured and is too small to see, and QC rows 48 and 51 say so.')
+    r += 1
+    r = rd(r, 'Rerun marks (1.4.4, 1.4.7, 1.4.8, 1.4.14, 1.4.15)', F_H1)
     r = rd(r, 'A sample is marked for what measuring it again can fix, namely the amount, the peak, or the state of '
               'the instrument at its position. It is marked for a rerun of N, C, or both when its peak lies below '
-              'the range of the linearity standards (Fits rows 81 to 104) or under the blank multiple in Setup B25; '
+              'the floor of the linearity standards (Fits rows 81 and 82; from 1.4.15 the floor the size series '
+              'sets, or the lab minimum in a run without one) or under the blank multiple in Setup B25; '
               'when its peak reaches the instrument\'s largest amplitude, Setup B69 (1.4.7; a peak above the '
               'linearity range but under it is not marked, and with B69 empty every peak above the range is, as '
               'before 1.4.7); when a '
@@ -345,8 +379,9 @@ def build_workbook(export_path, out_path, config: Config | None = None,
               'range of ISO 5725-6 (1.4.8, Replicates sheet, switched by Setup B71). A sample with neither peak is '
               'marked for a rerun of N and C. It is marked for a check when it '
               'ran before the background settled, when it follows an oversized sample and its background rose by '
-              'more than Setup B28 (possible carryover, a check from 1.4.14 and a rerun of N and C before), or when '
-              'it has the peak of only one element. A value outside the anchors\' '
+              'more than Setup B28 (possible carryover, a check from 1.4.14 and a rerun of N and C before), when '
+              'it has the peak of only one element, or, from 1.4.15, when the run\'s acetanilide scatters more than '
+              'the samples\' 1σ allows (Setup B85). A value outside the anchors\' '
               'range is not marked, because a rerun would extrapolate the same way; the fix is an anchor that '
               'brackets it.')
     r = rd(r, 'The suggested mass puts each peak inside the linearity range and above the blank multiple, read from '
@@ -357,8 +392,12 @@ def build_workbook(export_path, out_path, config: Config | None = None,
               'off, anchors outside k x 1σ, a reference-gas SD at or above Setup B68 (the FIRMS guide\'s '
               'zero-enrichment limit, section 4.3.2), an element with no calibration (1.4.10), a calibration '
               'line beyond the limits of Setup B73 to B76 (1.4.12), anchors of one row of the standards table that '
-              'do not read as one material, or an elemental drift correction that moves the anchors further from '
-              'their certified %N or %C (1.4.13), are listed once at the top of Rerun and not on every sample.')
+              'do not read as one material, an elemental drift correction that moves the anchors further from '
+              'their certified %N or %C (1.4.13), a drift monitor further than Setup B20 from an accepted value the '
+              'standards table gives it, or an acetanilide that scatters more than the samples\' 1σ (1.4.15), are '
+              'listed once at the top of Rerun and not on every sample. Below them, from 1.4.15, Rerun lists the '
+              'corrections the run fitted but did not apply, a blank whose capsules gave a peak or a linearity or '
+              'drift slope, each with how far applying it as fitted would move the samples.')
     r = rd(r, 'Replicates are the analyses of one sample in this run as the sample sheet names them: samples matched '
               'to the sheet with the same name, and samples whose own row gives the same Replicate of. A sample '
               'matched by an ID its name begins with, such as CI 2-2-H+S by the row CI 2-2-H, takes that row\'s '
@@ -561,9 +600,13 @@ def build_workbook(export_path, out_path, config: Config | None = None,
         ('Check standard offset (permil)', _CFG.check_offset_permil,
                                               'Flag a check standard further than this from its accepted value.'),
         ('Minimum Area 28', '' if _CFG.min_area_n is None else _CFG.min_area_n,
-                                              'Leave empty to use the smallest linearity standard in the run.'),
+                                              'Leave empty to use the floor the size series sets (from 1.4.15, '
+                                              'B78 and B79), its smallest standard unless that reads off the line '
+                                              'through the larger ones, or in a run without one the lab minimum, B80. '
+                                              'A value here sets the floor outright.'),
         ('Minimum Area 44', '' if _CFG.min_area_c is None else _CFG.min_area_c,
-                                              'Leave empty to use the smallest linearity standard in the run.'),
+                                              'Leave empty to use the floor the size series sets, as for Area 28 '
+                                              '(B81 in a run without one).'),
         ('Maximum Area 28', '' if _CFG.max_area_n is None else _CFG.max_area_n,
                                               'Leave empty to use the largest linearity standard in the run.'),
         ('Maximum Area 44', '' if _CFG.max_area_c is None else _CFG.max_area_c,
@@ -696,8 +739,8 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     lab(st, SLAST + 10, 'Largest 1σ of the final d15N or d13C before a rerun (permil)', F_SM)
     inp(st, SLAST + 10, 2, '' if _CFG.rerun_max_1sigma is None else _CFG.rerun_max_1sigma, '0.00')
     lab(st, SLAST + 10, 'A sample whose final d15N or d13C has a 1σ above this is marked for a rerun of that '
-                        'element (1.4.7). The 1σ leaves out the blank, linearity, and drift corrections. Leave '
-                        'empty to switch it off.', F_NOTE, 7)
+                        'element (1.4.7). From 1.4.15 the 1σ holds the corrections in force and the drift monitors\' '
+                        'scatter, as B83 and B84 set. Leave empty to switch it off.', F_NOTE, 7)
     S_AMAX, S_USIG = f'Setup!$B${SLAST+9}', f'Setup!$B${SLAST+10}'
     # 1.4.8: replicates of a sample, named by the sample sheet, against the critical range of ISO 5725-6
     lab(st, SLAST + 11, 'Compare replicates of a sample (On or Off)', F_SM)
@@ -727,6 +770,59 @@ def build_workbook(export_path, out_path, config: Config | None = None,
             lab(st, row_, note_, F_NOTE, 7)
     S_CSN, S_CSC = f'Setup!$B${SLAST+13}', f'Setup!$B${SLAST+14}'
     S_CDN, S_CDC = f'Setup!$B${SLAST+15}', f'Setup!$B${SLAST+16}'
+    # 1.4.15 (Tony Wang, 2026-10-16): the floor the size series sets, the lab minimum of a run without a size
+    # series, and the three switches of the 1σ of the final delta values, below everything else so nothing moves
+    lab(st, SLAST + 17, 'Size series floor (1.4.15)', F_H1)
+    FLOOR_SET = [
+        ('Size series floor: a standard further than this from the line through the larger ones raises the '
+         'floor (permil)', _CFG.floor_offset_permil, '0.00',
+         'Walking up from the smallest linearity standard while three or more larger ones remain, a standard whose '
+         'delta after the blank step lies further than this from the line through the larger ones moves the floor '
+         'to the next standard (Fits rows 411 to 422). Leave empty to keep the smallest standard as the floor, as '
+         'before 1.4.15.'),
+        ('Size series floor: or this many times that line\'s residual SD, where that is larger',
+         _CFG.floor_sd_multiple, '0.0', 'Leave empty to use the distance above alone.'),
+        ('Minimum Area 28 in a run without a size series (Vs)', _CFG.no_series_min_area_n, '0.000',
+         'The lab\'s smallest N2 peak, used only in a run with no linearity standards; a peak below it is marked '
+         'for a rerun of N. Leave empty for no limit there. B21 still sets the floor outright in any run.'),
+        ('Minimum Area 44 in a run without a size series (Vs)', _CFG.no_series_min_area_c, '0.000',
+         'As B80, for CO2 and B22.'),
+    ]
+    for k_, (label_, v_, fmt_, note_) in enumerate(FLOOR_SET):
+        row_ = SLAST + 18 + k_
+        lab(st, row_, label_, F_SM)
+        inp(st, row_, 2, '' if v_ is None else v_, fmt_)
+        lab(st, row_, note_, F_NOTE, 7)
+    S_FOFF, S_FMULT = f'Setup!$B${SLAST+18}', f'Setup!$B${SLAST+19}'
+    S_NSMN, S_NSMC = f'Setup!$B${SLAST+20}', f'Setup!$B${SLAST+21}'
+    lab(st, SLAST + 22, '1σ of the final d15N and d13C (1.4.15)', F_H1)
+    SIG_SET = [
+        ('1σ holds the corrections in force (On or Off)',
+         _CFG.kragten_corrections if _CFG.kragten_corrections in ('On', 'Off') else 'On', '"On,Off"',
+         'On adds a term for each blank, linearity, and drift correction applied: the fitted slope moved by its '
+         'standard error, or the blank\'s delta by the SD of its capsules, with every later step refitted, and the '
+         'change in the final value is the term (Kragten; Fits rows 424 onwards). Off: the 1σ of 1.4.14.'),
+        ('Drift monitors\' scatter in place of the repeatability (On, Off or Auto)',
+         _CFG.monitor_repeatability if _CFG.monitor_repeatability in ('On', 'Off', 'Auto') else 'Auto',
+         '"On,Off,Auto"',
+         'Where the drift monitors\' final values (outliers and positions left out of the fit not counted) scatter '
+         'more than the repeatability in use, their SD takes its place in 1σ: Auto when they scatter more at the '
+         'significance level (B15, a one-sided F test against the anchors\' pooled degrees of freedom), On whenever '
+         'they scatter more, Off never.'),
+        ('Check every acetanilide analysis against the samples\' 1σ (On or Off)',
+         _CFG.ace_scatter_check if _CFG.ace_scatter_check in ('On', 'Off') else 'On', '"On,Off"',
+         'On: where the size series and the drift monitors together scatter more than the repeatability the '
+         'samples\' 1σ carries, at the significance level, that element\'s samples are marked for a check and the '
+         'Rerun sheet lists it as a problem of the whole run.'),
+    ]
+    for k_, (label_, v_, choices_, note_) in enumerate(SIG_SET):
+        row_ = SLAST + 23 + k_
+        lab(st, row_, label_, F_SM)
+        inp(st, row_, 2, v_)
+        lab(st, row_, note_, F_NOTE, 7)
+        dv_ = DataValidation(type='list', formula1=choices_, allow_blank=False)
+        st.add_data_validation(dv_); dv_.add(f'B{row_}')
+    S_KRAG, S_MREP, S_ACE = f'Setup!$B${SLAST+23}', f'Setup!$B${SLAST+24}', f'Setup!$B${SLAST+25}'
 
     S_LIN, S_DRIFT, S_DM = 'Setup!$B$11', 'Setup!$B$12', 'Setup!$B$13'
     S_LINC = 'IF(Setup!$B$18<>"",Setup!$B$18,Setup!$B$11)'   # carbon switch, empty = follow B11 (1.4.1)
@@ -879,6 +975,25 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     first_anc_col = first_cpre_col + len(CPRE_NAMES)
     RX.update({name: gcl(first_anc_col + k) for k, name in enumerate(ANC_NAMES)})
     COLS += [(name, RX[name], 7, 'h') for name in ANC_NAMES]
+    # 1.4.15 (Tony Wang, 2026-10-16), after everything else so no earlier column moves. The size series sorted
+    # by area (then position) for the floor it sets (Fits rows 486 onwards); the drift monitors after every
+    # correction and every acetanilide analysis, for the 1σ and the acetanilide's check; the flag pieces of a
+    # monitor off its accepted value and of the acetanilide's check; and, for each correction, the final values
+    # with that correction moved by its uncertainty when it is in force (a Kragten term of 1σ) or applied as
+    # fitted when it is not (the corrections fitted but not applied): kb the blank, kl linearity, kd drift.
+    # Each chain refits every later step as the run did it (Fits rows 424 to 451), so it is computed here, not
+    # by a derivative. u0 is the 1σ of 1.4.14, which column CL (CN) now adds the terms to.
+    NEW_NAMES = ['fr ok N', 'fr x N', 'fr rank N', 'fr ok C', 'fr x C', 'fr rank C',
+                 'mon fin N', 'mon fin C', 'ace N', 'ace C',
+                 'fl monN', 'fl monC', 'mon off', 'mon list', 'fl aceN', 'fl aceC']
+    for el_ in ('N', 'C'):
+        NEW_NAMES += [f'kb W {el_}', f'kb X {el_}', f'kb Z {el_}', f'kb shift {el_}', f'kb samp {el_}',
+                      f'kl X {el_}', f'kl Z {el_}', f'kl shift {el_}', f'kl samp {el_}',
+                      f'kd Z {el_}', f'kd shift {el_}', f'kd samp {el_}']
+    NEW_NAMES += ['u0 d15N', 'u0 d13C']
+    first_new_col = first_anc_col + len(ANC_NAMES)
+    RX.update({name: gcl(first_new_col + k) for k, name in enumerate(NEW_NAMES)})
+    COLS += [(name, RX[name], 8, 'h') for name in NEW_NAMES]
     GROUPS = [('A','D','identification'),('E','G','mass'),('H','K','peak lookup'),('L','R','as measured'),
               ('S','V','from the standards table'),('W','AA','nitrogen corrections'),
               ('AB','AF','carbon corrections'),('AG','AL','elemental content'),
@@ -899,7 +1014,12 @@ def build_workbook(export_path, out_path, config: Config | None = None,
               (RX['rep group'],RX['fl repC'],'replicates (1.4.8): helpers, ignore'),
               (RX['np N'],RX['pmin C'],'reference pulses (1.4.10): helpers, ignore'),
               (RX['c before'],RX['fl cpre'],'CO2 peaks before the reference pulse (1.4.12): helpers, ignore'),
-              (RX['am ok ratio'],RX['mdev C'],'anchor checks (1.4.13): helpers, ignore')]
+              (RX['am ok ratio'],RX['mdev C'],'anchor checks (1.4.13): helpers, ignore'),
+              (RX['fr ok N'],RX['fr rank C'],'size series floor (1.4.15): helpers, ignore'),
+              (RX['mon fin N'],RX['ace C'],'drift monitors and acetanilide (1.4.15): helpers, ignore'),
+              (RX['fl monN'],RX['fl aceC'],'monitor and acetanilide flags (1.4.15): helpers, ignore'),
+              (RX['kb W N'],RX['kd samp C'],'corrections moved or applied as fitted (1.4.15): helpers, ignore'),
+              (RX['u0 d15N'],RX['u0 d13C'],'1σ of 1.4.14, before the 1.4.15 terms')]
     for a, b, t in GROUPS:
         wk.cell(4, wk[a + '1'].column, t).font = F_GRP
         wk.cell(4, wk[a + '1'].column).fill = FILL_GRP
@@ -910,7 +1030,8 @@ def build_workbook(export_path, out_path, config: Config | None = None,
                 'u %N': '1σ %N', 'U %N': 'kσ %N', 'u %C': '1σ %C', 'U %C': 'kσ %C',
                 'u CN molar': '1σ CN molar', 'U CN molar': 'kσ CN molar',
                 'u CN mass': '1σ CN mass', 'U CN mass': 'kσ CN mass',
-                'inU N': 'in kσ N', 'inU C': 'in kσ C', 'inU CN': 'in kσ CN'}
+                'inU N': 'in kσ N', 'inU C': 'in kσ C', 'inU CN': 'in kσ CN',
+                'u0 d15N': '1σ scale+rep d15N', 'u0 d13C': '1σ scale+rep d13C'}
     for name, col, width, kind in COLS:
         j = wk[col + '1'].column
         c = wk.cell(5, j, SHOWN_AS.get(name, name)); c.font = F_HDR; c.fill = FILL_HDR
@@ -946,6 +1067,28 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     NUMF.update({UX[n]: '0.00000000' for n in ('d2 N', 'w2 N', 'd2 C', 'w2 C', 'cn d2', 'cal2 N', 'cal2 C',
                                                'cal2 CN', 'scale2 N', 'scale2 C', 'acert2 N', 'acert2 C',
                                                'acert2 CN')})
+    NUMF.update({RX[n]: '0' for n in ('fr ok N', 'fr rank N', 'fr ok C', 'fr rank C', 'mon off')})
+    NUMF.update({RX[n]: '0.000' for n in ('fr x N', 'fr x C', 'mon fin N', 'mon fin C', 'ace N', 'ace C',
+                                          'u0 d15N', 'u0 d13C')})
+    NUMF.update({RX[f'{ch} {el_}']: '0.0000' for el_ in ('N', 'C')
+                 for ch in ('kb W', 'kb X', 'kb Z', 'kb shift', 'kb samp', 'kl X', 'kl Z', 'kl shift', 'kl samp',
+                            'kd Z', 'kd shift', 'kd samp')})
+    # 1.4.15: Fits rows of the blank capsules that gave no peak, the floor the size series sets, the 1σ of the
+    # final values (the drift monitors, then one row per correction: blank, linearity, drift), the acetanilide's
+    # check, the drift monitors against an accepted value, and the corrections fitted but not applied
+    FB_CAP, FB_BELOW = 407, {'N': 408, 'C': 409}
+    FL = {'N': 412, 'C': 418}               # n, smallest, steps that moved, series floor, where the floor comes from
+    SG = {'N': 425, 'C': 439}               # +0 monitors n .. +6 used, +7 lin fitted, +8 drift fitted, +10 to +12
+    ACE = {'N': 454, 'C': 463}              # +0 n .. +6 over, +7 the problem's text
+    MO_N, MO_CNT, MO_TEXT = 473, 474, 475   # drift monitors with an accepted value, off it, the problem's text
+    UA_TOP, UA_CNT, UA_TEXT = 477, 483, 484  # the six unapplied items (N blank, lin, drift, C ...), count, text
+    # The walk up the size series (one table per element, at the end of Fits so a longer series moves nothing):
+    # rows for the larger of 12 and the run's linearity standards
+    NFLOOR = max(12, sum(1 for q in _META if q.role == 'Linearity'))
+    FBK = {'N': 488}
+    FBK['C'] = FBK['N'] + NFLOOR + 4
+    UA_HEAD, RR_TOP = RERUN_UNAPPLIED_ROW - 1, RERUN_FIRST_ROW      # Rerun: the unapplied list's heading, the samples
+    S_T = lambda el_, k_: SG[el_] + 10 + k_      # noqa: E731  the row of correction k_ (0 blank, 1 lin, 2 drift)
 
     W = lambda col: f"Work!${col}${R0}:${col}${R0+NSAMP-1}"      # noqa: E731
     RA, RB = 2, MAXRAW + 1
@@ -1140,9 +1283,17 @@ def build_workbook(export_path, out_path, config: Config | None = None,
                     f'+SUMPRODUCT(({T("J")}*({T("B")}/Fits!$B${nrow}+{T("H")}*{dx}/Fits!$B${sxxrow}))^2)'
                     f'+SUMPRODUCT(({T("G")}*({dx}*{T("I")}/Fits!$B${sxxrow}'
                     f'-{T("B")}*Fits!$B${srow}/Fits!$B${nrow}))^2)))')
-        f['CL'] = unc('Z', 55, 56, 57, 133, 134, 136, UT_N)
+        # 1.4.15: the 1σ of 1.4.14 moves to column u0; CL and CN add the drift monitors' SD in place of the
+        # repeatability where Fits says so, and the Kragten term of each correction in force (Fits rows 424 to 451)
+        f[RX['u0 d15N']] = unc('Z', 55, 56, 57, 133, 134, 136, UT_N)
+        f[RX['u0 d13C']] = unc('AE', 62, 63, 64, 153, 154, 156, UT_C)
+        for col_, el_, u0_ in (('CL', 'N', RX['u0 d15N']), ('CN', 'C', RX['u0 d13C'])):
+            g_ = SG[el_]
+            terms_ = ''.join(f'+IF(AND(Fits!$C${S_T(el_, k_)}="Yes",ISNUMBER(${RX[f"{ch_} shift {el_}"]}{i})),'
+                             f'${RX[f"{ch_} shift {el_}"]}{i}^2,0)' for k_, ch_ in enumerate(('kb', 'kl', 'kd')))
+            f[col_] = (f'=IF(${u0_}{i}="","",SQRT(MAX(0,${u0_}{i}^2'
+                       f'+IF(Fits!$B${g_ + 6}="Yes",Fits!$B${g_ + 1}^2-Fits!$B${g_ + 2}^2,0){terms_})))')
         f['CM'] = f'=IF($CL{i}="","",{S_K}*$CL{i})'
-        f['CN'] = unc('AE', 62, 63, 64, 153, 154, 156, UT_C)
         f['CO'] = f'=IF($CN{i}="","",{S_K}*$CN{i})'
         # Carryover (1.4.0). A position is exposed when one of the two before it is
         # above the linearity range; its rise is measured against the last
@@ -1332,10 +1483,19 @@ def build_workbook(export_path, out_path, config: Config | None = None,
         f[RX['fl noN']] = f'=IF($B{i}="","",IF($L{i}="","no N peak; ",""))'
         f[RX['fl noC']] = f'=IF($B{i}="","",IF($P{i}="","no C peak; ",""))'
         f[RX['fl rejC']] = f'=IF($B{i}="","",IF(${EX["rej C"]}{i}=1,"CO2 peak rejected as a reference pulse; ",""))'
+        # 1.4.15: below the floor, the flag names where the floor came from (Fits rows 412 to 422): the lab
+        # minimum of a run without a size series, the series floor for a peak between the smallest standard and
+        # it, and otherwise the linearity range, as before
         for el, a, lo, hi in (('N', 'L', '81', '97'), ('C', 'P', '82', '104')):
-            f[RX[f'fl size{el}']] = (f'=IF($B{i}="","",IF(${a}{i}="","",IF(Fits!$B${lo}<=0,"",'
-                                     f'IF(${a}{i}<Fits!$B${lo},"{el} below linearity range; ",'
-                                     f'IF(Fits!$B${hi}<=0,"",IF(${a}{i}>Fits!$B${hi},"{el} above linearity range; ",""))))))')
+            src_, small_ = f'Fits!$B${FL[el] + 4}', f'Fits!$B${FL[el] + 1}'
+            below_ = (f'IF({src_}="lab minimum","{el} below the minimum peak; ",IF({src_}="series floor",'
+                      f'IF({small_}-${a}{i}>1E-9*MAX(1,ABS({small_})),"{el} below linearity range; ",'
+                      f'"{el} below series floor; "),"{el} below linearity range; "))')
+            # a limit of 0 is no limit, and the other is still tested, as the engine reads them (min_n and ...;
+            # before 1.4.15 a minimum of 0 left the maximum untested too)
+            f[RX[f'fl size{el}']] = (f'=IF($B{i}="","",IF(${a}{i}="","",'
+                                     f'IF(AND(Fits!$B${lo}<>0,${a}{i}<Fits!$B${lo}),{below_},'
+                                     f'IF(AND(Fits!$B${hi}<>0,${a}{i}>Fits!$B${hi}),"{el} above linearity range; ",""))))')
         for el, name, got, acc in (('N', 'd15N', 'AA', 'S'), ('C', 'd13C', 'AF', 'T')):
             f[RX[f'fl check{el}']] = (f'=IF($B{i}="","",IF($D{i}<>"Check","",IF(${got}{i}="","",IF(${acc}{i}="","",'
                                       f'IF(ABS(${got}{i}-${acc}{i})<={S_THR},"",'
@@ -1396,15 +1556,16 @@ def build_workbook(export_path, out_path, config: Config | None = None,
         # reference background (Y or AD empty) is marked for a check; from 1.4.14 (Tony Wang, 2026-10-16)
         # possible carryover is a check too, no longer a rerun of N and C
         nobg = (f'AND($X{i}<>"",$Y{i}="",Fits!$B$115="Yes")', f'AND($AC{i}<>"",$AD{i}="",Fits!$B$128="Yes")')
+        # 1.4.15: the acetanilide's whole-run check marks the samples of that element for a check
         f[RX['rr check']] = (f'=IF($D{i}<>"Sample",0,IF(OR({R_("fl settle")}<>"",{R_("fl carry")}<>"",'
                              f'AND({R_("fl noN")}<>"",{R_("fl noC")}=""),AND({R_("fl noN")}="",{R_("fl noC")}<>""),'
-                             f'{nobg[0]},{nobg[1]}),1,0))')
+                             f'{nobg[0]},{nobg[1]},{R_("fl aceN")}<>"",{R_("fl aceC")}<>""),1,0))')
         f[RX['rerun']] = (f'=IF($D{i}<>"Sample","",IF(OR({R_("rr both")}=1,AND({R_("rr N")}=1,{R_("rr C")}=1)),'
                           f'"N and C",IF({R_("rr N")}=1,"N",IF({R_("rr C")}=1,"C",IF({R_("rr check")}=1,"Check","")))))')
         why = [R_(k) for k in ('fl noN', 'why sizeN', 'fl noC', 'fl rejC', 'why sizeC')]
         why += [f'IF({c},"{t}; ","")' for c, t in zip(nobg, (NO_BGD_N, NO_BGD_C))]
         why += [R_(k) for k in ('fl blankN', 'fl blankC', 'fl settle', 'fl carry', 'fl pulseN', 'fl pulseC',
-                                'fl amplN', 'fl amplC', 'fl uN', 'fl uC', 'fl repN', 'fl repC')]
+                                'fl aceN', 'fl aceC', 'fl amplN', 'fl amplC', 'fl uN', 'fl uC', 'fl repN', 'fl repC')]
         f[RX['why raw']] = f'=IF({R_("rerun")}="","",' + '&'.join(why) + ')'
         f[RX['why']] = f'=IF({R_("why raw")}="","",LEFT({R_("why raw")},LEN({R_("why raw")})-2))'
         # 1.4.10: a mass above every capsule weighed in this run (Fits B358) says so
@@ -1431,6 +1592,77 @@ def build_workbook(export_path, out_path, config: Config | None = None,
         # value's; Fits rows 393 to 404 compare the two
         f[RX['mdev N']] = f'=IF(ISNUMBER(${UX["adev N"]}{i}),$AI{i}/$U{i}-1,"")'
         f[RX['mdev C']] = f'=IF(ISNUMBER(${UX["adev C"]}{i}),$AJ{i}/$V{i}-1,"")'
+        # 1.4.15: each linearity standard with a peak and a delta after the blank step, ranked by its area and,
+        # of two equal, its position, as the engine sorts them; Fits rows 486 onwards walk up the series by rank
+        for el_, ax_, ay_ in (('N', 'AM', 'AN'), ('C', 'AO', 'AP')):
+            ok_, x_, rk_ = RX[f'fr ok {el_}'], RX[f'fr x {el_}'], RX[f'fr rank {el_}']
+            f[ok_] = f'=IF(AND($D{i}="Linearity",ISNUMBER(${ax_}{i}),ISNUMBER(${ay_}{i})),1,0)'
+            f[x_] = f'=IF(${ok_}{i}=1,${ax_}{i},0)'
+            f[rk_] = (f'=IF(${ok_}{i}=1,1+SUMPRODUCT({W(ok_)}*(({W(x_)}<${x_}{i})'
+                      f'+({W(x_)}=${x_}{i})*({W("A")}<$A{i}))),"")')
+        # 1.4.15: the drift monitors after every correction, from the first drift position, without the
+        # positions left out of that element's fit and the monitors flagged as outliers (as Results' Flags says),
+        # and every acetanilide analysis, the size series and those monitors
+        first_ = f'IF({S_FIRST}="",0,{S_FIRST})'
+        for el_, fin_, ex_, t_ in (('N', 'AA', 'BX', 'CB'), ('C', 'AF', 'BY', 'CC')):
+            m_ = RX[f'mon fin {el_}']
+            f[m_] = (f'=IF(AND($D{i}="Drift",$A{i}>={first_},${ex_}{i}<>1,ISNUMBER(${fin_}{i})),'
+                     f'IF(ISNUMBER(${t_}{i}),IF(ABS(${t_}{i})>{S_TOUT},"",${fin_}{i}),${fin_}{i}),"")')
+            f[RX[f'ace {el_}']] = f'=IF($D{i}="Linearity",IF(ISNUMBER(${fin_}{i}),${fin_}{i},""),${m_}{i})'
+        # 1.4.15: a drift monitor against the acetanilide's accepted value, where the standards table gives one,
+        # and the acetanilide's whole-run check on every sample with a final value of that element
+        for el_, name_, fin_, acc_ in (('N', 'd15N', 'AA', 'S'), ('C', 'd13C', 'AF', 'T')):
+            f[RX[f'fl mon{el_}']] = (f'=IF($B{i}="","",IF($D{i}<>"Drift","",IF(NOT(ISNUMBER(${fin_}{i})),"",'
+                                     f'IF(NOT(ISNUMBER(${acc_}{i})),"",IF(ABS(${fin_}{i}-${acc_}{i})-{S_THR}'
+                                     f'>1E-9*MAX(1,ABS({S_THR})),"monitor {name_} off by "'
+                                     f'&TEXT(${fin_}{i}-${acc_}{i},"+0.00;-0.00")&"; ","")))))')
+            f[RX[f'fl ace{el_}']] = (f'=IF($B{i}="","",IF(AND($D{i}="Sample",ISNUMBER(${fin_}{i}),'
+                                     f'Fits!$B${ACE[el_] + 6}="Yes"),"acetanilide {name_} scatter above 1σ; ",""))')
+        mo_ = RX['mon off']
+        f[mo_] = f'=IF(AND($D{i}="Drift",OR({R_("fl monN")}<>"",{R_("fl monC")}<>"")),1,0)'
+        if n == 0:
+            f[RX['mon list']] = f'=IF(${mo_}{i}=1,$A{i}&"","")'
+        else:
+            prev = f'${RX["mon list"]}{i-1}'
+            f[RX['mon list']] = f'={prev}&IF(${mo_}{i}=1,IF({prev}="","",", ")&$A{i},"")'
+        # 1.4.15: the final value with one correction moved, the run's choices held (the corrections in force,
+        # the drift model, the monitors used, the pivots), each later step refitted on Fits (the correction's
+        # row of the table in rows 435 to 437 or 449 to 451, columns E to H): kb the blank, its delta plus the SD
+        # of its capsules when in force, or the blank of the capsules applied when it is not; kl the linearity
+        # slope plus its standard error, or the fitted slope; kd the drift slope plus its standard error, or the
+        # fitted slope.
+        # The shift from the final value is the Kragten term (in force) or how far applying it would move the
+        # sample (not in force); "samp" holds the samples' shifts for the Rerun sheet's list.
+        for el_, raw_, area_, wc_, xc_, yc_, fin_, bin_, (ba_, bd_, bs_), piv_l, piv_d in (
+                ('N', 'O', 'L', 'W', 'X', 'Y', 'AA', 'Fits!$C$5', (6, 7, 8), 16, 40),
+                ('C', 'R', 'P', 'AB', 'AC', 'AD', 'AF', 'Fits!$C$9', (10, 11, 12), 24, 52)):
+            on_ = lambda r_: f'OR(Fits!$C${r_}="Yes",Fits!$D${r_}="Yes")'      # noqa: E731
+            rb_, rl_, rd_ = S_T(el_, 0), S_T(el_, 1), S_T(el_, 2)
+            kbW, kbX, kbZ, kbS, kbP = (RX[f'kb {s} {el_}'] for s in ('W', 'X', 'Z', 'shift', 'samp'))
+            klX, klZ, klS, klP = (RX[f'kl {s} {el_}'] for s in ('X', 'Z', 'shift', 'samp'))
+            kdZ, kdS, kdP = (RX[f'kd {s} {el_}'] for s in ('Z', 'shift', 'samp'))
+
+            def drift_(src, r_):
+                return (f'IF(${src}{i}="","",IF(${yc_}{i}="",${src}{i},'
+                        f'${src}{i}-Fits!$F${r_}*(${yc_}{i}-Fits!$B${piv_d})))')
+
+            def shift_(src, r_):
+                return (f'=IF(OR(${src}{i}="",NOT(ISNUMBER(${fin_}{i})),NOT(ISNUMBER(Fits!$G${r_}))),"",'
+                        f'Fits!$G${r_}*${src}{i}+Fits!$H${r_}-${fin_}{i})')
+            f[kbW] = (f'=IF(NOT({on_(rb_)}),"",IF(${raw_}{i}="","",IF(OR($D{i}="Blank",${area_}{i}<=Fits!$B${ba_}),'
+                      f'${raw_}{i},(${area_}{i}*${raw_}{i}-Fits!$B${ba_}*(Fits!$B${bd_}+IF({bin_}="Yes",'
+                      f'Fits!$B${bs_},0)))/(${area_}{i}-Fits!$B${ba_}))))')
+            f[kbX] = f'=IF(${kbW}{i}="","",${kbW}{i}-Fits!$E${rb_}*(${area_}{i}-Fits!$B${piv_l}))'
+            f[kbZ] = '=' + drift_(kbX, rb_)
+            f[kbS] = shift_(kbZ, rb_)
+            f[klX] = (f'=IF(NOT({on_(rl_)}),"",IF(${wc_}{i}="","",'
+                      f'${wc_}{i}-Fits!$E${rl_}*(${area_}{i}-Fits!$B${piv_l})))')
+            f[klZ] = '=' + drift_(klX, rl_)
+            f[klS] = shift_(klZ, rl_)
+            f[kdZ] = f'=IF(NOT({on_(rd_)}),"",{drift_(xc_, rd_)})'
+            f[kdS] = shift_(kdZ, rd_)
+            for s_, p_ in ((kbS, kbP), (klS, klP), (kdS, kdP)):
+                f[p_] = f'=IF(AND($D{i}="Sample",ISNUMBER(${s_}{i})),${s_}{i},"")'
         for name, col, width, kind in COLS:
             c = wk.cell(i, wk[col + '1'].column, f.get(col))
             c.font = FONTS[kind]
@@ -1555,9 +1787,16 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     fit(78, 'r-squared', f'=IFERROR(RSQ({W("BB")},{W("BA")}),"")', '0.0000')
 
     sec(80, 'Size limits used by the flags')
-    fit(81, 'minimum trusted Area 28', f'=IF({S_MINN}<>"",{S_MINN},IFERROR(MIN({W("AM")}),0))', '0.000',
-            'Defaults to the smallest linearity standard in the run.')
-    fit(82, 'minimum trusted Area 44', f'=IF({S_MINC}<>"",{S_MINC},IFERROR(MIN({W("AO")}),0))', '0.000')
+    # 1.4.15: Setup B21 (B22) sets the floor outright; a run with a size series takes the floor it sets (row 415
+    # or 421: its smallest standard unless that reads off the line through the larger ones), and a run without
+    # one the lab minimum of Setup B80 (B81), or no limit
+    for r_, smin_, ax_, ns_, el_ in ((81, S_MINN, 'AM', S_NSMN, 'N'), (82, S_MINC, 'AO', S_NSMC, 'C')):
+        fit(r_, f'minimum trusted Area {"28" if el_ == "N" else "44"}',
+            f'=IF({smin_}<>"",{smin_},IF(COUNT({W(ax_)})>0,IF($B${FL[el_]}>0,$B${FL[el_] + 3},MIN({W(ax_)})),'
+            f'IF({ns_}<>"",{ns_},0)))', '0.000',
+            'From 1.4.15 the floor the size series sets (rows 411 to 422); Setup B21 sets it outright, and a run '
+            'without a size series takes the lab minimum, Setup B80.' if el_ == 'N' else
+            'As row 81: Setup B22, the floor of row 421, or Setup B81.')
 
     sec(84, 'Instrument settling, from the mass-28 background on the reference peaks')
     BIR = W('BI')
@@ -1877,7 +2116,8 @@ def build_workbook(export_path, out_path, config: Config | None = None,
             'OK, Note or Caution, at the limits of Setup B73 to B76.' if name == 'd15N' else '')
         off, sd = f'$B${base}', f'$B${base + 1}'
         for v, note, caution, text in (
-                (off, S_CSN, S_CSC, f'"{name} calibration slope "&TEXT($B${slope_r},"0.0000")&", more than "&LIM&" from 1; "'),
+                (off, S_CSN, S_CSC, f'"{name} calibration slope "&TEXT($B${slope_r},"0.0000;-0.0000")&", more than "'
+                                    f'&LIM&" from 1; "'),
                 (sd, S_CDN, S_CDC, f'"{name} anchor residual SD "&TEXT({sd},"0.000")&" permil, above "&LIM&"; "')):
             lim = f'IF(AND({caution}<>"",{v}>{caution}),{caution},{note})'
             calline.append(f'IF(NOT(ISNUMBER({v})),"",IF(OR(AND({caution}<>"",{v}>{caution}),AND({note}<>"",{v}>{note})),'
@@ -1934,8 +2174,12 @@ def build_workbook(export_path, out_path, config: Config | None = None,
             (f'=IF($M{t}<>"Caution","","anchors labeled "&$A{t}&" do not read as one material: "'
              f'&IF({above(rx_, AM_R)},"C/N peak-area ratio "&TEXT($D{t},"0.00")&" to "&TEXT($E{t},"0.00")'
              f'&", "&TEXT($F{t},"0.00")&" times; ","")'
-             f'&IF({above(nsp, AM_S)},"raw d15N "&TEXT($G{t},"0.00")&" to "&TEXT($H{t},"0.00")&" permil; ","")'
-             f'&IF({above(csp, AM_S)},"raw d13C "&TEXT($J{t},"0.00")&" to "&TEXT($K{t},"0.00")&" permil; ",""))'),
+             # 1.4.15: a negative section of its own, so a value that rounds to zero keeps its minus as the engine
+             # writes it (LibreOffice drops it under "0.00")
+             f'&IF({above(nsp, AM_S)},"raw d15N "&TEXT($G{t},"0.00;-0.00")&" to "&TEXT($H{t},"0.00;-0.00")'
+             f'&" permil; ","")'
+             f'&IF({above(csp, AM_S)},"raw d13C "&TEXT($J{t},"0.00;-0.00")&" to "&TEXT($K{t},"0.00;-0.00")'
+             f'&" permil; ",""))'),
         ]
         for j, v in enumerate(vals, start=1):
             c = ft.cell(t, j, v); c.font = F_SM
@@ -1981,9 +2225,270 @@ def build_workbook(export_path, out_path, config: Config | None = None,
                        f'&"% as measured, "&TEXT($B${base + 2}*100,"0.00")&"% corrected); ","")')
     EC_TEXT = EC0 + 11
     fit(EC_TEXT, 'whole run: elemental correction at the anchors', '=' + '&'.join(ec_text), '@')
+
+    # ---- 1.4.15 (Tony Wang, 2026-10-16) -------------------------------------------------------------------
+    def below(v, lim):
+        """v below lim with the engine's slack (pipeline._below); FALSE when v is not a number."""
+        return f'IF(ISNUMBER({v}),{lim}-{v}>1E-9*MAX(1,ABS({lim})),FALSE)'
+
+    def table_head(r_, heads):
+        for j, h in enumerate(heads, start=1):
+            c = ft.cell(r_, j, h); c.font = F_HDR; c.fill = FILL_HDR
+            c.alignment = Alignment(horizontal='center', wrap_text=True)
+
+    # Blank capsules that gave no peak: the blank is below detection, measured and too small to see
+    sec(FB_CAP - 1, 'Blank capsules that gave no peak (1.4.15)')
+    fit(FB_CAP, 'blank capsules in the run', f'=COUNTIF({W("D")},"Blank")', '0',
+        'Positions with the role Blank, with a peak or without one.')
+    for el_, n_ in (('N', 5), ('C', 9)):
+        fit(FB_BELOW[el_], f'{"nitrogen" if el_ == "N" else "carbon"}: blank below detection',
+            f'=IF(AND($B${FB_CAP}>0,$B${n_}=0),"Yes","No")', '@',
+            'Blank capsules ran and none gave a peak of this element: the blank was measured and is too small to '
+            'see, so there is nothing to correct (QC rows 48 and 51).' if el_ == 'N' else '')
+
+    # The floor the size series sets: the walk up the series is the table from row FBK on (at the end of Fits)
+    sec(FL['N'] - 1, 'Size limits: the floor the size series sets (1.4.15)')
+    for el_, name_, area_, ax_, smin_, ns_, r81, s21, s80 in (
+            ('N', 'nitrogen', 'Area 28', 'AM', S_MINN, S_NSMN, 81, 21, 80),
+            ('C', 'carbon', 'Area 44', 'AO', S_MINC, S_NSMC, 82, 22, 81)):
+        b_, t_ = FL[el_], FBK[el_]
+        Cr, Rr = f'$C${t_}:$C${t_ + NFLOOR - 1}', f'$R${t_}:$R${t_ + NFLOOR - 1}'
+        fit(b_, f'{name_}: linearity standards with a peak and a delta after the blank step',
+            f'=COUNTIF({W(RX[f"fr ok {el_}"])},1)', '0',
+            f'Work column {RX[f"fr rank {el_}"]} ranks them by area, and the table from row {t_} walks up them.')
+        fit(b_ + 1, f'{name_}: smallest of them ({area_})', f'=IF($B${b_}=0,"",INDEX({Cr},1))', '0.000')
+        fit(b_ + 2, f'{name_}: steps that moved the floor', f'=SUM({Rr})', '0',
+            'Each step holds the smallest standard still standing against the line through the larger ones, '
+            'while three or more of them remain (Setup B78 and B79).')
+        fit(b_ + 3, f'{name_}: series floor ({area_})', f'=IF($B${b_}=0,"",INDEX({Cr},1+$B${b_ + 2}))', '0.000',
+            'The first standard that lies on the line through the larger ones, or the smallest standard.')
+        fit(b_ + 4, f'{name_}: lowest {area_} trusted, from',
+            f'=IF({smin_}<>"","configuration",IF(COUNT({W(ax_)})>0,IF(AND($B${b_}>0,$B${b_ + 2}>0),"series floor",'
+            f'"smallest standard"),IF({ns_}<>"","lab minimum","")))', '@',
+            f'Where row {r81} comes from: configuration (Setup B{s21}), series floor, smallest standard, or lab '
+            f'minimum (Setup B{s80}, a run without a size series); empty: no limit.')
+
+    # The 1σ of the final values: the drift monitors after every correction against the repeatability in use,
+    # and a row per correction (blank, linearity, drift) with its moved chain's refitted coefficients
+    sec(SG['N'] - 1, '1σ of the final d15N and d13C: the drift monitors and the corrections in force (1.4.15)')
+    SIG_REFS = {
+        'N': dict(name='d15N', cn=55, sxx=134, u=136, slope=56, ut=UT_N, lin=96, lse=93, lx='AM', ly='AN',
+                  drift=115, dse=112, dx='BZ', dy='AS', bn=5, ba=6, bs=8, bin='$C$5', cal='$C$55', cy='AV',
+                  lapp=20, mode='Setup!$B$11'),
+        'C': dict(name='d13C', cn=62, sxx=154, u=156, slope=63, ut=UT_C, lin=103, lse=100, lx='AO', ly='AP',
+                  drift=128, dse=125, dx='CA', dy='AT', bn=9, ba=10, bs=12, bin='$C$9', cal='$C$62', cy='AX',
+                  lapp=28, mode=S_LINC)}
+    for el_ in ('N', 'C'):
+        d_, g_ = SIG_REFS[el_], SG[el_]
+        name_ = d_['name']
+        budget_ = f'AND($C${d_["cn"]}="Yes",$B${d_["cn"]}>=3,ISNUMBER($B${d_["sxx"]}),N($B${d_["sxx"]})<>0)'
+        UTB = f'$B${d_["ut"]}:$B${d_["ut"] + NSTD - 1}'
+        MF = W(RX[f'mon fin {el_}'])
+        m_n, m_sd, m_rep, m_df, m_p = (f'$B${g_ + k}' for k in range(5))
+        fit(g_, f'{name_}: drift monitors after every correction', f'=COUNT({MF})', '0',
+            f'Work column {RX[f"mon fin {el_}"]}: the drift monitors from Setup B14 with a final value, without the '
+            'positions left out of the fit (Setup B16, B17) or the outliers.' if el_ == 'N' else '')
+        fit(g_ + 1, f'{name_}: their SD (permil)', f'=IF({m_n}<2,"",STDEV({MF}))', '0.000')
+        fit(g_ + 2, f'{name_}: repeatability in use, on the calibrated scale (permil)',
+            f'=IF(AND({budget_},ISNUMBER($B${d_["u"]}),ISNUMBER($B${d_["slope"]})),'
+            f'ABS($B${d_["u"]}*$B${d_["slope"]}),"")', '0.000',
+            f'Row {d_["u"]} times the calibration slope, row {d_["slope"]}.')
+        fit(g_ + 3, f'{name_}: anchors\' pooled degrees of freedom',
+            f'=IF({budget_},SUMPRODUCT(({UTB}-1)*({UTB}>1)),0)', '0',
+            f'n - 1 summed over the anchor materials analyzed more than once (rows {d_["ut"]} to '
+            f'{d_["ut"] + NSTD - 1}).')
+        fit(g_ + 4, f'{name_}: p of their SD against it, one-sided F test',
+            f'=IF(AND(ISNUMBER({m_sd}),ISNUMBER({m_rep}),{m_n}>=3),IF(AND(N({m_rep})>0,{m_df}>0),'
+            f'FDIST(({m_sd}/{m_rep})^2,{m_n}-1,{m_df}),""),"")', '0.0000',
+            'FDIST((SD / repeatability)^2, n - 1, the pooled degrees of freedom), the right tail.'
+            if el_ == 'N' else '')
+        fit(g_ + 5, f'{name_}: the monitors scatter more than the repeatability',
+            f'=IF(AND(ISNUMBER({m_sd}),ISNUMBER({m_rep}),{m_n}>=3),IF({above(m_sd, m_rep)},"Yes","No"),"No")', '@')
+        fit(g_ + 6, f'{name_}: their SD in place of the repeatability',
+            f'=IF(AND($B${g_ + 5}="Yes",OR({S_MREP}="On",AND({S_MREP}="Auto",{below(m_p, S_ALPHA)}))),"Yes","No")',
+            '@', 'Setup B84. Then 1σ squared gains their SD squared less the repeatability squared.'
+            if el_ == 'N' else '')
+        fit(g_ + 7, f'{name_}: linearity fitted, slope', f'=IFERROR(SLOPE({W(d_["ly"])},{W(d_["lx"])}),"")', '0.00000',
+            'Empty when no line could be fitted.' if el_ == 'N' else '')
+        fit(g_ + 8, f'{name_}: drift fitted, model in use, slope',
+            f'=IFERROR(SLOPE({W(d_["dy"])},{W(d_["dx"])}),"")', '0.00000')
+        table_head(g_ + 9, ['Correction', 'in force', 'term in 1σ', 'fitted, not applied', 'linearity slope',
+                            'drift slope', 'calibration slope', 'calibration intercept', 'largest term (permil)',
+                            'samples moved', 'smallest move (permil)', 'largest move (permil)'])
+        lin_f, drift_f = f'$B${g_ + 7}', f'$B${g_ + 8}'
+        kr = f'{S_KRAG}="On"'
+        lin_on, drift_on = f'$B${d_["lin"]}="Yes"', f'$B${d_["drift"]}="Yes"'
+        blank_on = f'{d_["bin"]}="Yes"'
+        rows_ = [
+            ('blank', f'={d_["bin"]}',
+             f'=IF(AND({kr},{blank_on},$B${d_["bn"]}>=1,$B${d_["ba"]}>0,ISNUMBER($B${d_["bs"]})),"Yes","No")',
+             f'=IF(AND(NOT({blank_on}),$B${d_["bn"]}>=1,$B${d_["ba"]}>0),"Yes","No")', 'kb', None, None),
+            ('linearity', f'=$B${d_["lin"]}',
+             f'=IF(AND({kr},{lin_on},ISNUMBER({lin_f}),ISNUMBER($B${d_["lse"]})),"Yes","No")',
+             f'=IF(AND(NOT({lin_on}),ISNUMBER({lin_f})),"Yes","No")', 'kl',
+             f'{lin_f}+IF({lin_on},$B${d_["lse"]},0)', None),
+            ('drift', f'=$B${d_["drift"]}',
+             f'=IF(AND({kr},{drift_on},ISNUMBER({drift_f}),ISNUMBER($B${d_["dse"]})),"Yes","No")',
+             f'=IF(AND(NOT({drift_on}),ISNUMBER({drift_f})),"Yes","No")', 'kd',
+             f'$B${d_["lapp"]}', f'{drift_f}+IF({drift_on},$B${d_["dse"]},0)'),
+        ]
+        for k_, (lab_, inf_, term_, un_, ch_, lin_used, drift_used) in enumerate(rows_):
+            r_ = S_T(el_, k_)
+            on_ = f'OR($C{r_}="Yes",$D{r_}="Yes")'
+            if ch_ == 'kb':
+                lin_used = f'IF({lin_on},SLOPE({W(RX[f"kb W {el_}"])},{W(d_["lx"])}),0)'
+            if ch_ in ('kb', 'kl'):
+                drift_used = f'IF({drift_on},SLOPE({W(RX[f"{ch_} X {el_}"])},{W(d_["dx"])}),0)'
+            z_ = W(RX[f'{ch_} Z {el_}'])
+            sh_, sp_ = W(RX[f'{ch_} shift {el_}']), W(RX[f'{ch_} samp {el_}'])
+            vals = [lab_, inf_, term_, un_,
+                    f'=IF({on_},{lin_used},"")', f'=IF({on_},{drift_used},"")',
+                    f'=IF(AND({on_},{d_["cal"]}="Yes"),SLOPE({W(d_["cy"])},{z_}),"")',
+                    f'=IF(AND({on_},{d_["cal"]}="Yes"),INTERCEPT({W(d_["cy"])},{z_}),"")',
+                    f'=IF($C{r_}<>"Yes","",IF(COUNT({sh_})=0,"",MAX(MAX({sh_}),-MIN({sh_}))))',
+                    f'=IF($D{r_}<>"Yes","",COUNT({sp_}))',
+                    f'=IF($D{r_}<>"Yes","",IF($J{r_}>0,MIN({sp_}),""))',
+                    f'=IF($D{r_}<>"Yes","",IF($J{r_}>0,MAX({sp_}),""))']
+            for j, v in enumerate(vals, start=1):
+                c = ft.cell(r_, j, v); c.font = F_SM; c.border = BOX
+                c.number_format = '@' if j <= 4 else '0' if j == 10 else '0.00000' if j in (5, 6, 7) else '0.0000'
+        if el_ == 'N':
+            ft.cell(g_ + 9, 13, 'In force: the moved chain is a Kragten term of 1σ, its largest in column I. Not '
+                                'in force: the chain applies the correction as fitted, and J to L are how far it '
+                                'moves the samples, for the Rerun sheet. The linearity, drift, and calibration '
+                                'columns are each later step refitted.').font = F_NOTE
+
+    # The acetanilide, every analysis of the size series and of the drift monitors, against the samples' 1σ
+    sec(ACE['N'] - 1, 'The acetanilide against the samples\' 1σ (1.4.15)')
+    for el_, fin_ in (('N', 'AA'), ('C', 'AF')):
+        a_, g_, name_ = ACE[el_], SG[el_], SIG_REFS[el_]['name']
+        AC_ = W(RX[f'ace {el_}'])
+        a_n, a_sd, a_b, a_df, a_p = (f'$B${a_ + k}' for k in (0, 2, 3, 4, 5))
+        fit(a_, f'{name_}: acetanilide analyses, the size series and the drift monitors', f'=COUNT({AC_})', '0',
+            f'Work column {RX[f"ace {el_}"]}: the size series with a final value, and the monitors of row {g_}.'
+            if el_ == 'N' else '')
+        fit(a_ + 1, f'{name_}: of them, the size series', f'=COUNTIFS({W("D")},"Linearity",{W(fin_)},">-1E+30")', '0')
+        fit(a_ + 2, f'{name_}: SD of their final values (permil)', f'=IF({a_n}<2,"",STDEV({AC_}))', '0.000')
+        fit(a_ + 3, f'{name_}: the samples\' repeatability it is held against (permil)',
+            f'=IF($B${g_ + 6}="Yes",$B${g_ + 1},$B${g_ + 2})', '0.000',
+            'The drift monitors\' SD where it is in use, otherwise the repeatability in use.' if el_ == 'N' else '')
+        fit(a_ + 4, f'{name_}: its degrees of freedom', f'=IF($B${g_ + 6}="Yes",$B${g_}-1,$B${g_ + 3})', '0')
+        fit(a_ + 5, f'{name_}: p, one-sided F test',
+            f'=IF(AND({S_ACE}="On",ISNUMBER({a_sd}),ISNUMBER({a_b}),{a_n}>=3,ISNUMBER({a_df})),'
+            f'IF(AND(N({a_b})<>0,N({a_df})>0),FDIST(({a_sd}/{a_b})^2,{a_n}-1,{a_df}),""),"")', '0.0000',
+            'Setup B85.' if el_ == 'N' else '')
+        fit(a_ + 6, f'{name_}: scatter above 1σ',
+            f'=IF(ISNUMBER({a_p}),IF(AND({above(a_sd, a_b)},{below(a_p, S_ALPHA)}),"Yes","No"),"No")', '@',
+            'Yes marks every sample with a final value of this element for a check.' if el_ == 'N' else '')
+        fit(a_ + 7, f'whole run: acetanilide {name_}',
+            f'=IF($B${a_ + 6}<>"Yes","","acetanilide {name_}, size series and drift monitors, SD "&TEXT({a_sd},"0.000")'
+            f'&" permil against the samples\' repeatability "&TEXT({a_b},"0.000")&" (p "&TEXT({a_p},"0.000")'
+            f'&"): the samples\' {name_} marked for a check; ")', '@')
+
+    # Drift monitors against an accepted value, and the corrections fitted but not applied
+    sec(MO_N - 1, 'Drift monitors against an accepted value, and corrections fitted but not applied (1.4.15)')
+    fit(MO_N, 'drift monitors with an accepted d15N or d13C',
+        f'=COUNTIFS({W("D")},"Drift",{W("S")},">-1E+30")+COUNTIFS({W("D")},"Drift",{W("T")},">-1E+30")'
+        f'-COUNTIFS({W("D")},"Drift",{W("S")},">-1E+30",{W("T")},">-1E+30")', '0',
+        'The Drift rows of the standards table carry no accepted value unless the lab gives one.')
+    fit(MO_CNT, 'drift monitors off their accepted value', f'=COUNTIF({W(RX["mon off"])},1)', '0',
+        'Further than Setup B20 from it, as a check standard is judged.')
+    fit(MO_TEXT, 'whole run: drift monitors off their accepted value',
+        f'=IF($B${MO_CNT}=0,"","drift monitor off its accepted value by more than "&TEXT({S_THR},"0.00")'
+        f'&" permil at "&IF($B${MO_CNT}=1,"position ","positions ")&Work!${RX["mon list"]}${R0 + NSAMP - 1}&"; ")',
+        '@')
+    UA_ITEMS = []
+    for el_ in ('N', 'C'):
+        d_, g_ = SIG_REFS[el_], SG[el_]
+        name_ = d_['name']
+        rb_, rl_, rd_ = S_T(el_, 0), S_T(el_, 1), S_T(el_, 2)
+
+        def move(r_, name_=name_):
+            return (f'IF(N($J${r_})>0,"applied, it would move the samples\' {name_} by "&TEXT($K${r_},"+0.00;-0.00")'
+                    f'&" to "&TEXT($L${r_},"+0.00;-0.00")&" permil","no sample has a {name_} to move")')
+        bn, ba, bd, bs = d_['bn'], d_['ba'], d_['ba'] + 1, d_['bs']
+        drift_m = '$B$38' if el_ == 'N' else '$B$50'
+        dp = d_['dse'] + 2                     # p of the drift slope, rows 114 and 127
+        lp = d_['lse'] + 2                     # p of the linearity slope, rows 95 and 102
+        UA_ITEMS += [
+            (f'{name_} blank',
+             f'=IF($D${rb_}<>"Yes","","{name_} blank of "&$B${bn}&" "&IF($B${bn}=1,"capsule","capsules")&" ("'
+             f'&TEXT($B${ba},"0.00")&" Vs, "&TEXT($B${bd},"+0.00;-0.00")&" permil"&IF(ISNUMBER($B${bs}),", SD "'
+             f'&TEXT($B${bs},"0.00"),"")&") not applied ("&Setup!$B$10&"); "&{move(rb_)})'),
+            (f'{name_} linearity',
+             f'=IF($D${rl_}<>"Yes","","{name_} linearity fitted, not applied ("&{d_["mode"]}&"): slope "'
+             f'&TEXT($B${g_ + 7},"0.0000;-0.0000")&" per Vs"&IF(ISNUMBER($B${d_["lse"]}),", SE "&TEXT($B${d_["lse"]},'
+             f'"0.0000"),"")&IF(ISNUMBER($B${lp}),", p "&TEXT($B${lp},"0.000"),"")&"; "&{move(rl_)})'),
+            (f'{name_} drift',
+             f'=IF($D${rd_}<>"Yes","","{name_} drift ("&{drift_m}&" model) fitted, not applied ("&Setup!$B$12'
+             f'&"): slope "&TEXT($B${g_ + 8},"0.0000;-0.0000")&" "&IF({drift_m}="Row","per position","per mV")'
+             f'&IF(ISNUMBER($B${d_["dse"]}),", SE "&TEXT($B${d_["dse"]},"0.0000"),"")&IF(ISNUMBER($B${dp}),", p "'
+             f'&TEXT($B${dp},"0.000"),"")&"; "&{move(rd_)})')]
+    for k_, (lab_, formula_) in enumerate(UA_ITEMS):
+        r_ = UA_TOP + k_
+        fit(r_, f'{lab_} fitted, not applied', formula_, '@')
+        c = ft.cell(r_, 3, f'=IF($B{r_}="","",COUNTIF($B${UA_TOP}:$B{r_},"?*"))'); c.font = F_SM
+    fit(UA_CNT, 'corrections fitted but not applied', f'=COUNTIF($B${UA_TOP}:$B${UA_TOP + 5},"?*")', '0',
+        f'Listed on the Rerun sheet, in this order; column C of rows {UA_TOP} to {UA_TOP + 5} numbers them.')
+    UA_ALL = '&'.join(f'IF($B${UA_TOP + k}="","",$B${UA_TOP + k}&"; ")' for k in range(6))
+    fit(UA_TEXT, 'corrections fitted but not applied, in one line',
+        f'=IF($B${UA_CNT}=0,"none",LEFT({UA_ALL},LEN({UA_ALL})-2))', '@')
+
+    # The walk up the size series, one table per element: the standards smallest first, and for each the line
+    # through the larger ones (while three or more remain), its residual SD, the limit, and the residual
+    for el_, name_, area_, acol_, dcol_ in (('N', 'nitrogen', 'Area 28', 'L', 'W'),
+                                            ('C', 'carbon', 'Area 44', 'P', 'AB')):
+        t_, n_ = FBK[el_], f'$B${FL[el_]}'
+        sec(t_ - 2, f'Size series floor, {name_}: the walk up the series (1.4.15)')
+        table_head(t_ - 1, ['Rank by area', 'Position', area_, 'delta after blank', 'x for the fits',
+                            'y for the fits', 'n of the line through the larger', 'its mean area', 'its mean delta',
+                            'Sxx', 'Sxy', 'slope', 'intercept', 'residual SD', 'limit', 'residual of this standard',
+                            'tested', 'moved the floor'])
+        A1, An = t_, t_ + NFLOOR - 1
+        E_, F_ = f'$E${A1}:$E${An}', f'$F${A1}:$F${An}'
+        RK = W(RX[f'fr rank {el_}'])
+        for k in range(NFLOOR):
+            r = t_ + k
+            mask = f'(($A${A1}:$A${An}>$A{r})*($A${A1}:$A${An}<={n_}))'
+            hit = f'MATCH($A{r},{RK},0)'
+            prev = 'TRUE' if k == 0 else f'$R{r - 1}=1'
+            vals = [
+                k + 1,
+                f'=IFERROR(INDEX({W("A")},{hit}),"")',
+                f'=IF($B{r}="","",INDEX({W(acol_)},{hit}))',
+                f'=IF($B{r}="","",INDEX({W(dcol_)},{hit}))',
+                f'=IF($B{r}="",0,$C{r})',
+                f'=IF($B{r}="",0,$D{r})',
+                f'=IF($A{r}<={n_}-3,{n_}-$A{r},"")',
+                f'=IF($G{r}="","",SUMPRODUCT({mask}*{E_})/$G{r})',
+                f'=IF($G{r}="","",SUMPRODUCT({mask}*{F_})/$G{r})',
+                f'=IF($G{r}="","",SUMPRODUCT({mask}*({E_}-$H{r})^2))',
+                f'=IF($G{r}="","",SUMPRODUCT({mask}*({E_}-$H{r})*({F_}-$I{r})))',
+                f'=IF($G{r}="","",IF($J{r}>0,$K{r}/$J{r},""))',
+                f'=IF($L{r}="","",$I{r}-$L{r}*$H{r})',
+                f'=IF($L{r}="","",SQRT(SUMPRODUCT({mask}*({F_}-($L{r}*{E_}+$M{r}))^2)/($G{r}-2)))',
+                f'=IF(OR($L{r}="",{S_FOFF}=""),"",IF({S_FMULT}="",{S_FOFF},MAX({S_FOFF},{S_FMULT}*$N{r})))',
+                f'=IF($L{r}="","",$D{r}-($L{r}*$C{r}+$M{r}))',
+                f'=IF(AND({S_FOFF}<>"",ISNUMBER($L{r}),{prev}),1,0)',
+                f'=IF($Q{r}=1,IF(ABS($P{r})-$O{r}>1E-9*MAX(1,ABS($O{r})),1,0),0)',
+            ]
+            for j, v in enumerate(vals, start=1):
+                c = ft.cell(r, j, v); c.font = F_SM
+                c.number_format = ('0' if j in (1, 2, 7, 17, 18) else '0.00000' if j in (12, 13) else
+                                   '0.0000' if j in (10, 11) else '0.000')
+        ft.cell(t_ + NFLOOR, 1, f'One row per linearity standard with a peak and a delta after the blank step, '
+                                f'smallest first (of two equal, the lower position), for up to {NFLOOR} standards. Each '
+                                'tested row holds '
+                            'its standard against the line through the larger ones, while three or more remain; it '
+                            'moves the floor when its residual is further from that line than Setup B78, or B79 '
+                            'times the line\'s residual SD where that is larger, and the walk ends at the first that '
+                            'does not.').font = F_NOTE
+
     # 1.4.13: in the engine's order, with the two new checks after the calibration line and after the anchors
-    # outside k sigma
-    ALL = f'$B$357&$B$367&$B${AM_TEXT}&$B$353&$B$354&$B${EC_TEXT}&$B$355'
+    # outside k sigma; 1.4.15: the drift monitors off their accepted value and the acetanilide's check after the
+    # check standards
+    ALL = (f'$B$357&$B$367&$B${AM_TEXT}&$B$353&$B${MO_TEXT}&$B${ACE["N"] + 7}&$B${ACE["C"] + 7}&$B$354'
+           f'&$B${EC_TEXT}&$B$355')
     fit(356, 'problems of the whole run', f'=IF({ALL}="","none found",LEFT({ALL},LEN({ALL})-2))', '@')
 
     fit(217, 'check standards with a calibrated value',
@@ -2013,8 +2518,9 @@ def build_workbook(export_path, out_path, config: Config | None = None,
                   'deviation (1.4.5); the checks on QC and Rerun use k x 1σ, k from Setup B32. Flags is followed by '
                   'the rerun mark (1.4.4), its reason, and a suggested mass, which the Rerun sheet lists. For the '
                   'isotope values 1σ comes from the scale '
-                  'calibration and the sample repeatability (Fits rows 132 onwards) and leaves out the blank, '
-                  'linearity, and drift corrections and day-to-day reproducibility; for %C, %N, and C:N it has five '
+                  'calibration and the sample repeatability (Fits rows 132 onwards), from 1.4.15 with the corrections '
+                  'in force and the drift monitors\' scatter (Fits rows 424 onwards), and leaves out day-to-day '
+                  'reproducibility; for %C, %N, and C:N it has five '
                   'terms (Fits rows 300 onwards), and stays incomplete until Setup B33 and Setup columns J and K '
                   'are filled in.' + (' From 1.4.8 the columns after %N as measured come from the sample sheet '
                                       '(Metadata sheet): the ID a sample matched, how it matched, and the sheet\'s '
@@ -2043,6 +2549,8 @@ def build_workbook(export_path, out_path, config: Config | None = None,
                  f'&IF(OR(Work!$D{k}="Sample",Work!$D{k}="Check"),IF(Work!$AF{k}="","",IF(Fits!$B$158="","",'
                  f'IF(AND(Work!$AF{k}>=Fits!$B$158,Work!$AF{k}<=Fits!$B$159),"","d13C outside anchor range; "))),"")'
                  f'&Work!${RX["fl checkN"]}{k}&Work!${RX["fl checkC"]}{k}'
+                 # 1.4.15: a drift monitor off the accepted value the standards table gives it
+                 f'&Work!${RX["fl monN"]}{k}&Work!${RX["fl monC"]}{k}'
                  f'&IF(Work!$D{k}<>"Drift","",IF(Work!$BX{k}=1,"excluded from N drift fit; ",'
                  f'IF(Work!$CB{k}="","",IF(ABS(Work!$CB{k})>{S_TOUT},"N drift monitor outlier; ",""))))'
                  f'&IF(Work!$D{k}<>"Drift","",IF(Work!$BY{k}=1,"excluded from C drift fit; ",'
@@ -2057,7 +2565,9 @@ def build_workbook(export_path, out_path, config: Config | None = None,
                  f'&IF(AND(ISNUMBER(Work!$AG{k}),ISNUMBER(Work!$G{k})),IF(AND(Work!$AG{k}<=0,Work!$G{k}>0),'
                  f'"%N below detection; ",""),"")'
                  f'&IF(AND(ISNUMBER(Work!$AH{k}),ISNUMBER(Work!$G{k})),IF(AND(Work!$AH{k}<=0,Work!$G{k}>0),'
-                 f'"%C below detection; ",""),""))'),
+                 f'"%C below detection; ",""),"")'
+                 # 1.4.15: the acetanilide's whole-run check, last
+                 f'&Work!${RX["fl aceN"]}{k}&Work!${RX["fl aceC"]}{k})'),
                 f'=IF(Work!$B{k}="","",Work!${RX["rerun"]}{k})', f'=IF(Work!$B{k}="","",Work!${RX["why"]}{k})',
                 f'=IF(Work!$B{k}="","",Work!${RX["suggested mass"]}{k})',
                 f'=IF(Work!$B{k}="","",Work!${EX["elem factor N"]}{k})',
@@ -2099,22 +2609,36 @@ def build_workbook(export_path, out_path, config: Config | None = None,
                   'A mark reads what a rerun can fix; README, Rerun marks, says which flags count (from 1.4.7 a '
                   'peak above the linearity range only at Setup B69, and a 1σ above Setup B70; from 1.4.8 replicates '
                   'above the critical range, on the Replicates sheet; from 1.4.14 possible carryover marks a check, '
-                  'not a rerun). The suggested mass puts the peaks inside the '
-                  'linearity range, from this analysis\'s area per mg above the blank (1.4.10).'
+                  'not a rerun; from 1.4.15 a peak below the floor the size series sets, or below the lab minimum in '
+                  'a run without one, marks a rerun, and an acetanilide that scatters more than the samples\' 1σ '
+                  'marks them for a check). The suggested mass puts the peaks inside the '
+                  'linearity range, from this analysis\'s area per mg above the blank (1.4.10). Under the problems '
+                  'of the whole run, the corrections this run fitted but did not apply, with how far applying each '
+                  'would move the samples (1.4.15).'
                   ).font = F_NOTE
-    rr.merge_cells("A2:G2"); rr.row_dimensions[2].height = 56
+    rr.merge_cells("A2:G2"); rr.row_dimensions[2].height = 70
     rr['A2'].alignment = Alignment(wrap_text=True, vertical='top')
     rr.cell(4, 1, 'Problems of the whole run').font = F_H1
     rr.cell(5, 1, '=Fits!$B$356').font = F_SM
     rr.merge_cells('A5:G5'); rr.row_dimensions[5].height = 30
     rr['A5'].alignment = Alignment(wrap_text=True, vertical='top')
+    # 1.4.15: the corrections fitted but not applied, one line each in the engine's order (Fits rows 477 to 482,
+    # numbered in their column C), "none" when there is none
+    UA_B, UA_C = f'Fits!$B${UA_TOP}:$B${UA_TOP + 5}', f'Fits!$C${UA_TOP}:$C${UA_TOP + 5}'
+    rr.cell(UA_HEAD, 1, 'Corrections fitted but not applied').font = F_H1
+    for k_ in range(6):
+        r_ = UA_HEAD + 1 + k_
+        line_ = f'IFERROR(INDEX({UA_B},MATCH({k_ + 1},{UA_C},0)),"")'
+        c = rr.cell(r_, 1, f'=IF(Fits!$B${UA_CNT}=0,"none",{line_})' if k_ == 0 else f'={line_}')
+        c.font = F_SM; c.alignment = Alignment(wrap_text=True, vertical='top')
+        rr.merge_cells(f'A{r_}:G{r_}'); rr.row_dimensions[r_].height = 24
     for j, h in enumerate(['Row', 'Identifier', 'Type', 'Mass (mg)', 'Rerun', 'Why', 'Suggested mass (mg)'],
                           start=1):
-        c = rr.cell(7, j, h); c.font = F_HDR; c.fill = FILL_HDR
+        c = rr.cell(RR_TOP - 1, j, h); c.font = F_HDR; c.fill = FILL_HDR
         c.alignment = Alignment(horizontal='center', wrap_text=True)
     RANK = W(RX['rerun rank'])
     for n in range(NSAMP):
-        i = 8 + n
+        i = RR_TOP + n
         hit = f'MATCH({n + 1},{RANK},0)'
         vals = [f'=IFERROR(INDEX({W("A")},{hit}),"")']
         vals += [f'=IF($A{i}="","",INDEX({W(col)},{hit}))'
@@ -2122,10 +2646,11 @@ def build_workbook(export_path, out_path, config: Config | None = None,
         for j, v in enumerate(vals, start=1):
             c = rr.cell(i, j, v); c.font = F_SM
             if j == 4: c.number_format = '0.000'
-    rr.freeze_panes = 'A8'
-    rr.conditional_formatting.add(f'A8:G{8+NSAMP-1}', FormulaRule(formula=['$E8="Check"'], fill=FILL_CHECK))
-    rr.conditional_formatting.add(f'A8:G{8+NSAMP-1}',
-                                  FormulaRule(formula=['AND($E8<>"",$E8<>"Check")'], fill=FILL_RERUN))
+    rr.freeze_panes = f'A{RR_TOP}'
+    rr.conditional_formatting.add(f'A{RR_TOP}:G{RR_TOP+NSAMP-1}',
+                                  FormulaRule(formula=[f'$E{RR_TOP}="Check"'], fill=FILL_CHECK))
+    rr.conditional_formatting.add(f'A{RR_TOP}:G{RR_TOP+NSAMP-1}',
+                                  FormulaRule(formula=[f'AND($E{RR_TOP}<>"",$E{RR_TOP}<>"Check")'], fill=FILL_RERUN))
 
     # ================================================================ Replicates (1.4.8)
     rp = wb.create_sheet('Replicates')
@@ -2307,21 +2832,28 @@ def build_workbook(export_path, out_path, config: Config | None = None,
     qsec(47, 'Blank')
     qline(48, 'Blank correction in force, nitrogen', '=Fits!$C$5', '@')
     NEXB = f'COUNTIFS({WD_},"Exclude",{WB_},"*blank*",{WB_},"<>*hole*")'
-    qc.cell(48, 4, f'=IF(Setup!$B$10="Off","switched off in Setup",'
-                   f'IF(Fits!$B$5=0,IF({NEXB}>0,"no blanks in the fit: "&TEXT({NEXB},"0")&" blank capsules are '
-                   f'set to Exclude in Setup","no blank capsules found"),'
-                   'IF(Fits!$C$5="Yes",IF(Fits!$B$5<3,"CHECK: running on fewer than three blanks",'
-                   'IF(Fits!$B$8>2,"CHECK: blanks disagree by more than 2 permil","ok")),'
-                   'IF(Fits!$B$5<3,"not applied: fewer than three blanks",'
-                   '"not applied: blanks disagree by more than 2 permil"))))').font = F_SM
+    # 1.4.15: blank capsules that gave no peak put the blank below detection; it was measured, not left out
+    for r_, n_, sd_, inf_, below_, gas_ in ((48, 5, 8, '$C$5', FB_BELOW['N'], 'nitrogen'),
+                                            (51, 9, 12, '$C$9', FB_BELOW['C'], 'carbon')):
+        qc.cell(r_, 4, f'=IF(Setup!$B$10="Off","switched off in Setup",'
+                       f'IF(Fits!$B${n_}=0,IF(Fits!$B${below_}="Yes","below detection: "&IF(Fits!$B${FB_CAP}=1,'
+                       f'"the blank capsule gave","none of the "&TEXT(Fits!$B${FB_CAP},"0")&" blank capsules gave")'
+                       f'&" a {gas_} peak, so the blank was measured and is too small to correct",'
+                       f'IF({NEXB}>0,"no blanks in the fit: "&TEXT({NEXB},"0")&" blank capsules are '
+                       f'set to Exclude in Setup","no blank capsules found")),'
+                       f'IF(Fits!{inf_}="Yes",IF(Fits!$B${n_}<3,"CHECK: running on fewer than three blanks",'
+                       f'IF(Fits!$B${sd_}>2,"CHECK: blanks disagree by more than 2 permil","ok")),'
+                       f'IF(Fits!$B${n_}<3,"not applied: fewer than three blanks",'
+                       '"not applied: blanks disagree by more than 2 permil"))))').font = F_SM
     qline(49, 'Blank capsules with a nitrogen peak', '=Fits!$B$5', '0')
     qline(50, 'SD of blank d15N (permil)', '=Fits!$B$8')
     qline(51, 'Blank correction in force, carbon', '=Fits!$C$9', '@')
     qline(52, 'Blank capsules with a carbon peak', '=Fits!$B$9', '0')
     qline(53, 'SD of blank d13C (permil)', '=Fits!$B$12')
-    qc.cell(54, 1, 'A blank that gives no peak has not been measured, only bounded by the detection '
-                   'limit. The guide asks that its size and d value be determined, which the two-standard '
-                   'decreasing-size series does.').font = F_NOTE
+    qc.cell(54, 1, 'Blank capsules that give no peak put the blank below detection (1.4.15): it was measured and '
+                   'is too small to see. The guide asks that a blank\'s size and d value be determined where it '
+                   'can be, which the two-standard decreasing-size series does. A blank fitted but not applied is '
+                   'listed on the Rerun sheet with how far it would move the samples.').font = F_NOTE
 
     qsec(56, 'Check standards and drift monitors')
     CHDR = ['Material', 'Role', 'n', 'mean d15N', 'accepted', 'offset', 'mean d13C', 'accepted', 'offset']
@@ -2362,9 +2894,11 @@ def build_workbook(export_path, out_path, config: Config | None = None,
           f'=IFERROR(AVERAGEIFS({W("CN")},{WD_},"Sample"),"")')
     qc.cell(Q + 6, 1, '1σ combines the certificate uncertainty of each anchor, the scatter of its replicates, and '
                       'the sample repeatability, propagated through the fitted line to first order, the effect a '
-                      'Kragten spreadsheet estimates by changing each input by its 1σ. It '
-                      'leaves out the blank, linearity, and drift corrections and the day-to-day reproducibility '
-                      'a control chart would give.').font = F_NOTE
+                      'Kragten spreadsheet estimates by changing each input by its 1σ. From 1.4.15 it also holds '
+                      'each blank, linearity, and drift correction in force, moved by its own uncertainty with every '
+                      'later step refitted (Setup B83), and the drift monitors\' scatter where it is larger than the '
+                      'repeatability (Setup B84; rows 183 onwards). It leaves out the day-to-day reproducibility a '
+                      'control chart would give.').font = F_NOTE
     qline(Q + 7, 'SD of the drift standards, d15N (permil)', f'=IFERROR(STDEV(Work!$BG${R0}:$BG${R0+NSAMP-1}),"")')
     qline(Q + 8, 'SD of the drift standards, d13C (permil)', f'=IFERROR(STDEV(Work!$BH${R0}:$BH${R0+NSAMP-1}),"")')
     qc.cell(Q + 9, 1, 'These understate the scatter of an unknown, because the drift correction was fitted to these '
@@ -2509,14 +3043,17 @@ def build_workbook(export_path, out_path, config: Config | None = None,
 
     # 1.4.4
     qsec(166, 'Rerun marks')
-    qc.cell(167, 1, 'A sample is marked for a rerun when its peak lies below the linearity range or under the blank '
+    qc.cell(167, 1, 'A sample is marked for a rerun when its peak lies below the floor the size series sets (from '
+                    '1.4.15; below the lab minimum in a run without a size series) or under the blank '
                     'multiple, reaches the instrument\'s largest amplitude (Setup B69), or meets a reference pulse '
                     'that is off, when its 1σ is above Setup B70, '
                     'or when its replicates differ by more than the critical range (Replicates sheet), and for a rerun '
                     'of N and C when it has neither peak. It is marked for a check when it ran before the background '
                     'settled, follows an oversized sample with a background rise (possible carryover, a check from '
-                    '1.4.14), lacks one element\'s peak, or, under the Background drift model, has no reference '
-                    'background and so no drift correction. The Rerun sheet lists every mark.').font = F_NOTE
+                    '1.4.14), lacks one element\'s peak, under the Background drift model has no reference '
+                    'background and so no drift correction, or, from 1.4.15, belongs to a run whose acetanilide '
+                    'scatters more than the samples\' 1σ allows (row 192). The Rerun sheet lists every mark.'
+                    ).font = F_NOTE
     qline(168, 'Samples marked for a rerun', '=Fits!$B$351', '0',
           '=IF(Fits!$B$351=0,"ok","see the Rerun sheet")')
     qline(169, 'Samples marked for a check', '=Fits!$B$352', '0',
@@ -2550,6 +3087,67 @@ def build_workbook(export_path, out_path, config: Config | None = None,
               f'"ok","CHECK, "&Fits!$B${base + 4}&": the correction moves the anchors "&TEXT(Fits!$B${base + 3}*100,'
               f'"0.00")&" points further from certified {pct}; check the drift monitors beside them and Setup B37, or '
               f'set Setup B35 to Off")))')
+
+    # 1.4.15: the floor the size series sets, the 1σ of the final values, and the acetanilide
+    qsec(183, 'Size series floor, 1σ, and the acetanilide (1.4.15)')
+    qc.cell(184, 1, 'The smallest linearity standards whose delta after the blank step lies off the line through the '
+                    'larger ones raise the floor below which a peak is marked for a rerun (Setup B78 and B79). 1σ '
+                    'holds the corrections in force (B83) and the drift monitors\' scatter where it is larger (B84), '
+                    'and every acetanilide analysis is held against it (B85).').font = F_NOTE
+    for r_, el_, area_, s21, s80 in ((185, 'N', '28', 21, 80), (186, 'C', '44', 22, 81)):
+        b_ = FL[el_]
+        src_ = f'Fits!$B${b_ + 4}'
+        qline(r_, f'Lowest Area {area_} trusted (Vs)', f'=Fits!$B${81 if el_ == "N" else 82}', '0.000',
+              f'=IF(Fits!$B${b_}>{NFLOOR},"CHECK: the size series has more standards than the table on Fits holds '
+              f'({NFLOOR}); build a new workbook for this export",IF({src_}="configuration","set in Setup B{s21}",'
+              f'IF({src_}="series floor","the floor the size series sets: its "&IF(Fits!$B${b_ + 2}=1,'
+              f'"smallest standard lies","smallest "&TEXT(Fits!$B${b_ + 2},"0")&" standards lie")&" off the line '
+              f'through the larger ones (Fits rows {FBK[el_] - 2} onwards)",IF({src_}="smallest standard",'
+              f'"the smallest linearity standard"&IF({S_FOFF}="",", Setup B78 being empty",IF(Fits!$B${b_}<4,'
+              f'", with fewer than four standards to walk up",", on the line through the larger ones")),'
+              f'IF({src_}="lab minimum","the lab minimum, Setup B{s80}: this run has no size series",'
+              f'"no limit: this run has no size series, and Setup B{s80} is empty")))))')
+    RES_C, RES_Q = f'Results!$C$5:$C${4 + NSAMP}', f'Results!$Q$5:$Q${4 + NSAMP}'
+    qline(187, 'Samples below the series floor or the lab minimum',
+          f'=COUNTIFS({RES_C},"Sample",{RES_Q},"*below series floor*")'
+          f'+COUNTIFS({RES_C},"Sample",{RES_Q},"*below the minimum peak*")', '0',
+          '=IF($B$187=0,"ok","CHECK: each is marked for a rerun of that element, with a mass to weigh, on the Rerun '
+          'sheet")')
+    for r_, el_ in ((188, 'N'), (189, 'C')):
+        g_, name_ = SG[el_], SIG_REFS[el_]['name']
+        n_, sd_, rep_, p_ = (f'Fits!$B${g_ + k}' for k in (0, 1, 2, 4))
+        larger_, used_ = f'Fits!$B${g_ + 5}', f'Fits!$B${g_ + 6}'
+        pt_ = f'IF(ISNUMBER({p_})," (p = "&TEXT({p_},"0.000")&")","")'
+        qline(r_, f'Drift monitors\' SD after every correction, {name_} (permil)', f'={sd_}', '0.000',
+              f'=IF({n_}<3,"fewer than three drift monitors: not compared",IF(NOT(ISNUMBER({rep_})),'
+              f'"no repeatability in use to compare with",IF({used_}="Yes","larger than the repeatability in use, "'
+              f'&TEXT({rep_},"0.000")&{pt_}&", so 1σ takes it in its place (Setup B84)",IF({larger_}="Yes",'
+              f'"larger than the repeatability in use, "&TEXT({rep_},"0.000")&{pt_}&", and not used (Setup B84)",'
+              f'"ok, within the repeatability in use, "&TEXT({rep_},"0.000")))))')
+    for r_, el_ in ((190, 'N'), (191, 'C')):
+        t0_, name_ = S_T(el_, 0), SIG_REFS[el_]['name']
+        I_ = f'Fits!$I${t0_}:$I${t0_ + 2}'
+        term_ = lambda k_: (f'IF(Fits!$C${t0_ + k_}="Yes",TEXT(Fits!$I${t0_ + k_},"0.000"),'  # noqa: E731
+                            f'IF(Fits!$B${t0_ + k_}="Yes","no term","not in force"))')
+        qline(r_, f'Largest term of a correction in 1σ({name_}) (permil)', f'=IF(COUNT({I_})=0,"",MAX({I_}))',
+              '0.000',
+              f'=IF({S_KRAG}<>"On","switched off in Setup B83",IF(COUNTIF(Fits!$C${t0_}:$C${t0_ + 2},"Yes")=0,'
+              f'"no correction in force carries a term","blank "&{term_(0)}&", linearity "&{term_(1)}&", drift "'
+              f'&{term_(2)}&" permil, the largest over the run (Fits rows {t0_} to {t0_ + 2})"))')
+    for r_, el_ in ((192, 'N'), (193, 'C')):
+        a_, name_ = ACE[el_], SIG_REFS[el_]['name']
+        qline(r_, f'Acetanilide analyses\' SD, {name_} (permil)', f'=Fits!$B${a_ + 2}', '0.000',
+              f'=IF({S_ACE}<>"On","switched off in Setup B85",IF(NOT(ISNUMBER(Fits!$B${a_ + 5})),"not judged: '
+              f'fewer than three analyses, or no repeatability to hold them against",IF(Fits!$B${a_ + 6}="Yes",'
+              f'"CHECK: the "&TEXT(Fits!$B${a_},"0")&" analyses scatter more than the samples\' repeatability, "'
+              f'&TEXT(Fits!$B${a_ + 3},"0.000")&" (p = "&TEXT(Fits!$B${a_ + 5},"0.000")&"), so every sample\'s '
+              f'{name_} is marked for a check","ok, held against "&TEXT(Fits!$B${a_ + 3},"0.000")&" (p = "'
+              f'&TEXT(Fits!$B${a_ + 5},"0.000")&")")))')
+    qline(194, 'Drift monitors off their accepted value', f'=Fits!$B${MO_CNT}', '0',
+          f'=IF(Fits!$B${MO_N}=0,"not judged: the standards table gives the drift monitors no accepted value",'
+          f'IF($B$194=0,"ok","CHECK: a problem of the whole run on the Rerun sheet"))')
+    qline(195, 'Corrections fitted but not applied', f'=Fits!$B${UA_CNT}', '0',
+          '=IF($B$195=0,"none","listed on the Rerun sheet, with how far applying each would move the samples")')
 
     from openpyxl.chart import ScatterChart, Reference, Series
     from openpyxl.chart.marker import Marker

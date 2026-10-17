@@ -27,7 +27,7 @@ import pytest
 
 from ea_irms.parse import parse_export
 from ea_irms.pipeline import ROBUST_SD, Config, _mass_window, config_from_dict, config_to_dict, process
-from ea_irms.workbook import build_workbook
+from ea_irms.workbook import RERUN_FIRST_ROW, build_workbook
 from isoharness.serialize import results_csv
 
 DATA = Path(__file__).resolve().parent / "data"
@@ -64,16 +64,22 @@ CARRY = ((36, 3, "Area 28", 177.124), (37, 3, "BGD 28", 9.0))
 
 
 def test_marks_on_the_test_run():
-    positions, F = process(parse_export(RUN), Config())
+    # 1.4.15: the acetanilide's whole-run check is off here, so each mark is the one the sample's own flags give.
+    # On, the default, it fires on this run and adds a check to every other sample (test_engine_1415.py).
+    positions, F = process(parse_export(RUN), Config(ace_scatter_check="Off"))
     marks = {p.row: p.rerun for p in positions if p.rerun}
-    assert marks == {20: "Check", 21: "Check", 23: "C", 24: "Check", 25: "Check",
+    # 1.4.15: the size series sets the floor. Its smallest standard (8.889 Vs) reads 1.02 permil off the line
+    # through the three larger ones, so the floor is the next one, 12.058 Vs, and position 21 (10.11 Vs of N2),
+    # a check before, is marked for a rerun of N
+    assert marks == {20: "Check", 21: "N", 23: "C", 24: "Check", 25: "Check",
                      40: "N and C", 41: "N and C", 43: "N and C", 44: "N and C",
                      45: "N and C", 47: "N and C", 53: "N"}
     assert all(p.rerun is None for p in positions if p.role != "Sample")
-    p53 = next(p for p in positions if p.row == 53)
+    p21, p53 = (next(p for p in positions if p.row == r) for r in (21, 53))
+    assert p21.rerun_why == "N below series floor; ran before the background settled"
     assert p53.rerun_why == "N below linearity range; no C peak; N peak only 0.7x the blank"
     assert all(p.rerun_mass is None for p in positions)          # its samples carry no mass
-    assert F["rerun"]["counts"] == {"N": 1, "C": 1, "N and C": 6, "Check": 4}
+    assert F["rerun"]["counts"] == {"N": 2, "C": 1, "N and C": 6, "Check": 3}
     assert F["rerun"]["run_level_text"] == "none found"
     # 1.4.7: peaks above the linearity range, all under 50,000 mV, are flagged and not marked
     p23, p29, p33 = (next(p for p in positions if p.row == r) for r in (23, 29, 33))
@@ -107,7 +113,9 @@ def test_possible_carryover_marks_a_check(tmp_path):
     marked a rerun of N and C. An element with a reason of its own is still marked, with the carryover in
     the Why."""
     carried = variant(tmp_path, "carry", masses=True, shifts=CARRY)
-    positions, F = process(parse_export(carried), Config())
+    # 1.4.15: the acetanilide's whole-run check, which fires on this run and would mark 37 for a check by itself, is
+    # off, so the check is the carryover's alone
+    positions, F = process(parse_export(carried), Config(ace_scatter_check="Off"))
     by = {p.row: p for p in positions}
     assert F["carryover"]["flagged"] == [37] and by[36].oversized
     assert by[37].role == "Sample" and by[37].carry_rise == pytest.approx(9.0)
@@ -115,7 +123,8 @@ def test_possible_carryover_marks_a_check(tmp_path):
         "Check", "possible carryover from an oversized sample", None)
     assert by[38].role == "Drift" and by[38].rerun is None          # exposed, with no rise
     # CO2 at position 37 reads 6,395 mV, so a limit of 6,000 mV marks C, and only C
-    positions, _ = process(parse_export(carried), config_from_dict({"max_amplitude_mv": 6000}))
+    positions, _ = process(parse_export(carried), config_from_dict({"max_amplitude_mv": 6000,
+                                                                    "ace_scatter_check": "Off"}))
     p37 = next(p for p in positions if p.row == 37)
     assert p37.rerun == "C" and p37.rerun_mass not in (None, "none")
     assert p37.rerun_why == "possible carryover from an oversized sample; CO2 peak at or above 6000 mV"
@@ -136,8 +145,10 @@ def test_texts_put_carryover_among_the_checks(tmp_path):
 def test_large_peaks_are_marked_only_at_the_instrument_limit():
     old, _ = process(parse_export(RUN), config_from_dict({"max_amplitude_mv": None}))
     assert {p.row: p.rerun for p in old if p.row in (23, 29, 33)} == {23: "N and C", 29: "C", 33: "N and C"}
-    # CO2 at position 29 reads 10,125 mV and at 33 12,392 mV; N2 at 29 reads 3,000 mV, inside the range
-    positions, F = process(parse_export(RUN), config_from_dict({"max_amplitude_mv": 10000}))
+    # CO2 at position 29 reads 10,125 mV and at 33 12,392 mV; N2 at 29 reads 3,000 mV, inside the range. The
+    # acetanilide's whole-run check (1.4.15), whose flag would lead the Why, is off.
+    positions, F = process(parse_export(RUN), config_from_dict({"max_amplitude_mv": 10000,
+                                                                "ace_scatter_check": "Off"}))
     by = {p.row: p for p in positions}
     assert by[29].rerun == "C" and by[29].rerun_why == "CO2 peak at or above 10000 mV"
     assert by[33].rerun == "C" and by[33].rerun_why == "CO2 peak at or above 10000 mV"
@@ -152,7 +163,7 @@ def test_large_peaks_are_marked_only_at_the_instrument_limit():
 def test_a_1sigma_above_the_limit_marks_its_element():
     positions, _ = process(parse_export(RUN), Config())
     samples = [p for p in positions if p.role == "Sample"]
-    assert max(p.u_d15n for p in samples if p.u_d15n is not None) < 0.5        # 0.299 at most
+    assert max(p.u_d15n for p in samples if p.u_d15n is not None) < 0.5        # 0.2998 at most, position 25
     assert not any("1σ(" in (p.rerun_why or "") for p in samples)
     tight, _ = process(parse_export(RUN), config_from_dict({"rerun_max_1sigma": 0.25}))
     for p in (q for q in tight if q.role == "Sample"):
@@ -161,7 +172,9 @@ def test_a_1sigma_above_the_limit_marks_its_element():
         if over_n:
             assert p.rerun in ("N", "N and C")
     assert sum(1 for p in tight if p.rerun_why and "1σ(d15N)" in p.rerun_why) > 0
-    off, _ = process(parse_export(RUN), config_from_dict({"rerun_max_1sigma": None, "max_amplitude_mv": None}))
+    # both rules off, as before 1.4.7, and the acetanilide's whole-run check of 1.4.15 too
+    off, _ = process(parse_export(RUN), config_from_dict({"rerun_max_1sigma": None, "max_amplitude_mv": None,
+                                                          "ace_scatter_check": "Off"}))
     old = {p.row: (p.rerun, p.rerun_why) for p in off}
     assert old[29] == ("C", "C above linearity range")
 
@@ -217,7 +230,11 @@ def test_problems_of_the_whole_run():
     items = F["rerun"]["run_level"]
     assert any(t.startswith("anchors outside 0.5σ, %N: ") for t in items)
     assert any(t.startswith("N2 reference pulses SD ") and t.endswith("at or above 0.05") for t in items)
+    # 1.4.15: with the defaults the test run has one problem of the whole run, the acetanilide's d15N scatter
+    # (test_engine_1415.py); with that check off it has none
     _, F = process(parse_export(RUN), config_from_dict({"ref_gas_sd_limit": None}))
+    assert [t.split(",")[0] for t in F["rerun"]["run_level"]] == ["acetanilide d15N"]
+    _, F = process(parse_export(RUN), config_from_dict({"ref_gas_sd_limit": None, "ace_scatter_check": "Off"}))
     assert F["rerun"]["run_level_text"] == "none found"
 
 
@@ -306,10 +323,11 @@ def test_workbook_agrees_with_engine(computed, name):
         for h, attr in (("1σ(%N)", "u_pct_n"), ("1σ(d15N)", "u_d15n"), ("%N as measured", "pct_n_measured")):
             assert _close(getattr(p, attr), rs.cell(i, head[h]).value), (name, p.row, h)
     marked = [p for p in positions if p.rerun]
-    assert [rr.cell(8 + k, 1).value for k in range(len(marked))] == [p.row for p in marked]
-    assert rr.cell(8 + len(marked), 1).value in (None, "")
+    top = RERUN_FIRST_ROW                  # 1.4.15: below the corrections fitted but not applied (row 8 before)
+    assert [rr.cell(top + k, 1).value for k in range(len(marked))] == [p.row for p in marked]
+    assert rr.cell(top + len(marked), 1).value in (None, "")
     for k, p in enumerate(marked):
-        assert [rr.cell(8 + k, j).value or "" for j in (5, 6, 7)] == [p.rerun, p.rerun_why, p.rerun_mass or ""]
+        assert [rr.cell(top + k, j).value or "" for j in (5, 6, 7)] == [p.rerun, p.rerun_why, p.rerun_mass or ""]
     for base, el in ((339, "n"), (343, "c")):
         po = F["pulse_off"][el]
         for off, key in ((0, "n"), (1, "median"), (2, "robust_sd"), (3, "limit")):
@@ -328,6 +346,6 @@ def test_workbook_agrees_with_engine(computed, name):
 def test_rows_are_shaded_by_their_mark(computed):
     folder, _ = computed
     wb = openpyxl.load_workbook(folder / "default.xlsx")
-    for sheet, col in (("Results", "$R5"), ("Rerun", "$E8")):
+    for sheet, col in (("Results", "$R5"), ("Rerun", f"$E{RERUN_FIRST_ROW}")):
         rules = [r for rng in wb[sheet].conditional_formatting for r in rng.rules]
         assert {r.formula[0] for r in rules} == {f'{col}="Check"', f'AND({col}<>"",{col}<>"Check")'}
